@@ -1,0 +1,15 @@
+[package]
+name = "rustunifimcp"
+description = "Enterprise MCP server for UniFi Network"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+rustunifimcp-core.workspace = true
+
+[lints]
+workspace = true

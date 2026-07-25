@@ -1,0 +1,16 @@
+/target
+**/*.rs.bk
+
+# Cargo.lock IS committed — this workspace ships a binary.
+
+# Never commit real authentication material, even hashed.
+tokens.json
+*.tokens.json
+!*/tests/fixtures/*-tokens.json
+
+# Controller inventory carries site names and controller addresses.
+controllers.json
+!*/tests/fixtures/*-controllers.json
+
+.env
+.DS_Store
