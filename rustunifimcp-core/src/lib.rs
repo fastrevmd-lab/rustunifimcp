@@ -9,6 +9,7 @@
 //! phase sequence and the `mecmcp` crates each phase is gated on.
 
 pub mod error;
+pub mod inventory;
 
 /// The UniFi API surface an endpoint belongs to.
 ///
