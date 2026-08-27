@@ -14,6 +14,7 @@ pub mod inventory;
 pub mod model;
 pub mod testing;
 pub mod tools;
+pub mod version;
 
 /// The UniFi API surface an endpoint belongs to.
 ///

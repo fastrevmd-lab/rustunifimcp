@@ -75,7 +75,19 @@ report success.
 3. **If the gate fails** — the script exits non-zero and prints each violation.
    Scrub the offending fields manually and re-run the gate until it passes.
 
-4. **Commit only after the gate passes** — a passing gate is not proof the
+4. **Update the version matrix** — add a row to `endpoint_available()` in
+   `rustunifimcp-core/src/version.rs` for the new version. Every row must be
+   justified by a fixture or an `.absent` marker — never guess. If any
+   endpoint returned HTTP 404, create a `.absent` marker file (e.g.,
+   `10.5.67/policies.absent`) in the version directory. The matrix test
+   (`tests/version_matrix.rs`) will fail if the matrix and fixtures disagree.
+
+5. **Remove the `#[ignore]` attribute** — once at least two controller versions
+   are recorded, remove the `#[ignore]` attribute from
+   `at_least_two_controller_versions_are_recorded()` in
+   `tests/version_matrix.rs`. This is Phase 1's exit criterion.
+
+6. **Commit only after the gate passes** — a passing gate is not proof the
    fixtures are safe (the denylist could be incomplete), but a failing gate is
    proof they are not.
 
