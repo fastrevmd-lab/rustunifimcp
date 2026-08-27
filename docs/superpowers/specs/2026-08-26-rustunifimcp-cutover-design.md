@@ -70,6 +70,7 @@ one. See §"Controller trust".
 | `mecmcp-server` | Tool registration, scope authorization, the write-tool registry |
 | `mecmcp-secret` | The UniFi API key: a zeroizing type plus a loader that rejects symlinks, oversized values, and group- or world-readable files |
 | `mecmcp-job` | Polling for asynchronous vendor work — first probe, capped backoff, cooperative cancellation, whole-operation deadline |
+| `mecmcp-openapi` | `expand_path` — path-template expansion that rejects a parameter which would span a segment, start a query, navigate the hierarchy, collapse a segment, or carry a control byte; plus `page` for bounded pagination |
 
 `mecmcp-secret` closes a gap the old design left open: it named the API key as
 the controller credential but never said where it lives. It lives in a 0600 file
@@ -81,7 +82,16 @@ named by `controllers.json`, never in the inventory file and never in an
 crate is the family's answer to that shape. Whether UniFi's responses fit
 `Probe::Pending` / `Probe::Ready` is a Phase 3 finding, not a design assertion.
 
-`mecmcp-device`, `mecmcp-scp`, and `mecmcp-openapi` are not expected to be used.
+`mecmcp-openapi::expand_path` is not optional. UniFi puts the site ID and the
+resource ID directly in the path on all three local surfaces, so every request
+this server builds interpolates caller-influenced values into a URL. The
+template expander refuses a parameter that would span a segment, start a query,
+navigate the hierarchy, collapse a segment, or carry a control byte — and it
+rejects rather than sanitises, because a rewritten value is a value the caller
+did not send. `rustproxmoxmcp` routes every request through it for the same
+reason.
+
+`mecmcp-device` and `mecmcp-scp` are not expected to be used.
 
 ### 4. The wildcard-scope rule is inherited, and it has a footgun
 
