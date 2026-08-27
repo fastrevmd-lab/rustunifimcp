@@ -2,7 +2,8 @@
 """Verify that fixture files contain no sensitive data.
 
 Scans JSON fixtures for credential-shaped fields, high-entropy values,
-public IP addresses, non-zero coordinates, and identifiers from a denylist.
+public IP addresses, non-zero coordinates, MAC addresses, and identifiers
+from a denylist.
 
 Exit codes:
     0  all fixtures clean
@@ -10,8 +11,10 @@ Exit codes:
     2  usage error
 """
 
+import hashlib
 import ipaddress
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -25,6 +28,11 @@ CREDENTIAL_PATTERN = re.compile(
 
 # High-entropy value pattern: base64-like strings 32+ chars
 HIGH_ENTROPY_PATTERN = re.compile(r'^[A-Za-z0-9+/]{32,}={0,2}$')
+
+# MAC address pattern (various formats)
+MAC_PATTERN = re.compile(
+    r'^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$|^([0-9A-Fa-f]{4}\.){2}([0-9A-Fa-f]{4})$',
+)
 
 # Accepted credential placeholder patterns
 PLACEHOLDER_PATTERNS = [
@@ -61,6 +69,18 @@ ALLOWED_PUBLIC_PREFIXES = [
     ipaddress.ip_network('2606:4700::/32'),  # Cloudflare
 ]
 
+# Special structural networks to allow (default routes, etc.)
+STRUCTURAL_NETWORKS = {
+    '::/0',      # IPv6 default route
+    '0.0.0.0/0', # IPv4 default route
+}
+
+# MAC address ranges to allow (documentation/synthetic)
+ALLOWED_MAC_PREFIXES = [
+    '02:00:',  # Locally administered
+    '00:00:5e:',  # Documentation range
+]
+
 # Geographic coordinate field names
 GEO_COORD_KEYS = {'lat', 'latitude', 'lng', 'longitude'}
 
@@ -74,6 +94,12 @@ DHCPV6_SUFFIX_KEYS = {
 def is_placeholder(value: str) -> bool:
     """Check if value matches an accepted credential placeholder."""
     return any(p.search(value) for p in PLACEHOLDER_PATTERNS)
+
+
+def is_allowed_mac(mac: str) -> bool:
+    """Check if MAC address is in allowed synthetic ranges."""
+    mac_upper = mac.upper().replace('-', ':').replace('.', ':')
+    return any(mac_upper.startswith(prefix.upper()) for prefix in ALLOWED_MAC_PREFIXES)
 
 
 def is_allowed_public_ip(addr_str: str) -> bool:
@@ -105,34 +131,60 @@ def is_allowed_public_ip(addr_str: str) -> bool:
         return False
 
 
-def extract_ips_from_value(value: Any) -> List[Tuple[str, str]]:
-    """Extract all IP addresses from a value (string, CIDR, etc).
+def is_allowed_network(net_str: str, net_obj: Any) -> bool:
+    """Check if a network is in allowed ranges or is structural.
 
-    Returns list of (original_value, normalized_ip) tuples.
+    Returns True if the network overlaps with documentation ranges or is structural.
+    """
+    # Check structural networks (default routes)
+    if net_str in STRUCTURAL_NETWORKS:
+        return True
+
+    # For networks that overlap with documentation ranges, allow them
+    if isinstance(net_obj, ipaddress.IPv4Network):
+        for doc_net in DOC_IPV4_RANGES:
+            if net_obj.overlaps(doc_net):
+                return True
+    elif isinstance(net_obj, ipaddress.IPv6Network):
+        for doc_net in DOC_IPV6_RANGES:
+            if net_obj.overlaps(doc_net):
+                return True
+
+    # Check if the network address itself is allowed
+    return is_allowed_public_ip(str(net_obj.network_address))
+
+
+def hash_value(value: str) -> str:
+    """Return short hash of a value for diagnostics."""
+    return hashlib.sha256(value.encode()).hexdigest()[:8]
+
+
+def extract_ips_from_value(value: Any) -> List[Tuple[str, Any]]:
+    """Extract all IP addresses/networks from a value.
+
+    Returns list of (original_value, parsed_ip_or_network) tuples.
     """
     if not isinstance(value, str):
         return []
 
-    ips = []
+    results = []
 
     # Try as direct IP
     try:
         addr = ipaddress.ip_address(value)
-        ips.append((value, str(addr)))
+        results.append((value, addr))
     except ValueError:
         pass
 
-    # Try as CIDR - report both the original and the parsed address
-    if not ips:
+    # Try as CIDR network
+    if not results:
         try:
             network = ipaddress.ip_network(value, strict=False)
-            # For CIDR, we want to check if the network contains public IPs
-            # Report the original value for clarity
-            ips.append((value, str(network.network_address)))
+            results.append((value, network))
         except ValueError:
             pass
 
-    return ips
+    return results
 
 
 def check_fixture(
@@ -164,7 +216,7 @@ def check_fixture(
                     if isinstance(value, str) and value and not is_placeholder(value):
                         violations.append(
                             f'{filepath}:{new_path} — credential-shaped field '
-                            f'(len={len(value)})'
+                            f'(len={len(value)}, hash={hash_value(value)})'
                         )
 
                 # Check 2: High-entropy values
@@ -174,37 +226,53 @@ def check_fixture(
                         if key not in STRUCTURAL_ID_KEYS and not is_placeholder(value):
                             violations.append(
                                 f'{filepath}:{new_path} — high-entropy value '
-                                f'(len={len(value)})'
+                                f'(len={len(value)}, hash={hash_value(value)})'
                             )
 
                 # Check 3: Public IPs (skip policies.json and DHCPv6 suffixes)
                 if not in_policies and isinstance(value, str):
                     # Skip DHCPv6 suffix fields (contain host parts, not full IPs)
                     if key not in DHCPV6_SUFFIX_KEYS:
-                        for original_val, ip_str in extract_ips_from_value(value):
-                            try:
-                                addr = ipaddress.ip_address(ip_str)
-                                if addr.is_global and not is_allowed_public_ip(ip_str):
+                        for original_val, parsed in extract_ips_from_value(value):
+                            # Check if it's an IP address or network
+                            if isinstance(parsed, ipaddress.IPv4Address) or isinstance(parsed, ipaddress.IPv6Address):
+                                # It's an address
+                                if parsed.is_global and not is_allowed_public_ip(str(parsed)):
                                     violations.append(
-                                        f'{filepath}:{new_path} — public IP {original_val}'
+                                        f'{filepath}:{new_path} — public IP '
+                                        f'(len={len(original_val)}, hash={hash_value(original_val)})'
                                     )
-                            except ValueError:
-                                pass
+                            elif isinstance(parsed, ipaddress.IPv4Network) or isinstance(parsed, ipaddress.IPv6Network):
+                                # It's a network - check if the network is global
+                                if parsed.is_global and not is_allowed_network(original_val, parsed):
+                                    violations.append(
+                                        f'{filepath}:{new_path} — public IP network '
+                                        f'(len={len(original_val)}, hash={hash_value(original_val)})'
+                                    )
 
                 # Check 4: Non-zero coordinates
                 if key.lower() in GEO_COORD_KEYS:
                     if isinstance(value, (int, float)) and value != 0.0:
                         violations.append(
-                            f'{filepath}:{new_path} — non-zero coordinate {value}'
+                            f'{filepath}:{new_path} — non-zero coordinate '
+                            f'(hash={hash_value(str(value))})'
                         )
 
-                # Check 5: Denylist matches
+                # Check 5: MAC addresses (unless in allowed ranges or structural keys)
+                if isinstance(value, str) and MAC_PATTERN.match(value):
+                    if key not in STRUCTURAL_ID_KEYS and not is_allowed_mac(value):
+                        violations.append(
+                            f'{filepath}:{new_path} — MAC address '
+                            f'(len={len(value)}, hash={hash_value(value)})'
+                        )
+
+                # Check 6: Denylist matches
                 if isinstance(value, str):
                     for denied in denylist:
                         if denied in value.lower():
                             violations.append(
                                 f'{filepath}:{new_path} — denylist match '
-                                f'"{denied}" (len={len(value)})'
+                                f'(len={len(value)}, hash={hash_value(value)})'
                             )
 
                 walk(value, new_path)
@@ -218,30 +286,38 @@ def check_fixture(
     return violations
 
 
-def load_denylist(denylist_path: Path) -> Set[str]:
+def load_denylist(denylist_path: Path, allow_missing: bool = False) -> Set[str]:
     """Load identifier denylist from file.
 
-    Falls back to the example file if the real denylist is missing, but
-    prints a clear warning that identifier checking is therefore inactive.
+    If the denylist is missing and allow_missing is False, exits with error.
+    If allow_missing is True, prints a loud warning and returns empty set.
     """
     if not denylist_path.exists():
-        # Fall back to example, but warn loudly
-        example_path = denylist_path.parent / 'fixture-denylist.example.txt'
-        if example_path.exists():
-            print(
-                'WARNING: No local denylist configured. Identifier checking is INACTIVE.',
-                file=sys.stderr
-            )
-            print(
-                f'  Copy {example_path.name} to {denylist_path.name} and add your '
-                'identifiers before capturing fixtures.',
-                file=sys.stderr
-            )
+        if allow_missing:
+            # Explicit opt-out: warn loudly but continue
+            print('=' * 70, file=sys.stderr)
+            print('WARNING: Denylist checking is DISABLED', file=sys.stderr)
+            print(f'  Missing: {denylist_path}', file=sys.stderr)
+            print('  Running with --allow-missing-denylist', file=sys.stderr)
+            print('  Other checks (credentials, IPs, coordinates, MACs) still active', file=sys.stderr)
+            print('=' * 70, file=sys.stderr)
             print(file=sys.stderr)
-            denylist_path = example_path
-        else:
-            # Neither real nor example exists — continue with empty set
             return set()
+        else:
+            # Fail closed
+            example_path = denylist_path.parent / 'fixture-denylist.example.txt'
+            print('ERROR: Denylist file is missing', file=sys.stderr)
+            print(f'  Expected: {denylist_path}', file=sys.stderr)
+            print(file=sys.stderr)
+            print('  To create it:', file=sys.stderr)
+            print(f'    cp {example_path} {denylist_path}', file=sys.stderr)
+            print('    # Then add your site-specific identifiers', file=sys.stderr)
+            print(file=sys.stderr)
+            print('  To run without denylist checking (CI/test environments):', file=sys.stderr)
+            print('    export ALLOW_MISSING_DENYLIST=1', file=sys.stderr)
+            print('    # or pass --allow-missing-denylist', file=sys.stderr)
+            print(file=sys.stderr)
+            sys.exit(1)
 
     denylist = set()
     with open(denylist_path, 'r', encoding='utf-8') as f:
@@ -256,11 +332,20 @@ def load_denylist(denylist_path: Path) -> Set[str]:
 
 def main() -> int:
     """Run fixture verification."""
-    if len(sys.argv) < 2:
-        print('Usage: verify-fixtures-scrubbed.py <fixture-dir>', file=sys.stderr)
+    # Check for --allow-missing-denylist flag or env var
+    allow_missing = (
+        '--allow-missing-denylist' in sys.argv
+        or os.environ.get('ALLOW_MISSING_DENYLIST') == '1'
+    )
+    
+    # Remove flag from argv so it doesn't interfere with positional arg parsing
+    args = [a for a in sys.argv[1:] if a != '--allow-missing-denylist']
+
+    if len(args) < 1:
+        print('Usage: verify-fixtures-scrubbed.py [--allow-missing-denylist] <fixture-dir>', file=sys.stderr)
         return 2
 
-    fixture_dir = Path(sys.argv[1])
+    fixture_dir = Path(args[0])
     if not fixture_dir.is_dir():
         print(f'Error: {fixture_dir} is not a directory', file=sys.stderr)
         return 2
@@ -268,7 +353,7 @@ def main() -> int:
     # Load denylist
     script_dir = Path(__file__).parent
     denylist_path = script_dir / 'fixture-denylist.txt'
-    denylist = load_denylist(denylist_path)
+    denylist = load_denylist(denylist_path, allow_missing)
 
     # Find all JSON fixtures
     fixtures = sorted(fixture_dir.glob('*.json'))
