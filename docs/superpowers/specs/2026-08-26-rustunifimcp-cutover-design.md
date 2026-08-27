@@ -250,7 +250,8 @@ pub struct Atomicity {
 Shared code that renders approval prompts can then be honest per vendor instead
 of uniformly optimistic.
 
-**Blocks on:** nothing. **Output:** a `mecmcp` issue.
+**Blocks on:** nothing. **Output:** a `mecmcp` issue — filed 2026-08-26 as
+[mecmcp#335](https://github.com/fastrevmd-lab/mecmcp/issues/335).
 
 ### Phase 0b — Controller certificate
 

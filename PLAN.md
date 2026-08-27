@@ -29,7 +29,7 @@ configuration writes until Phase 7 removes the last dependency on it.
 
 | Phase | What | Blocks on |
 |---|---|---|
-| **0a** | Upstream: file the `Atomicity` capability against `mecmcp-changeset` | — |
+| **0a** | Upstream: `Atomicity` capability against `mecmcp-changeset` — filed as [mecmcp#335](https://github.com/fastrevmd-lab/mecmcp/issues/335) ✅ | — |
 | **0b** | Controller certificate — issue `unifi.mechub.org`, install, renewal hook | — |
 | **0c** | Recorded fixtures + the legacy parity audit | 0b |
 | **1** | UniFi client and resource model; no MCP surface | 0c |

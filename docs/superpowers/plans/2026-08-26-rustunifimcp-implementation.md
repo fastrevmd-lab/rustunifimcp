@@ -177,7 +177,9 @@ git add -A docs
 git commit -m "docs: record the upstream Atomicity issue number"
 ```
 
-**Verification:** `gh issue view NNN --repo fastrevmd-lab/mecmcp` shows the issue open. This task has no test — its deliverable is upstream.
+**Verification:** `gh issue view 335 --repo fastrevmd-lab/mecmcp` shows the issue open. This task has no test — its deliverable is upstream.
+
+**Done 2026-08-26 — [mecmcp#335](https://github.com/fastrevmd-lab/mecmcp/issues/335).** The filed issue argues from three quoted trait contracts rather than the one the plan anticipated: `fingerprint()` is defined over "the device's candidate configuration"; `stage()` requires that a partial failure "must revert the first action"; and `rollback(to: RollbackRef)` enumerates only Junos archives and PAN-OS candidate revert. UniFi satisfies none of the three. The proposal uses a **defaulted** `atomicity()` method so Junos and PAN-OS are unchanged and the change is non-breaking.
 
 ---
 
