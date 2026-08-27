@@ -51,9 +51,11 @@ Fixture files **must not contain**:
    `longitude` fields with values other than `0.0`.
 
 5. **Denied identifiers** — any substring match (case-insensitive) against
-   entries in `scripts/fixture-denylist.txt`. **Before capturing a new
-   controller version**, add any personal or site-specific identifiers to this
-   file.
+   entries in `scripts/fixture-denylist.txt`. **This file is local-only and not
+   committed** because it necessarily contains the identifiers it exists to
+   protect. Copy `scripts/fixture-denylist.example.txt` to
+   `scripts/fixture-denylist.txt` and add your own identifiers **before
+   capturing a new controller version**.
 
 ## Verification Gate
 
@@ -70,9 +72,10 @@ report success.
 
 ## Adding a New Controller Version Safely
 
-1. **Update the denylist first** — append any personal or site-specific
-   identifiers (SSID names, surnames, site names) to
-   `scripts/fixture-denylist.txt`.
+1. **Update the denylist first** — if `scripts/fixture-denylist.txt` does not
+   yet exist, copy it from `scripts/fixture-denylist.example.txt` first. Then
+   append any personal or site-specific identifiers (SSID names, surnames, site
+   names) to `scripts/fixture-denylist.txt`.
 
 2. **Run the capture** — `scripts/capture-fixtures.sh` will invoke the
    verification gate automatically at the end.

@@ -28,3 +28,6 @@ controllers.json
 # scripts/capture-fixtures.sh against a live controller.
 rustunifimcp-core/tests/fixtures/*/
 !rustunifimcp-core/tests/fixtures/README.md
+
+# Real fixture denylist is local-only (contains the identifiers it protects).
+scripts/fixture-denylist.txt

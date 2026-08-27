@@ -18,7 +18,7 @@ capture in Task 4.
 | Hardware | UniFi Cloud Key Gen2 Plus (`UCK-G2-Plus`, API `shortname: UCKP`) |
 | Name | `UCK G2 Plus <console-name>` |
 | MAC | `<console-mac>` |
-| Address | `192.168.1.30` — `unifi.mechub.org` already resolves here |
+| Address | `<controller-ip>` — `<controller-fqdn>` already resolves here |
 | Front end | nginx, UniFi OS |
 
 ## Before state — captured 2026-08-27T01:40:52Z
@@ -26,7 +26,7 @@ capture in Task 4.
 This is the revert evidence. Keep it.
 
 ```
-$ echo | openssl s_client -connect 192.168.1.30:443 -servername unifi.mechub.org \
+$ echo | openssl s_client -connect <controller-ip>:443 -servername <controller-fqdn> \
     | openssl x509 -noout -subject -issuer -dates -ext subjectAltName -fingerprint -sha256
 
 subject=CN=unifi.local
@@ -38,17 +38,17 @@ X509v3 Subject Alternative Name:
 sha256 Fingerprint=E1:4E:E6:C7:43:DC:28:83:10:D4:79:AD:F8:99:6C:B3:4B:82:7A:ED:50:02:F8:EB:88:A3:07:C4:CF:07:E8:E7
 ```
 
-Self-signed, and its SAN covers neither `192.168.1.30` nor `unifi.mechub.org`.
+Self-signed, and its SAN covers neither `<controller-ip>` nor `<controller-fqdn>`.
 Adding it as a trust anchor would therefore *still* fail the name check — which
 is why the certificate is replaced rather than pinned.
 
 ## DONE — 2026-08-27
 
-Installed and verified. `https://unifi.mechub.org/` returns 200 with full chain
+Installed and verified. `https://<controller-fqdn>/` returns 200 with full chain
 verification (`ssl_verify_result=0`), and the API answers over it:
 
 ```
-subject=CN=unifi.mechub.org
+subject=CN=<controller-fqdn>
 issuer=C=US, O=Let's Encrypt, CN=YR2
 notAfter=Nov 25 01:21:09 2026 GMT
 ```
@@ -84,8 +84,8 @@ Three paths were exercised, not assumed:
 ### Original blocker, for the record — SSH was disabled
 
 ```
-$ ssh root@192.168.1.30
-ssh: connect to host 192.168.1.30 port 22: Connection refused
+$ ssh root@<controller-ip>
+ssh: connect to host <controller-ip> port 22: Connection refused
 ```
 
 UniFi OS ships with SSH off. Installing a certificate on this hardware means
@@ -98,17 +98,17 @@ required regardless of how the first install happens.
 
 **Resolved:** SSH enabled in the UniFi OS UI. That screen offers only a password
 on this firmware, so pve2's root key was installed with `ssh-copy-id
-root@192.168.1.30` and the hook authenticates by key.
+root@<controller-ip>` and the hook authenticates by key.
 
 **Known maintenance step:** a UniFi OS firmware update can clear
 `/root/.ssh/authorized_keys`. The hook fails loudly with the fix in its message
-when that happens — re-run `ssh-copy-id root@192.168.1.30` from pve2.
+when that happens — re-run `ssh-copy-id root@<controller-ip>` from pve2.
 
 ## What is already ready
 
 - `certbot` on pve2, authenticator `dns-cloudflare`, credentials
   `/etc/letsencrypt/cloudflare.ini`, ECDSA keys, ACME v02.
-- `unifi.mechub.org` already resolves to `192.168.1.30` in Cloudflare DNS, so no
+- `<controller-fqdn>` already resolves to `<controller-ip>` in Cloudflare DNS, so no
   new record is needed for the controller itself.
 - Five sibling deploy hooks to model on, newest is
   `/etc/letsencrypt/renewal-hooks/deploy/prod-proxmoxmcp-lxc971`.
@@ -122,11 +122,11 @@ Issuance is unblocked. Only installation is blocked.
    this — the revert path depends on it.
 2. **Issue:**
    ```sh
-   ssh root@pve2.mechub.org
+   ssh root@<certbot-host>
    certbot certonly --dns-cloudflare \
      --dns-cloudflare-credentials /etc/letsencrypt/cloudflare.ini \
      --dns-cloudflare-propagation-seconds 30 \
-     --key-type ecdsa -d unifi.mechub.org
+     --key-type ecdsa -d <controller-fqdn>
    ```
 3. **Install** `fullchain.pem` → `/data/unifi-core/config/unifi-core.crt` and
    `privkey.pem` → `/data/unifi-core/config/unifi-core.key` (0600), then
@@ -140,20 +140,20 @@ Issuance is unblocked. Only installation is blocked.
    `pct exec`, since the target is an appliance, not an LXC.
 5. **Verify — the gate.** No `-k` anywhere:
    ```sh
-   echo | openssl s_client -connect unifi.mechub.org:443 -servername unifi.mechub.org \
+   echo | openssl s_client -connect <controller-fqdn>:443 -servername <controller-fqdn> \
      | openssl x509 -noout -subject -issuer -dates -ext subjectAltName
-   curl -sS -o /dev/null -w '%{http_code}\n' https://unifi.mechub.org/
+   curl -sS -o /dev/null -w '%{http_code}\n' https://<controller-fqdn>/
    ```
-   Expect `subject=CN=unifi.mechub.org`, a real issuer, `DNS:unifi.mechub.org`
+   Expect `subject=CN=<controller-fqdn>`, a real issuer, `DNS:<controller-fqdn>`
    in the SAN, and `200`. A TLS error here means the phase is not done — do not
    proceed to Task 4.
 6. **Confirm the API key still works over the new certificate:**
    ```sh
    curl -sS -H "X-API-KEY: $UNIFI_API_KEY" \
-     https://unifi.mechub.org/proxy/network/integration/v1/sites | head -c 400
+     https://<controller-fqdn>/proxy/network/integration/v1/sites | head -c 400
    ```
 7. **Prove the hook fires:**
-   `certbot renew --force-renewal --cert-name unifi.mechub.org`, then repeat
+   `certbot renew --force-renewal --cert-name <controller-fqdn>`, then repeat
    step 5.
 
 ## Revert

@@ -123,7 +123,7 @@ fn gate_fails_on_public_ipv4_in_cidr() {
 
     // Public IPv4 in CIDR form — the round 2 failure that regex missed
     let bad_fixture = r#"{
-        "wan_ip": "198.51.100.212/23"
+        "wan_ip": "203.0.114.212/23"
     }"#;
 
     fs::write(&fixture_path, bad_fixture).expect("failed to write fixture");
@@ -136,7 +136,7 @@ fn gate_fails_on_public_ipv4_in_cidr() {
         stderr
     );
     assert!(
-        stderr.contains("public IP") && stderr.contains("198.51.100.212"),
+        stderr.contains("public IP") && stderr.contains("203.0.114.212"),
         "Error should mention public IP address: {}",
         stderr
     );
@@ -147,9 +147,10 @@ fn gate_fails_on_global_ipv6() {
     let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
     let fixture_path = temp_dir.path().join("test.json");
 
-    // Global IPv6 address — the round 3 failure (Comcast prefix)
+    // Global IPv6 address. Not 2001:db8:: because that's the documentation
+    // prefix the gate must ACCEPT — this test proves rejection.
     let bad_fixture = r#"{
-        "wan6_ip": "2601:1234:5678:90ab::1"
+        "wan6_ip": "2001:470:1234:5678::1"
     }"#;
 
     fs::write(&fixture_path, bad_fixture).expect("failed to write fixture");
@@ -162,7 +163,7 @@ fn gate_fails_on_global_ipv6() {
         stderr
     );
     assert!(
-        stderr.contains("public IP") && stderr.contains("2601:1234:5678:90ab::1"),
+        stderr.contains("public IP") && stderr.contains("2001:470:1234:5678::1"),
         "Error should mention public IPv6: {}",
         stderr
     );

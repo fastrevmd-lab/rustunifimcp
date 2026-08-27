@@ -219,9 +219,29 @@ def check_fixture(
 
 
 def load_denylist(denylist_path: Path) -> Set[str]:
-    """Load identifier denylist from file."""
+    """Load identifier denylist from file.
+
+    Falls back to the example file if the real denylist is missing, but
+    prints a clear warning that identifier checking is therefore inactive.
+    """
     if not denylist_path.exists():
-        return set()
+        # Fall back to example, but warn loudly
+        example_path = denylist_path.parent / 'fixture-denylist.example.txt'
+        if example_path.exists():
+            print(
+                'WARNING: No local denylist configured. Identifier checking is INACTIVE.',
+                file=sys.stderr
+            )
+            print(
+                f'  Copy {example_path.name} to {denylist_path.name} and add your '
+                'identifiers before capturing fixtures.',
+                file=sys.stderr
+            )
+            print(file=sys.stderr)
+            denylist_path = example_path
+        else:
+            # Neither real nor example exists — continue with empty set
+            return set()
 
     denylist = set()
     with open(denylist_path, 'r', encoding='utf-8') as f:
