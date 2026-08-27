@@ -64,7 +64,7 @@ pub struct FirewallPolicy {
 
 /// Parses firewall groups from the Private v1 API response.
 pub fn parse_firewall_groups(val: &serde_json::Value) -> Result<Vec<FirewallGroup>, UnifiError> {
-    let data = super::unwrap_private_v1_data(val)?;
+    let data = super::unwrap_enveloped_data(val)?;
     data.iter()
         .map(|item| serde_json::from_value(item.clone()).map_err(|e| {
             UnifiError::Malformed(format!("firewall group parse failed: {e}"))

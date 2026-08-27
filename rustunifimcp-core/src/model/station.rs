@@ -31,7 +31,7 @@ pub struct Station {
 
 /// Parses stations from the Integration API response.
 pub fn parse_stations(val: &serde_json::Value) -> Result<Vec<Station>, UnifiError> {
-    let data = super::unwrap_integration_data(val)?;
+    let data = super::unwrap_enveloped_data(val)?;
     data.iter()
         .map(|item| serde_json::from_value(item.clone()).map_err(|e| {
             UnifiError::Malformed(format!("station parse failed: {e}"))

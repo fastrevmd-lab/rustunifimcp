@@ -22,21 +22,20 @@ pub mod site;
 pub mod station;
 pub mod stats;
 
-/// Unwraps the Integration API response envelope `{"data": [...], ...}`.
-fn unwrap_integration_data(val: &serde_json::Value) -> Result<&Vec<serde_json::Value>, UnifiError> {
+/// Unwraps an enveloped response `{"data": [...], ...}`.
+///
+/// Both the Integration API and the Private v1 surface wrap their payload as
+/// an object with a `data` array; this helper handles both.
+fn unwrap_enveloped_data(val: &serde_json::Value) -> Result<&Vec<serde_json::Value>, UnifiError> {
     val.get("data")
         .and_then(|d| d.as_array())
-        .ok_or_else(|| UnifiError::Malformed("expected Integration API envelope with data array".to_string()))
-}
-
-/// Unwraps the Private v1 API response envelope `{"meta": {...}, "data": [...]}`.
-fn unwrap_private_v1_data(val: &serde_json::Value) -> Result<&Vec<serde_json::Value>, UnifiError> {
-    val.get("data")
-        .and_then(|d| d.as_array())
-        .ok_or_else(|| UnifiError::Malformed("expected Private v1 envelope with data array".to_string()))
+        .ok_or_else(|| UnifiError::Malformed("expected an envelope object with a `data` array".to_string()))
 }
 
 /// Unwraps the Private v2 API response (plain array `[...]`).
+///
+/// Unlike the Integration API and Private v1, which wrap their payload in an
+/// envelope with a `data` field, Private v2 returns a bare JSON array directly.
 fn unwrap_private_v2_data(val: &serde_json::Value) -> Result<&Vec<serde_json::Value>, UnifiError> {
     val.as_array()
         .ok_or_else(|| UnifiError::Malformed("expected Private v2 plain array".to_string()))

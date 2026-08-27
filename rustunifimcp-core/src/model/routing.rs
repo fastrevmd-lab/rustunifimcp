@@ -38,7 +38,7 @@ pub struct TrafficRoute {
 
 /// Parses routes from the Private v1 API response.
 pub fn parse_routes(val: &serde_json::Value) -> Result<Vec<Route>, UnifiError> {
-    let data = super::unwrap_private_v1_data(val)?;
+    let data = super::unwrap_enveloped_data(val)?;
     data.iter()
         .map(|item| serde_json::from_value(item.clone()).map_err(|e| {
             UnifiError::Malformed(format!("route parse failed: {e}"))

@@ -114,7 +114,7 @@ pub struct RadiusProfile {
 
 /// Parses networks from the Private v1 API response.
 pub fn parse_networks(val: &serde_json::Value) -> Result<Vec<Network>, UnifiError> {
-    let data = super::unwrap_private_v1_data(val)?;
+    let data = super::unwrap_enveloped_data(val)?;
     data.iter()
         .map(|item| serde_json::from_value(item.clone()).map_err(|e| {
             UnifiError::Malformed(format!("network parse failed: {e}"))
@@ -124,7 +124,7 @@ pub fn parse_networks(val: &serde_json::Value) -> Result<Vec<Network>, UnifiErro
 
 /// Parses WLANs from the Private v1 API response.
 pub fn parse_wlans(val: &serde_json::Value) -> Result<Vec<Wlan>, UnifiError> {
-    let data = super::unwrap_private_v1_data(val)?;
+    let data = super::unwrap_enveloped_data(val)?;
     data.iter()
         .map(|item| serde_json::from_value(item.clone()).map_err(|e| {
             UnifiError::Malformed(format!("wlan parse failed: {e}"))
@@ -134,7 +134,7 @@ pub fn parse_wlans(val: &serde_json::Value) -> Result<Vec<Wlan>, UnifiError> {
 
 /// Parses port profiles from the Private v1 API response.
 pub fn parse_port_profiles(val: &serde_json::Value) -> Result<Vec<PortProfile>, UnifiError> {
-    let data = super::unwrap_private_v1_data(val)?;
+    let data = super::unwrap_enveloped_data(val)?;
     data.iter()
         .map(|item| serde_json::from_value(item.clone()).map_err(|e| {
             UnifiError::Malformed(format!("port profile parse failed: {e}"))
@@ -144,7 +144,7 @@ pub fn parse_port_profiles(val: &serde_json::Value) -> Result<Vec<PortProfile>, 
 
 /// Parses DHCP reservations from the Private v1 API response.
 pub fn parse_dhcp_reservations(val: &serde_json::Value) -> Result<Vec<DhcpReservation>, UnifiError> {
-    let data = super::unwrap_private_v1_data(val)?;
+    let data = super::unwrap_enveloped_data(val)?;
     data.iter()
         .map(|item| serde_json::from_value(item.clone()).map_err(|e| {
             UnifiError::Malformed(format!("dhcp reservation parse failed: {e}"))
@@ -154,7 +154,7 @@ pub fn parse_dhcp_reservations(val: &serde_json::Value) -> Result<Vec<DhcpReserv
 
 /// Parses RADIUS profiles from the Private v1 API response.
 pub fn parse_radius_profiles(val: &serde_json::Value) -> Result<Vec<RadiusProfile>, UnifiError> {
-    let data = super::unwrap_private_v1_data(val)?;
+    let data = super::unwrap_enveloped_data(val)?;
     data.iter()
         .map(|item| serde_json::from_value(item.clone()).map_err(|e| {
             UnifiError::Malformed(format!("radius profile parse failed: {e}"))
