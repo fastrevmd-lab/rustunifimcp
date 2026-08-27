@@ -18,25 +18,33 @@ does for Junos and [`rustpanosmcp`](https://github.com/fastrevmd-lab/rustpanosmc
 does for PAN-OS: a curated, scoped, audited MCP surface over one vendor's
 management API.
 
-It is the first server built **mecmcp-native** — no local authentication,
-transport, audit, policy, inventory, or change-control code at all. All of that
-comes from [`mecmcp`](https://github.com/fastrevmd-lab/mecmcp), the shared Rust
-foundation. What is written here is the UniFi client, the resource model, the
-tool surface, and the workflows. Nothing else.
+It is built **mecmcp-native** — no local authentication, transport, audit,
+policy, inventory, or change-control code at all. All of that comes from
+[`mecmcp`](https://github.com/fastrevmd-lab/mecmcp), the shared Rust foundation.
+What is written here is the UniFi resource model, the tool surface, and the
+workflows. Nothing else.
+
+UniFi is the first vendor in the family with **no candidate configuration at
+all** — no staging area, no commit, no on-box validation. Junos and PAN-OS have
+candidate/commit; Proxmox and Security Director have server-side task semantics
+to bind an approval to. UniFi has immediate REST writes against live
+configuration and nothing else, which makes it the real test of whether
+`mecmcp-changeset` generalises beyond the two vendors that produced it.
 
 ## Status
 
-**Design approved, implementation deferred.**
+**Design approved, implementation starting.**
 
-This repo currently holds the decisions, not the code. Implementation starts
-when `mecmcp` reaches the phases the plan depends on — today only `mecmcp-auth`
-exists, and building against a half-extracted foundation would produce exactly
-the divergent reimplementation `mecmcp` exists to prevent.
+Implementation was deferred through July and August while `mecmcp` was
+extracted. That gate is now open: `mecmcp` is at **v0.20.0 with 14 crates**, and
+the wait paid — `mecmcp-http` supplies the outbound client, so the UniFi HTTP
+layer never has to be written here at all.
 
 | Document | What it is |
 |---|---|
-| [`docs/superpowers/specs/2026-07-24-rustunifimcp-design.md`](docs/superpowers/specs/2026-07-24-rustunifimcp-design.md) | The design: architecture, API tagging, tool surface, change-control adaptation |
-| [`PLAN.md`](PLAN.md) | Phase sequence, and which `mecmcp` crate gates each phase |
+| [`PLAN.md`](PLAN.md) | The phase sequence and its two cutovers, at a glance |
+| [`docs/superpowers/specs/2026-08-26-rustunifimcp-cutover-design.md`](docs/superpowers/specs/2026-08-26-rustunifimcp-cutover-design.md) | Build and cutover design: deployment topology, controller trust, phase detail, risks |
+| [`docs/superpowers/specs/2026-07-24-rustunifimcp-design.md`](docs/superpowers/specs/2026-07-24-rustunifimcp-design.md) | The original design — still authoritative for tool surface, API tagging, and the change-control adaptation |
 
 ## What it replaces
 
