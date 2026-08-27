@@ -29,9 +29,11 @@ CREDENTIAL_PATTERN = re.compile(
 # High-entropy value pattern: base64-like strings 32+ chars
 HIGH_ENTROPY_PATTERN = re.compile(r'^[A-Za-z0-9+/]{32,}={0,2}$')
 
-# MAC address pattern (various formats)
+# MAC address pattern (various formats including bare 12-hex)
 MAC_PATTERN = re.compile(
-    r'^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$|^([0-9A-Fa-f]{4}\.){2}([0-9A-Fa-f]{4})$',
+    r'^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$|'  # aa:bb:cc:dd:ee:ff or aa-bb-cc-dd-ee-ff
+    r'^([0-9A-Fa-f]{4}\.){2}([0-9A-Fa-f]{4})$|'     # aabb.ccdd.eeff
+    r'^[0-9A-Fa-f]{12}$'                             # aabbccddeeff (bare)
 )
 
 # Accepted credential placeholder patterns
@@ -48,6 +50,10 @@ STRUCTURAL_ID_KEYS = {
     'network_id', 'user_id', 'usergroup_id', 'group_id',
     'wlan_id', 'wlangroup_id', 'mac', 'oui',
 }
+
+# Fields exempt from MAC validation (bare 12-hex that aren't MACs)
+# Device serial numbers happen to be 12 hex chars, same format as bare MACs
+MAC_EXEMPTION_KEYS = {'serial'}
 
 # Documentation IP ranges to allow
 DOC_IPV4_RANGES = [
@@ -97,9 +103,23 @@ def is_placeholder(value: str) -> bool:
 
 
 def is_allowed_mac(mac: str) -> bool:
-    """Check if MAC address is in allowed synthetic ranges."""
-    mac_upper = mac.upper().replace('-', ':').replace('.', ':')
-    return any(mac_upper.startswith(prefix.upper()) for prefix in ALLOWED_MAC_PREFIXES)
+    """Check if MAC address is in allowed synthetic ranges.
+
+    Handles colon, dash, dot-separated, and bare 12-hex formats.
+    """
+    # Normalize to colon-separated uppercase format
+    if len(mac) == 12 and ':' not in mac and '-' not in mac and '.' not in mac:
+        # Bare 12-hex format - insert colons
+        mac_normalized = ':'.join(mac[i:i+2].upper() for i in range(0, 12, 2))
+    else:
+        # Convert dash/dot to colon
+        mac_normalized = mac.upper().replace('-', ':')
+        if '.' in mac_normalized:
+            # Cisco format: aabb.ccdd.eeff -> AA:BB:CC:DD:EE:FF
+            mac_normalized = mac_normalized.replace('.', '')
+            mac_normalized = ':'.join(mac_normalized[i:i+2] for i in range(0, 12, 2))
+
+    return any(mac_normalized.startswith(prefix.upper()) for prefix in ALLOWED_MAC_PREFIXES)
 
 
 def is_allowed_public_ip(addr_str: str) -> bool:
@@ -258,9 +278,12 @@ def check_fixture(
                             f'(hash={hash_value(str(value))})'
                         )
 
-                # Check 5: MAC addresses (unless in allowed ranges or structural keys)
+                # Check 5: MAC addresses (check ALL values, only allow synthetic ranges)
+                # Note: 'mac' is in STRUCTURAL_ID_KEYS for high-entropy exemption,
+                # but MAC validation applies to all fields including 'mac' itself.
+                # MAC_EXEMPTION_KEYS handles bare 12-hex values that aren't MACs (e.g., serial numbers)
                 if isinstance(value, str) and MAC_PATTERN.match(value):
-                    if key not in STRUCTURAL_ID_KEYS and not is_allowed_mac(value):
+                    if key not in MAC_EXEMPTION_KEYS and not is_allowed_mac(value):
                         violations.append(
                             f'{filepath}:{new_path} — MAC address '
                             f'(len={len(value)}, hash={hash_value(value)})'

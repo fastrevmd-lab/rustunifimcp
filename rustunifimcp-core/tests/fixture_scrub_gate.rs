@@ -461,3 +461,110 @@ fn gate_fails_on_empty_fixture_directory() {
         stderr
     );
 }
+
+#[test]
+fn gate_fails_on_real_mac_colon_format() {
+    let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
+    let fixture_path = temp_dir.path().join("test.json");
+
+    // Real MAC in colon format
+    let bad_fixture = r#"{
+        "mac": "de:ad:be:ef:12:34"
+    }"#;
+
+    fs::write(&fixture_path, bad_fixture).expect("failed to write fixture");
+
+    let (code, _stdout, stderr) = run_gate(
+        temp_dir.path().to_str().expect("temp dir path is valid UTF-8")
+    );
+
+    assert_ne!(
+        code, 0,
+        "Gate should fail on real MAC (colon format).\nstderr: {}",
+        stderr
+    );
+    assert!(
+        stderr.contains("MAC address"),
+        "Error should mention MAC address: {}",
+        stderr
+    );
+}
+
+#[test]
+fn gate_fails_on_real_mac_dash_format() {
+    let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
+    let fixture_path = temp_dir.path().join("test.json");
+
+    // Real MAC in dash format
+    let bad_fixture = r#"{
+        "mac": "DE-AD-BE-EF-12-34"
+    }"#;
+
+    fs::write(&fixture_path, bad_fixture).expect("failed to write fixture");
+
+    let (code, _stdout, stderr) = run_gate(
+        temp_dir.path().to_str().expect("temp dir path is valid UTF-8")
+    );
+
+    assert_ne!(
+        code, 0,
+        "Gate should fail on real MAC (dash format).\nstderr: {}",
+        stderr
+    );
+    assert!(
+        stderr.contains("MAC address"),
+        "Error should mention MAC address: {}",
+        stderr
+    );
+}
+
+#[test]
+fn gate_fails_on_real_mac_bare_format() {
+    let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
+    let fixture_path = temp_dir.path().join("test.json");
+
+    // Real MAC in bare 12-hex format (as returned by UniFi API)
+    let bad_fixture = r#"{
+        "mac": "deadbeef1234"
+    }"#;
+
+    fs::write(&fixture_path, bad_fixture).expect("failed to write fixture");
+
+    let (code, _stdout, stderr) = run_gate(
+        temp_dir.path().to_str().expect("temp dir path is valid UTF-8")
+    );
+
+    assert_ne!(
+        code, 0,
+        "Gate should fail on real MAC (bare format).\nstderr: {}",
+        stderr
+    );
+    assert!(
+        stderr.contains("MAC address"),
+        "Error should mention MAC address: {}",
+        stderr
+    );
+}
+
+#[test]
+fn gate_allows_synthetic_mac_in_mac_field() {
+    let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
+    let fixture_path = temp_dir.path().join("test.json");
+
+    // Synthetic MAC in the 'mac' field itself should be allowed
+    let good_fixture = r#"{
+        "mac": "02:00:00:00:01:00"
+    }"#;
+
+    fs::write(&fixture_path, good_fixture).expect("failed to write fixture");
+
+    let (code, stdout, stderr) = run_gate(
+        temp_dir.path().to_str().expect("temp dir path is valid UTF-8")
+    );
+
+    assert_eq!(
+        code, 0,
+        "Gate should allow synthetic MAC in 'mac' field.\nstdout: {}\nstderr: {}",
+        stdout, stderr
+    );
+}
