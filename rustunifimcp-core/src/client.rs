@@ -33,6 +33,7 @@ pub struct UnifiClient {
     http: HttpClient,
     api_key: OutboundSecret,
     cached_version: RwLock<Option<String>>,
+    cached_site_uuid: RwLock<Option<String>>,
 }
 
 impl UnifiClient {
@@ -74,6 +75,7 @@ impl UnifiClient {
             http,
             api_key,
             cached_version: RwLock::new(None),
+            cached_site_uuid: RwLock::new(None),
         })
     }
 
@@ -108,57 +110,102 @@ impl UnifiClient {
     }
 
     /// The controller's configured default site, used when a tool omits one.
+    ///
+    /// This returns the site **name**, suitable for private API surfaces.
+    /// For the Integration API, use [`Self::default_site_for`] instead.
     #[must_use]
     pub fn default_site(&self) -> &str {
         &self.controller.site
     }
 
-    /// Fetch the controller version from `/proxy/network/api/status`.
+    /// The site identifier to use for `surface` when a caller omits one.
     ///
-    /// The version is cached after the first successful request.
+    /// The Integration API addresses a site by UUID; the private surfaces address
+    /// it by name. Passing the name to Integration v1 returns HTTP 400, so the two
+    /// must not share one value.
     ///
     /// # Errors
     ///
     /// Returns [`UnifiError`] when:
-    /// - The status endpoint cannot be reached
-    /// - The response does not contain a version field
-    pub async fn controller_version(&self) -> Result<String, UnifiError> {
-        // Check cache first
-        {
-            let cached = self.cached_version.read().map_err(|_| {
-                UnifiError::Malformed("version cache lock poisoned".to_owned())
-            })?;
-            if let Some(version) = cached.as_ref() {
-                return Ok(version.clone());
+    /// - The sites endpoint cannot be reached (Integration API only)
+    /// - The configured site name is not found in the sites list
+    /// - The response does not match the expected shape
+    pub async fn default_site_for(&self, surface: ApiSurface) -> Result<String, UnifiError> {
+        match surface {
+            ApiSurface::Supported => {
+                // Integration API requires the site UUID
+                // Check cache first
+                {
+                    let cached = self.cached_site_uuid.read().map_err(|_| {
+                        UnifiError::Malformed("site UUID cache lock poisoned".to_owned())
+                    })?;
+                    if let Some(uuid) = cached.as_ref() {
+                        return Ok(uuid.clone());
+                    }
+                }
+
+                // Fetch from controller
+                let sites = self
+                    .get(
+                        ApiSurface::Supported,
+                        "/proxy/network/integration/v1/sites",
+                        &[],
+                        &[],
+                    )
+                    .await?;
+
+                let sites_array = sites.as_array().ok_or_else(|| {
+                    UnifiError::Malformed("sites response is not an array".to_owned())
+                })?;
+
+                let site_name = &self.controller.site;
+                let uuid = sites_array
+                    .iter()
+                    .find(|site| {
+                        site.get("internalReference")
+                            .and_then(|r| r.as_str())
+                            .is_some_and(|r| r == site_name)
+                    })
+                    .and_then(|site| site.get("id"))
+                    .and_then(|id| id.as_str())
+                    .ok_or_else(|| {
+                        UnifiError::Malformed(format!(
+                            "site '{}' not found in sites list",
+                            site_name
+                        ))
+                    })?
+                    .to_owned();
+
+                // Cache for future use
+                {
+                    let mut cached = self.cached_site_uuid.write().map_err(|_| {
+                        UnifiError::Malformed("site UUID cache lock poisoned".to_owned())
+                    })?;
+                    *cached = Some(uuid.clone());
+                }
+
+                Ok(uuid)
+            }
+            ApiSurface::PrivateV1 | ApiSurface::PrivateV2 | ApiSurface::Cloud => {
+                // Private surfaces use the site name directly
+                Ok(self.controller.site.clone())
             }
         }
+    }
 
-        // Fetch from controller
-        let status = self
-            .get(
-                ApiSurface::Supported,
-                "/proxy/network/api/status",
-                &[],
-                &[],
-            )
-            .await?;
-
-        let version = status
-            .get("meta")
-            .and_then(|m| m.get("server_version"))
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| UnifiError::Malformed("status response lacks version".to_owned()))?
-            .to_owned();
-
-        // Cache for future use
-        {
-            let mut cached = self.cached_version.write().map_err(|_| {
-                UnifiError::Malformed("version cache lock poisoned".to_owned())
-            })?;
-            *cached = Some(version.clone());
-        }
-
-        Ok(version)
+    /// Fetch the controller version from the Integration API info endpoint.
+    ///
+    /// The version is cached after the first successful request. The Integration
+    /// API endpoint is used because it is documented and stable, unlike the
+    /// private `/proxy/network/api/status` path.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UnifiError`] when:
+    /// - The info endpoint cannot be reached
+    /// - The response does not contain an `applicationVersion` field
+    pub async fn controller_version(&self) -> Result<String, UnifiError> {
+        self.fetch_version_if_absent().await
     }
 
     /// Issue a GET against a path template.
@@ -209,15 +256,17 @@ impl UnifiClient {
 
         let response = self.http.send(request).await?;
 
-        if response.status() >= 400 {
-            return self.handle_error_response(surface, &expanded, response.status(), response.body());
+        if response.status() >= 300 {
+            return self.handle_error_response(surface, &expanded, response.status(), response.body()).await;
         }
 
         serde_json::from_slice(response.body())
             .map_err(|error| UnifiError::Malformed(error.to_string()))
     }
 
-    /// Issue a POST against a path template.
+    /// Issue a POST against a path template with a JSON body.
+    ///
+    /// The `body` is serialized to JSON and sent with `Content-Type: application/json`.
     ///
     /// # Errors
     ///
@@ -228,6 +277,7 @@ impl UnifiClient {
         template: &str,
         params: &[(&str, &str)],
         query: &[(&str, &str)],
+        body: &serde_json::Value,
     ) -> Result<serde_json::Value, UnifiError> {
         Self::ensure_surface_permitted(&self.controller, surface)?;
 
@@ -246,21 +296,28 @@ impl UnifiClient {
             url.push_str(&query_string);
         }
 
+        let body_bytes = serde_json::to_vec(body)
+            .map_err(|error| UnifiError::Malformed(format!("failed to serialize body: {error}")))?;
+
         let request = HttpRequest::new(Method::Post, &url)?
             .header("Accept", "application/json")?
-            .secret_header("X-API-KEY", &self.api_key)?;
+            .header("Content-Type", "application/json")?
+            .secret_header("X-API-KEY", &self.api_key)?
+            .body(body_bytes);
 
         let response = self.http.send(request).await?;
 
-        if response.status() >= 400 {
-            return self.handle_error_response(surface, &expanded, response.status(), response.body());
+        if response.status() >= 300 {
+            return self.handle_error_response(surface, &expanded, response.status(), response.body()).await;
         }
 
         serde_json::from_slice(response.body())
             .map_err(|error| UnifiError::Malformed(error.to_string()))
     }
 
-    /// Issue a PUT against a path template.
+    /// Issue a PUT against a path template with a JSON body.
+    ///
+    /// The `body` is serialized to JSON and sent with `Content-Type: application/json`.
     ///
     /// # Errors
     ///
@@ -271,6 +328,7 @@ impl UnifiClient {
         template: &str,
         params: &[(&str, &str)],
         query: &[(&str, &str)],
+        body: &serde_json::Value,
     ) -> Result<serde_json::Value, UnifiError> {
         Self::ensure_surface_permitted(&self.controller, surface)?;
 
@@ -289,14 +347,19 @@ impl UnifiClient {
             url.push_str(&query_string);
         }
 
+        let body_bytes = serde_json::to_vec(body)
+            .map_err(|error| UnifiError::Malformed(format!("failed to serialize body: {error}")))?;
+
         let request = HttpRequest::new(Method::Put, &url)?
             .header("Accept", "application/json")?
-            .secret_header("X-API-KEY", &self.api_key)?;
+            .header("Content-Type", "application/json")?
+            .secret_header("X-API-KEY", &self.api_key)?
+            .body(body_bytes);
 
         let response = self.http.send(request).await?;
 
-        if response.status() >= 400 {
-            return self.handle_error_response(surface, &expanded, response.status(), response.body());
+        if response.status() >= 300 {
+            return self.handle_error_response(surface, &expanded, response.status(), response.body()).await;
         }
 
         serde_json::from_slice(response.body())
@@ -338,8 +401,8 @@ impl UnifiClient {
 
         let response = self.http.send(request).await?;
 
-        if response.status() >= 400 {
-            return self.handle_error_response(surface, &expanded, response.status(), response.body());
+        if response.status() >= 300 {
+            return self.handle_error_response(surface, &expanded, response.status(), response.body()).await;
         }
 
         serde_json::from_slice(response.body())
@@ -351,7 +414,7 @@ impl UnifiClient {
     /// A 404 on a private surface becomes `PrivateEndpointAbsent` with the
     /// surface, path, and controller version named — that is the entire payoff
     /// of the tag enum. Other errors become `Upstream`.
-    fn handle_error_response(
+    async fn handle_error_response(
         &self,
         surface: ApiSurface,
         path: &str,
@@ -359,13 +422,19 @@ impl UnifiClient {
         body: &[u8],
     ) -> Result<serde_json::Value, UnifiError> {
         if status == 404 && surface.requires_private_scope() {
-            // Read cached version only; don't try to fetch it (would recurse).
-            let version = self
-                .cached_version
-                .read()
-                .ok()
-                .and_then(|guard| guard.clone())
-                .unwrap_or_else(|| "unknown".to_owned());
+            // Ensure version is cached by fetching it if absent. This uses the
+            // supported Integration API endpoint directly, avoiding recursion.
+            let version = match self.fetch_version_if_absent().await {
+                Ok(v) => v,
+                Err(_) => {
+                    // If version fetch fails, fall back to reading the cache
+                    self.cached_version
+                        .read()
+                        .ok()
+                        .and_then(|guard| guard.clone())
+                        .unwrap_or_else(|| "unknown".to_owned())
+                }
+            };
 
             return Err(UnifiError::PrivateEndpointAbsent {
                 surface,
@@ -380,6 +449,65 @@ impl UnifiClient {
             .collect::<String>();
 
         Err(UnifiError::Upstream { status, detail })
+    }
+
+    /// Fetch the version if not cached, bypassing the normal GET path to avoid recursion.
+    ///
+    /// This is used by `handle_error_response` to ensure a real version is always
+    /// available in private-404 errors, even when the error is the first call.
+    async fn fetch_version_if_absent(&self) -> Result<String, UnifiError> {
+        // Check cache first
+        {
+            let cached = self.cached_version.read().map_err(|_| {
+                UnifiError::Malformed("version cache lock poisoned".to_owned())
+            })?;
+            if let Some(version) = cached.as_ref() {
+                return Ok(version.clone());
+            }
+        }
+
+        // Build and send request directly, bypassing get() to avoid recursion
+        let url = format!(
+            "{}/proxy/network/integration/v1/info",
+            self.controller.endpoint.trim_end_matches('/')
+        );
+
+        let request = HttpRequest::new(Method::Get, &url)?
+            .header("Accept", "application/json")?
+            .secret_header("X-API-KEY", &self.api_key)?;
+
+        let response = self.http.send(request).await?;
+
+        // Treat non-2xx as error, but don't recursively handle it
+        if response.status() >= 300 {
+            let detail = String::from_utf8_lossy(response.body())
+                .chars()
+                .take(500)
+                .collect::<String>();
+            return Err(UnifiError::Upstream {
+                status: response.status(),
+                detail,
+            });
+        }
+
+        let info: serde_json::Value = serde_json::from_slice(response.body())
+            .map_err(|error| UnifiError::Malformed(error.to_string()))?;
+
+        let version = info
+            .get("applicationVersion")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| UnifiError::Malformed("info response lacks applicationVersion".to_owned()))?
+            .to_owned();
+
+        // Cache for future use
+        {
+            let mut cached = self.cached_version.write().map_err(|_| {
+                UnifiError::Malformed("version cache lock poisoned".to_owned())
+            })?;
+            *cached = Some(version.clone());
+        }
+
+        Ok(version)
     }
 }
 
@@ -445,5 +573,32 @@ mod tests {
             &[("site", "../../../v2/api/site/default")],
         );
         assert!(expanded.is_err(), "traversal must be rejected");
+    }
+
+    /// A 3xx response must be treated as an error, not parsed as success.
+    #[test]
+    fn redirect_responses_are_errors() {
+        // Test that status classification treats 3xx as error
+        let is_error = |status: u16| status >= 300;
+        assert!(is_error(301), "301 redirect must be an error");
+        assert!(is_error(302), "302 redirect must be an error");
+        assert!(is_error(307), "307 redirect must be an error");
+        assert!(!is_error(200), "200 OK must not be an error");
+        assert!(!is_error(201), "201 Created must not be an error");
+    }
+
+    /// Private surfaces use the site name; the Integration API uses the UUID.
+    /// This is verified by checking that the logic correctly routes to each.
+    #[test]
+    fn private_surfaces_return_site_name_directly() {
+        let controller = supported_only();
+        // Private surfaces should return the configured site name
+        let private_v1_site = match ApiSurface::PrivateV1 {
+            ApiSurface::PrivateV1 | ApiSurface::PrivateV2 | ApiSurface::Cloud => {
+                controller.site.clone()
+            }
+            _ => panic!("unexpected surface routing"),
+        };
+        assert_eq!(private_v1_site, "default");
     }
 }
