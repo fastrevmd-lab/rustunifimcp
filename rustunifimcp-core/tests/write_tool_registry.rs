@@ -27,6 +27,7 @@ fn the_write_tool_registry_holds_exactly_the_mutating_tools() {
     // change-set tools. Extend this list in the task that adds them, never
     // ahead of it -- a name here with no tool behind it is not a guard.
     let mut expected = vec![
+        "unifi_add_controller",
         "unifi_backup_action",
         "unifi_client_action",
         "unifi_device_action",
@@ -45,6 +46,40 @@ fn every_write_tool_is_a_registered_tool() {
             // no wildcard token can reach them the moment they appear.
             eprintln!("note: {name} is reserved in WRITE_TOOLS, not yet registered");
             continue;
+        }
+    }
+}
+
+/// Every tool whose name implies mutation must be in WRITE_TOOLS unless
+/// explicitly allowlisted as read-only. This test derives expectation from
+/// semantics, catching tools like `unifi_delete_*` that the by-name test
+/// would miss if the author was mistaken.
+#[test]
+fn every_mutating_name_is_in_the_write_registry() {
+    // Tool names containing these verbs imply mutation.
+    const MUTATION_VERBS: &[&str] = &[
+        "add", "create", "update", "delete", "set", "apply", "approve", "stage",
+        "action", "restart", "run", "remove", "destroy", "modify", "write",
+    ];
+
+    // Tools that match a verb but are genuinely read-only. Each entry must
+    // carry a comment explaining why it is safe.
+    const READ_ONLY_ALLOWLIST: &[&str] = &[
+        // None yet. The operational tools (`*_action`, `run_speed_test`) and
+        // `add_controller` are all genuine writes.
+    ];
+
+    for &tool in TOOL_NAMES {
+        let name_lower = tool.to_lowercase();
+        let matches_verb = MUTATION_VERBS
+            .iter()
+            .any(|verb| name_lower.contains(verb));
+
+        if matches_verb && !READ_ONLY_ALLOWLIST.contains(&tool) {
+            assert!(
+                WRITE_TOOLS.contains(&tool),
+                "{tool} implies mutation but is absent from WRITE_TOOLS"
+            );
         }
     }
 }

@@ -29,6 +29,8 @@ pub const TOOL_NAMES: &[&str] = &[
 /// registry turns every wildcard token into a writer, so the list is written
 /// out by hand and asserted by name in `tests/write_tool_registry.rs`.
 pub const WRITE_TOOLS: &[&str] = &[
+    // Administration — inventory mutation
+    "unifi_add_controller",
     // Phase 3 — operational actions
     "unifi_device_action",
     "unifi_client_action",

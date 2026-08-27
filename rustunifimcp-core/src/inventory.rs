@@ -50,6 +50,26 @@ pub struct Controller {
 }
 
 impl Controller {
+    /// Redact userinfo, query, and fragment from an endpoint before including
+    /// it in an error message.
+    ///
+    /// A misconfigured `https://user:pass@host` would otherwise leak credentials
+    /// into logs. Strip what could be sensitive, leaving only scheme and authority.
+    fn redact_endpoint(endpoint: &str) -> String {
+        // Parse the URL, and if successful strip userinfo/query/fragment.
+        // If it does not parse, return a fixed placeholder rather than the raw string.
+        url::Url::parse(endpoint)
+            .ok()
+            .and_then(|mut u| {
+                u.set_username("").ok()?;
+                let _ = u.set_password(None);
+                u.set_query(None);
+                u.set_fragment(None);
+                Some(u.to_string())
+            })
+            .unwrap_or_else(|| "<unparseable-endpoint>".to_owned())
+    }
+
     /// Check the invariants `serde` cannot express.
     ///
     /// # Errors
@@ -58,9 +78,12 @@ impl Controller {
     /// if the controller names both credential sources or neither.
     pub fn validate(&self) -> Result<(), UnifiError> {
         if !self.endpoint.starts_with("https://") {
+            // Redact userinfo from the endpoint before including it in the error,
+            // so a misconfigured `https://user:pass@host` does not leak credentials
+            // into logs.
+            let redacted = Self::redact_endpoint(&self.endpoint);
             return Err(UnifiError::Malformed(format!(
-                "controller endpoint must be https://, got {}",
-                self.endpoint
+                "controller endpoint must be https://, got {redacted}"
             )));
         }
         match (&self.api_key_env, &self.api_key_file) {
@@ -156,6 +179,43 @@ mod tests {
         assert!(parsed.is_err(), "an inline api_key must not deserialize");
     }
 
+    /// The same rejection must apply to a key at the inventory envelope level,
+    /// not only inside a controller entry. A top-level key would be silently
+    /// ignored without deny_unknown_fields on the envelope as well.
+    #[test]
+    fn a_top_level_api_key_is_rejected_at_load_time() {
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        let raw = r#"{
+            "api_key": "secret-at-top-level",
+            "devices": {
+                "test": {
+                    "endpoint": "https://unifi.example.org",
+                    "site": "default",
+                    "api_key_env": "UNIFI_API_KEY"
+                }
+            }
+        }"#;
+
+        let mut tmp = NamedTempFile::new().expect("temp file");
+        tmp.write_all(raw.as_bytes()).expect("write");
+
+        // Set mode 0600 to satisfy the hardened loader.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = std::fs::Permissions::from_mode(0o600);
+            std::fs::set_permissions(tmp.path(), perms).expect("chmod");
+        }
+
+        let result = super::ControllerRegistry::load(tmp.path());
+        assert!(
+            result.is_err(),
+            "a top-level api_key must be rejected by the inventory loader"
+        );
+    }
+
     /// Naming both sources is ambiguous, and ambiguity about which credential
     /// was used is not something to resolve by precedence.
     #[test]
@@ -205,5 +265,45 @@ mod tests {
         let controller: Controller = serde_json::from_str(raw).expect("parses");
         assert!(!controller.allow_private_api);
         assert!(!controller.allow_cloud);
+    }
+
+    /// The shipped example inventory must be loadable through the real loader.
+    /// An example that cannot load teaches the wrong format.
+    #[test]
+    fn the_example_inventory_is_valid() {
+        use std::io::Write;
+        use std::path::PathBuf;
+        use tempfile::NamedTempFile;
+
+        let example_path: PathBuf = [
+            env!("CARGO_MANIFEST_DIR"),
+            "..",
+            "packaging",
+            "examples",
+            "controllers.example.json",
+        ]
+        .iter()
+        .collect();
+
+        let example_content = std::fs::read_to_string(&example_path)
+            .expect("example file must exist at packaging/examples/controllers.example.json");
+
+        // Copy to a temp file with mode 0600, which the hardened loader requires.
+        let mut tmp = NamedTempFile::new().expect("temp file");
+        tmp.write_all(example_content.as_bytes()).expect("write");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = std::fs::Permissions::from_mode(0o600);
+            std::fs::set_permissions(tmp.path(), perms).expect("chmod");
+        }
+
+        let result = super::ControllerRegistry::load(tmp.path());
+        assert!(
+            result.is_ok(),
+            "the example inventory must load cleanly: {:?}",
+            result.err()
+        );
     }
 }

@@ -94,6 +94,9 @@ pub struct DhcpReservation {
     /// Last seen IP address.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_ip: Option<String>,
+    /// Fixed IP address when `use_fixedip` is true.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fixed_ip: Option<String>,
     /// Hostname.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hostname: Option<String>,
@@ -143,9 +146,18 @@ pub fn parse_port_profiles(val: &serde_json::Value) -> Result<Vec<PortProfile>, 
 }
 
 /// Parses DHCP reservations from the Private v1 API response.
+///
+/// The `/rest/user` endpoint returns every known client, not only those with
+/// a fixed-IP assignment. A reservation is marked by `use_fixedip: true` in
+/// the record; this function filters to only actual reservations.
 pub fn parse_dhcp_reservations(val: &serde_json::Value) -> Result<Vec<DhcpReservation>, UnifiError> {
     let data = super::unwrap_enveloped_data(val)?;
     data.iter()
+        .filter(|item| {
+            item.get("use_fixedip")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+        })
         .map(|item| serde_json::from_value(item.clone()).map_err(|e| {
             UnifiError::Malformed(format!("dhcp reservation parse failed: {e}"))
         }))
@@ -160,4 +172,43 @@ pub fn parse_radius_profiles(val: &serde_json::Value) -> Result<Vec<RadiusProfil
             UnifiError::Malformed(format!("radius profile parse failed: {e}"))
         }))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_dhcp_reservations;
+    use crate::testing::{fixture, fixtures_available, DEFAULT_FIXTURE_VERSION};
+
+    /// The `/rest/user` endpoint returns all known clients, not only those
+    /// with a fixed-IP reservation. Verify that the parser filters to actual
+    /// reservations (marked by `use_fixedip: true`).
+    #[test]
+    fn dhcp_reservations_are_filtered_from_all_users() {
+        if !fixtures_available() {
+            eprintln!("skipping: no fixtures");
+            return;
+        }
+
+        let raw = fixture(DEFAULT_FIXTURE_VERSION, "user");
+        let reservations = parse_dhcp_reservations(&raw).expect("parse");
+
+        // The 10.5.67 fixture holds 257 total user records, of which 46 have
+        // `use_fixedip: true`. Assert the parsed count is strictly less than
+        // the total, proving the filter is active.
+        let total_users = raw
+            .get("data")
+            .and_then(|d| d.as_array())
+            .map(|arr| arr.len())
+            .expect("envelope");
+
+        assert!(
+            reservations.len() < total_users,
+            "parsed {}, total {}: filter did not reduce the set",
+            reservations.len(),
+            total_users
+        );
+
+        // The expected count for 10.5.67 specifically.
+        assert_eq!(reservations.len(), 46, "10.5.67 fixture has 46 reservations");
+    }
 }
