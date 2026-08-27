@@ -10,6 +10,21 @@
 use crate::model::ResourceKind;
 use crate::ApiSurface;
 
+/// What the recorded fixtures say about an endpoint on a controller version.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Availability {
+    /// A fixture for this version recorded a 200 for this kind.
+    Present,
+    /// An `.absent` marker for this version recorded a 404 for this kind.
+    Absent,
+    /// No fixtures exist for this version, so nothing is known.
+    ///
+    /// Deliberately distinct from `Present`: the caller may still attempt the
+    /// request, but a failure must be attributed as possible drift on an
+    /// unrecorded version rather than reported as a broken tool.
+    Unrecorded,
+}
+
 /// Whether a controller version serves the endpoint behind a resource kind.
 ///
 /// # Arguments
@@ -19,43 +34,54 @@ use crate::ApiSurface;
 ///
 /// # Returns
 ///
-/// Returns `true` if the endpoint is available on the given version, `false`
-/// otherwise.
+/// Returns the availability status based on recorded fixtures:
+/// - `Availability::Present` - Endpoint is known to exist on this version
+/// - `Availability::Absent` - Endpoint is known to be absent (404) on this version
+/// - `Availability::Unrecorded` - No fixtures exist for this version
 ///
 /// # Examples
 ///
 /// ```
 /// use rustunifimcp_core::model::ResourceKind;
-/// use rustunifimcp_core::version::endpoint_available;
+/// use rustunifimcp_core::version::{endpoint_availability, Availability};
 ///
-/// // Supported API endpoints are always available
-/// assert!(endpoint_available("10.5.67", ResourceKind::Station));
+/// // Supported API endpoints are always Present
+/// assert_eq!(
+///     endpoint_availability("10.5.67", ResourceKind::Station),
+///     Availability::Present
+/// );
+///
+/// // Unrecorded versions return Unrecorded for private endpoints
+/// assert_eq!(
+///     endpoint_availability("99.9.9", ResourceKind::FirewallPolicy),
+///     Availability::Unrecorded
+/// );
 /// ```
 #[must_use]
-pub fn endpoint_available(version: &str, kind: ResourceKind) -> bool {
+pub fn endpoint_availability(version: &str, kind: ResourceKind) -> Availability {
     // Supported API endpoints are always available across versions
     if kind.surface() == ApiSurface::Supported {
-        return true;
+        return Availability::Present;
     }
 
     // Private API availability matrix. Every row must be justified by a
     // fixture or an .absent marker. Never guess - if a version is not
-    // recorded, adding it means capturing fixtures first.
-    #[allow(clippy::match_same_arms)]
-    match (major_minor(version), kind) {
+    // recorded, return Unrecorded.
+    match major_minor(version) {
         // Version 10.5.67: All private endpoints present (zero .absent markers)
-        ((10, 5), ResourceKind::FirewallPolicy) => true,
-        ((10, 5), ResourceKind::FirewallZone) => true,
-        ((10, 5), ResourceKind::TrafficRoute) => true,
+        (10, 5) => Availability::Present,
 
-        // Catch-all: Currently returns true because only 10.5.67 is recorded
-        // with zero .absent markers. When adding a new version, replace this
-        // with explicit rows justified by fixtures or .absent markers.
-        (_, _) => true,
+        // Unrecorded version: caller may attempt the request but must attribute
+        // failures as possible drift rather than a broken tool
+        _ => Availability::Unrecorded,
     }
 }
 
 /// Parse version string into (major, minor) tuple.
+///
+/// The matrix keys on major.minor only, so **patch-level drift is not tracked**.
+/// This is a known, accepted limitation: versions 10.5.1 and 10.5.67 are
+/// treated identically.
 ///
 /// # Arguments
 ///
@@ -71,6 +97,7 @@ pub fn endpoint_available(version: &str, kind: ResourceKind) -> bool {
 /// ```
 /// # use rustunifimcp_core::version::major_minor;
 /// assert_eq!(major_minor("10.5.67"), (10, 5));
+/// assert_eq!(major_minor("10.5.1"), (10, 5));
 /// assert_eq!(major_minor("invalid"), (0, 0));
 /// ```
 #[must_use]

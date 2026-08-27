@@ -7,7 +7,7 @@
 
 use rustunifimcp_core::model::ResourceKind;
 use rustunifimcp_core::testing::is_absent;
-use rustunifimcp_core::version::endpoint_available;
+use rustunifimcp_core::version::{endpoint_availability, Availability};
 
 /// Every version directory under tests/fixtures/.
 fn recorded_versions() -> Vec<String> {
@@ -37,11 +37,40 @@ fn the_matrix_agrees_with_what_was_recorded() {
         for kind in ResourceKind::ALL {
             let fixture_name = kind_fixture_name(*kind);
             let recorded_absent = is_absent(&version, fixture_name);
-            let matrix_says = endpoint_available(&version, *kind);
+            let availability = endpoint_availability(&version, *kind);
+
+            let expected = if recorded_absent {
+                Availability::Absent
+            } else {
+                Availability::Present
+            };
+
             assert_eq!(
-                !recorded_absent, matrix_says,
+                availability, expected,
                 "matrix and fixtures disagree for {kind:?} on {version}: \
-                 recorded_absent={recorded_absent}, matrix_available={matrix_says}"
+                 recorded_absent={recorded_absent}, matrix={availability:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn unrecorded_versions_return_unrecorded_for_private_endpoints() {
+    let unrecorded_version = "99.9.9";
+
+    // Supported API endpoints are always Present
+    for kind in ResourceKind::ALL {
+        if kind.surface() == rustunifimcp_core::ApiSurface::Supported {
+            assert_eq!(
+                endpoint_availability(unrecorded_version, *kind),
+                Availability::Present,
+                "Supported endpoint {kind:?} should be Present even on unrecorded version"
+            );
+        } else {
+            assert_eq!(
+                endpoint_availability(unrecorded_version, *kind),
+                Availability::Unrecorded,
+                "Private endpoint {kind:?} should be Unrecorded on unrecorded version"
             );
         }
     }
