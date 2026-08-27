@@ -42,7 +42,46 @@ Self-signed, and its SAN covers neither `192.168.1.30` nor `unifi.mechub.org`.
 Adding it as a trust anchor would therefore *still* fail the name check — which
 is why the certificate is replaced rather than pinned.
 
-## Blocked — SSH is disabled
+## DONE — 2026-08-27
+
+Installed and verified. `https://unifi.mechub.org/` returns 200 with full chain
+verification (`ssl_verify_result=0`), and the API answers over it:
+
+```
+subject=CN=unifi.mechub.org
+issuer=C=US, O=Let's Encrypt, CN=YR2
+notAfter=Nov 25 01:21:09 2026 GMT
+```
+
+All 9 adopted devices stayed ONLINE across both `unifi-core` restarts. The
+console is a Cloud Key Gen2 Plus and a separate **Gateway Max** does the
+routing, so the console is not in the data path — a restart is a management-
+plane blip, not a network outage.
+
+Backups retained on the device at `/data/unifi-core/config/`:
+`unifi-core.{crt,key}.pre-acme-20260827T021715Z` (pre-install) and
+`...-20260827T135936Z` (taken by the hook on its verification run).
+
+**Certificate type note:** issued RSA-2048 rather than the fleet's usual ECDSA,
+matching the key the console already shipped with, to avoid any chance of the
+UniFi OS nginx rejecting it. Revisit only with a reason.
+
+### The hook, and how it was tested
+
+`/etc/letsencrypt/renewal-hooks/deploy/unifi-controller`, mode 0755, alongside
+the five `prod-*mcp` hooks. It stages beside the live files, checks the hostname
+and that cert and key are a pair *before* swapping, backs up, installs,
+restarts, verifies with no `-k`, and rolls back if verification fails.
+
+Three paths were exercised, not assumed:
+
+| Test | Result |
+|---|---|
+| Unreachable console (the firmware-wipe case) | exit 1, named reason naming the fix |
+| A different lineage (`prod-proxmoxmcp`) | exit 0, nothing touched |
+| Real lineage, end to end | exit 0, "installed and verified", 9/9 devices ONLINE |
+
+### Original blocker, for the record — SSH was disabled
 
 ```
 $ ssh root@192.168.1.30
@@ -57,8 +96,13 @@ restarting `unifi-core`. There is no supported API upload path on a Cloud Key.
 renews every 90 days and the deploy hook must run non-interactively, so SSH is
 required regardless of how the first install happens.
 
-**To unblock:** UniFi UI → Settings → Control Plane → Console → Advanced → SSH.
-Enable it, set a password or authorize the pve2 key.
+**Resolved:** SSH enabled in the UniFi OS UI. That screen offers only a password
+on this firmware, so pve2's root key was installed with `ssh-copy-id
+root@192.168.1.30` and the hook authenticates by key.
+
+**Known maintenance step:** a UniFi OS firmware update can clear
+`/root/.ssh/authorized_keys`. The hook fails loudly with the fix in its message
+when that happens — re-run `ssh-copy-id root@192.168.1.30` from pve2.
 
 ## What is already ready
 
