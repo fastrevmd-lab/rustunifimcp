@@ -105,3 +105,30 @@ and develop the change-set lifecycle correctly rather than quickly.
 
 When Phase 6 ships, this section moves to historical context and the six rows
 flip from `gap (accepted)` to `covered`.
+
+### Port details via `kind=device` (partial coverage)
+
+**Two legacy tools return per-port detail**: `get_device_port_overrides` (6
+calls) and `get_port_mappings` (1 call). Both are mapped to `unifi_get_resource
+kind=device` in the audit.
+
+The Integration API endpoint `/proxy/network/integration/v1/sites/{site}/devices`
+— which `kind=device` resolves to in supported-only deployments — **does not
+carry per-port detail**. That detail lives in the private endpoint
+`/proxy/network/api/s/{site}/stat/device`, which includes a `port_table` array.
+
+**Current implementation:** `kind=device` always resolves to the Integration
+endpoint. Deployments with `allow_private_api: true` **do not** get the richer
+data source. Port-level detail is unreachable via `unifi_get_resource`.
+
+**Engineering decision:** Implementing dynamic endpoint selection (Integration
+when `allow_private_api: false`, private when enabled) would add branching
+complexity to the resource-kind dispatch path for two low-usage tools (6+1
+calls). The limitation is documented here; **Phase 3 ships without it**. A
+future Phase can add a `kind=device_detail` variant pointing at the private
+endpoint, or phase out the audit's promise entirely if port detail is genuinely
+unused in practice.
+
+**Verify against usage:** If the 7 total calls to these tools show no breakage
+during cutover testing, the limitation is confirmed as negligible and can
+remain. If breakage appears, **add `kind=device_detail` before Cutover #2**.
