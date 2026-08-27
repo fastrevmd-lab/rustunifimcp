@@ -78,11 +78,12 @@ pub enum UnifiError {
 
     /// Transport, TLS, timeout, or rate-limit failure from `mecmcp-http`.
     ///
-    /// The underlying error is available as `source()` but is not rendered in
-    /// `Display`, because several `HttpError` variants carry a redacted URL.
-    /// This crate's contract is that no variant carries a URL of any kind.
+    /// The underlying error is classified and rendered without URLs, because
+    /// several `HttpError` variants carry a redacted URL. This crate's contract
+    /// is that no variant carries a URL of any kind, and that includes the
+    /// source chain.
     #[error("{}", http_error_class(.0))]
-    Http(#[source] mecmcp_http::HttpError),
+    Http(mecmcp_http::HttpError),
 
     /// Inventory load or validation failure.
     #[error(transparent)]
@@ -184,9 +185,11 @@ mod tests {
     /// The controller's API key must never reach an error string.
     ///
     /// This is the contract: no variant renders a URL of any kind — neither a
-    /// full URL nor a redacted one.
+    /// full URL nor a redacted one — and that includes the source chain.
     #[test]
     fn no_variant_carries_a_url() {
+        use std::error::Error;
+
         // Test each variant that could plausibly carry a URL
         let test_cases: Vec<UnifiError> = vec![
             UnifiError::PrivateEndpointAbsent {
@@ -217,9 +220,22 @@ mod tests {
         ];
 
         for error in test_cases {
+            // Check the top-level Display
             let rendered = error.to_string();
             assert!(!rendered.contains("://"), "variant rendered a URL: {rendered}");
             assert!(!rendered.contains("X-API-KEY"), "variant rendered a header: {rendered}");
+
+            // Check the full source chain with {:#}
+            let alternate = format!("{error:#}");
+            assert!(!alternate.contains("://"), "source chain contains URL: {alternate}");
+
+            // Walk the source() chain
+            let mut current: &dyn Error = &error;
+            while let Some(source) = current.source() {
+                let source_str = source.to_string();
+                assert!(!source_str.contains("://"), "source chain contains URL: {source_str}");
+                current = source;
+            }
         }
     }
 }

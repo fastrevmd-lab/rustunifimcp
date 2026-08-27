@@ -26,7 +26,7 @@ pub mod stats;
 ///
 /// Both the Integration API and the Private v1 surface wrap their payload as
 /// an object with a `data` array; this helper handles both.
-fn unwrap_enveloped_data(val: &serde_json::Value) -> Result<&Vec<serde_json::Value>, UnifiError> {
+pub(crate) fn unwrap_enveloped_data(val: &serde_json::Value) -> Result<&Vec<serde_json::Value>, UnifiError> {
     val.get("data")
         .and_then(|d| d.as_array())
         .ok_or_else(|| UnifiError::Malformed("expected an envelope object with a `data` array".to_string()))

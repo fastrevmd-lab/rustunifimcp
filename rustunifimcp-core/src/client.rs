@@ -154,9 +154,7 @@ impl UnifiClient {
                     )
                     .await?;
 
-                let sites_array = sites.as_array().ok_or_else(|| {
-                    UnifiError::Malformed("sites response is not an array".to_owned())
-                })?;
+                let sites_array = crate::model::unwrap_enveloped_data(&sites)?;
 
                 let site_name = &self.controller.site;
                 let uuid = sites_array
@@ -594,5 +592,63 @@ mod tests {
             _ => panic!("unexpected surface routing"),
         };
         assert_eq!(private_v1_site, "default");
+    }
+
+    /// The sites endpoint returns an envelope `{"data": [...], ...}`, not a bare
+    /// array. This test ensures the resolver unwraps it correctly.
+    #[test]
+    fn sites_envelope_is_unwrapped() {
+        let envelope = serde_json::json!({
+            "offset": 0,
+            "limit": 25,
+            "count": 1,
+            "totalCount": 1,
+            "data": [
+                {
+                    "id": "test-uuid",
+                    "internalReference": "test-site",
+                    "name": "Test Site"
+                }
+            ]
+        });
+        let unwrapped = crate::model::unwrap_enveloped_data(&envelope)
+            .expect("envelope unwraps");
+        assert_eq!(unwrapped.len(), 1);
+        assert_eq!(unwrapped[0]["id"], "test-uuid");
+    }
+
+    /// The recorded sites fixture must parse and resolve to the expected UUID.
+    #[test]
+    fn sites_fixture_resolves_site_uuid() {
+        if !crate::testing::fixtures_available() {
+            eprintln!("SKIPPED: no fixtures.");
+            return;
+        }
+        let sites_raw = crate::testing::fixture(
+            crate::testing::DEFAULT_FIXTURE_VERSION,
+            "sites"
+        );
+        let sites_array = crate::model::unwrap_enveloped_data(&sites_raw)
+            .expect("sites fixture unwraps");
+
+        // The fixture should have at least one site
+        assert!(!sites_array.is_empty(), "fixture has at least one site");
+
+        // Find the site with internalReference "default"
+        let default_site = sites_array
+            .iter()
+            .find(|site| {
+                site.get("internalReference")
+                    .and_then(|r| r.as_str())
+                    .is_some_and(|r| r == "default")
+            })
+            .expect("fixture has a 'default' site");
+
+        // It should have a UUID
+        let uuid = default_site.get("id")
+            .and_then(|id| id.as_str())
+            .expect("default site has an id");
+
+        assert!(!uuid.is_empty(), "site UUID is not empty");
     }
 }

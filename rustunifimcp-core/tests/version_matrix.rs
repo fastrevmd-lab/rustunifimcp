@@ -43,16 +43,39 @@ fn the_matrix_agrees_with_what_was_recorded() {
             let recorded_absent = is_absent(&version, fixture_name);
             let availability = endpoint_availability(&version, *kind);
 
+            // Build the fixture path to check if it exists
+            let fixture_path: std::path::PathBuf = [
+                env!("CARGO_MANIFEST_DIR"),
+                "tests",
+                "fixtures",
+                &version,
+                &format!("{fixture_name}.json"),
+            ]
+            .iter()
+            .collect();
+            let fixture_exists = fixture_path.exists();
+
+            // Determine expected availability based on evidence
             let expected = if recorded_absent {
+                // .absent marker must mean Absent
+                assert!(
+                    !fixture_exists,
+                    "{kind:?} on {version} has .absent marker but fixture file also exists"
+                );
                 Availability::Absent
-            } else {
+            } else if fixture_exists {
+                // Fixture file must mean Present
                 Availability::Present
+            } else {
+                // Neither fixture nor .absent marker means Unrecorded
+                Availability::Unrecorded
             };
 
             assert_eq!(
                 availability, expected,
                 "matrix and fixtures disagree for {kind:?} on {version}: \
-                 recorded_absent={recorded_absent}, matrix={availability:?}"
+                 fixture_exists={fixture_exists}, recorded_absent={recorded_absent}, \
+                 matrix={availability:?}, expected={expected:?}"
             );
         }
     }
