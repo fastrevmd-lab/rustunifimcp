@@ -92,3 +92,7 @@ fi
 
 printf 'done: %s\n' "$OUT"
 ls -1 "$OUT"
+
+# Verify captured fixtures contain no sensitive data
+printf '\nVerifying fixtures are scrubbed...\n'
+"$(dirname "$0")/verify-fixtures-scrubbed.sh" "$OUT"
