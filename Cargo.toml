@@ -14,11 +14,46 @@ repository = "https://github.com/fastrevmd-lab/rustunifimcp"
 authors = ["fastrevmd-lab"]
 
 [workspace.dependencies]
-rustunifimcp-core = { path = "rustunifimcp-core" }
+rustunifimcp-core = { path = "rustunifimcp-core", version = "0.0.0" }
 
-# mecmcp crates are added per phase as they are tagged upstream. Only
-# mecmcp-auth exists today; see PLAN.md for which phase gates on which crate.
-# mecmcp-auth = { git = "https://github.com/fastrevmd-lab/mecmcp", tag = "auth-v0.1.1" }
+anyhow      = "1"
+async-trait = "0.1"
+axum        = "0.8"
+axum-server = { version = "0.8", default-features = false, features = ["tls-rustls-no-provider"] }
+chrono      = { version = "0.4", default-features = false, features = ["serde", "clock"] }
+clap        = { version = "4", features = ["derive"] }
+http        = "1"
+rmcp        = { version = "3", features = ["server", "transport-io", "transport-streamable-http-server", "transport-streamable-http-server-session"] }
+rustls      = { version = "0.23", default-features = false, features = ["aws-lc-rs", "std", "tls12", "logging"] }
+schemars    = "1"
+serde       = { version = "1", features = ["derive"] }
+serde_json  = "1"
+sha2        = "0.11"
+thiserror   = "2"
+tokio       = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-util  = { version = "0.7", default-features = false, features = ["rt"] }
+tracing     = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+url         = "2"
+uuid        = { version = "1", features = ["v4"] }
+
+# Test-only
+rcgen        = "0.14"
+tokio-rustls = "0.26"
+
+# mecmcp is consumed read-only at an exact pinned version. Do not relax the tag.
+mecmcp-audit     = { version = "0.20.0", git = "https://github.com/fastrevmd-lab/mecmcp", tag = "v0.20.0" }
+mecmcp-auth      = { version = "0.20.0", git = "https://github.com/fastrevmd-lab/mecmcp", tag = "v0.20.0" }
+mecmcp-changeset = { version = "0.20.0", git = "https://github.com/fastrevmd-lab/mecmcp", tag = "v0.20.0" }
+mecmcp-http      = { version = "0.20.0", git = "https://github.com/fastrevmd-lab/mecmcp", tag = "v0.20.0" }
+mecmcp-inventory = { version = "0.20.0", git = "https://github.com/fastrevmd-lab/mecmcp", tag = "v0.20.0" }
+mecmcp-job       = { version = "0.20.0", git = "https://github.com/fastrevmd-lab/mecmcp", tag = "v0.20.0" }
+mecmcp-openapi   = { version = "0.20.0", git = "https://github.com/fastrevmd-lab/mecmcp", tag = "v0.20.0" }
+mecmcp-policy    = { version = "0.20.0", git = "https://github.com/fastrevmd-lab/mecmcp", tag = "v0.20.0" }
+mecmcp-runtime   = { version = "0.20.0", git = "https://github.com/fastrevmd-lab/mecmcp", tag = "v0.20.0" }
+mecmcp-secret    = { version = "0.20.0", git = "https://github.com/fastrevmd-lab/mecmcp", tag = "v0.20.0" }
+mecmcp-server    = { version = "0.20.0", git = "https://github.com/fastrevmd-lab/mecmcp", tag = "v0.20.0" }
+mecmcp-transport = { version = "0.20.0", git = "https://github.com/fastrevmd-lab/mecmcp", tag = "v0.20.0" }
 
 [workspace.lints.rust]
 missing_docs = "warn"
@@ -31,4 +66,6 @@ todo = "deny"
 unwrap_used = "warn"
 
 [profile.release]
+lto           = "thin"
 codegen-units = 1
+strip         = "symbols"
