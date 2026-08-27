@@ -903,7 +903,7 @@ request."
 - Produces:
   - `Controller { name, endpoint, site, api_key_env: Option<String>, api_key_file: Option<PathBuf>, ca_pem_path: Option<PathBuf>, allow_private_api: bool, allow_cloud: bool }`
   - `ControllerRegistry::load(path: &Path) -> Result<Self, UnifiError>`
-  - `ControllerRegistry::get(&self, name: &str) -> Result<&Controller, UnifiError>`
+  - `ControllerRegistry::get(&self, name: &str) -> Result<Controller, UnifiError>` — returns **owned**, not borrowed: the registry hot-reloads on SIGHUP, and a borrow tied to it invites a reference held across a reload. Matches `rustproxmoxmcp`'s inventory.
   - `Controller::load_api_key(&self) -> Result<OutboundSecret, UnifiError>`
 
 - [ ] **Step 1: Write the failing tests**
