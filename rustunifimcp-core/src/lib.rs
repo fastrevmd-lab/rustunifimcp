@@ -11,6 +11,7 @@
 pub mod client;
 pub mod error;
 pub mod inventory;
+pub mod tools;
 
 /// The UniFi API surface an endpoint belongs to.
 ///
