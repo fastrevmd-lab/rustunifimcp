@@ -6,7 +6,7 @@
 //! 03:00.
 
 use rustunifimcp_core::model::ResourceKind;
-use rustunifimcp_core::testing::is_absent;
+use rustunifimcp_core::testing::{fixtures_available, is_absent};
 use rustunifimcp_core::version::{endpoint_availability, Availability};
 
 /// Every version directory under tests/fixtures/.
@@ -33,6 +33,10 @@ fn at_least_two_controller_versions_are_recorded() {
 
 #[test]
 fn the_matrix_agrees_with_what_was_recorded() {
+    if !fixtures_available() {
+        eprintln!("SKIPPED: no fixtures. Run scripts/capture-fixtures.sh against a controller.");
+        return;
+    }
     for version in recorded_versions() {
         for kind in ResourceKind::ALL {
             let fixture_name = kind_fixture_name(*kind);

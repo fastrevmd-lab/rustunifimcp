@@ -7,6 +7,8 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
+use rustunifimcp_core::testing::fixtures_available;
+
 /// Path to the verification script relative to workspace root.
 const GATE_SCRIPT: &str = "scripts/verify-fixtures-scrubbed.sh";
 
@@ -42,6 +44,10 @@ fn run_gate(fixture_dir: &str) -> (i32, String, String) {
 
 #[test]
 fn gate_passes_on_verified_clean_fixtures() {
+    if !fixtures_available() {
+        eprintln!("SKIPPED: no fixtures. Run scripts/capture-fixtures.sh against a controller.");
+        return;
+    }
     let (code, stdout, stderr) = run_gate(CLEAN_FIXTURE_DIR);
 
     assert_eq!(

@@ -126,7 +126,7 @@ impl ResourceKind {
 #[cfg(test)]
 mod tests {
     use super::ResourceKind;
-    use crate::testing::{fixture, DEFAULT_FIXTURE_VERSION};
+    use crate::testing::{fixture, fixtures_available, DEFAULT_FIXTURE_VERSION};
     use crate::ApiSurface;
 
     /// Every kind must declare a surface. A kind whose surface is wrong is how
@@ -160,6 +160,10 @@ mod tests {
 
     #[test]
     fn sites_parse_from_the_recorded_response() {
+        if !fixtures_available() {
+            eprintln!("SKIPPED: no fixtures. Run scripts/capture-fixtures.sh against a controller.");
+            return;
+        }
         let raw = fixture(DEFAULT_FIXTURE_VERSION, "sites");
         let sites = crate::model::site::parse_sites(&raw).expect("sites parse");
         assert!(
@@ -170,6 +174,10 @@ mod tests {
 
     #[test]
     fn networks_parse_from_the_recorded_response() {
+        if !fixtures_available() {
+            eprintln!("SKIPPED: no fixtures. Run scripts/capture-fixtures.sh against a controller.");
+            return;
+        }
         let raw = fixture(DEFAULT_FIXTURE_VERSION, "networkconf");
         let networks =
             crate::model::network::parse_networks(&raw).expect("networks parse");

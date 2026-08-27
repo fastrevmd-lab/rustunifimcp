@@ -22,3 +22,9 @@ controllers.json
 .unifikey
 *.unifikey
 .unifi-api-key
+
+# Recorded controller fixtures are captured from a live controller and are
+# deliberately not published. A fresh clone has none. Regenerate with
+# scripts/capture-fixtures.sh against a live controller.
+rustunifimcp-core/tests/fixtures/*/
+!rustunifimcp-core/tests/fixtures/README.md

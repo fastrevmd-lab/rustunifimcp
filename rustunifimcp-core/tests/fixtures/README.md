@@ -1,7 +1,12 @@
 # UniFi Controller Fixtures
 
-This directory contains JSON fixtures captured from live UniFi controllers for
-testing endpoint compatibility across controller versions.
+**Fixtures are deliberately not committed.** They are captured from a live
+controller and contain scrubbed but still controller-specific data. A fresh
+clone has no fixtures and must regenerate them by running
+`scripts/capture-fixtures.sh` against a live controller.
+
+This directory contains the scaffolding for JSON fixtures captured from live
+UniFi controllers for testing endpoint compatibility across controller versions.
 
 ## Directory Structure
 

@@ -11,6 +11,28 @@ use std::path::PathBuf;
 /// The version matrix in `tests/version_matrix.rs` deliberately reads others.
 pub const DEFAULT_FIXTURE_VERSION: &str = "10.5.67";
 
+/// Whether any recorded fixtures are present in this checkout.
+///
+/// Fixtures are captured from a live controller and are deliberately not
+/// committed, so a fresh clone has none. Tests that need them skip rather than
+/// fail — a missing fixture is an un-run test, never a passing one.
+#[must_use]
+pub fn fixtures_available() -> bool {
+    let fixtures_dir: PathBuf = [env!("CARGO_MANIFEST_DIR"), "tests", "fixtures"]
+        .iter()
+        .collect();
+
+    std::fs::read_dir(fixtures_dir)
+        .ok()
+        .and_then(|entries| {
+            entries
+                .filter_map(Result::ok)
+                .any(|entry| entry.path().is_dir())
+                .then_some(())
+        })
+        .is_some()
+}
+
 /// Load a recorded controller response.
 ///
 /// # Panics
@@ -57,10 +79,14 @@ pub fn is_absent(version: &str, name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::fixture;
+    use super::{fixture, fixtures_available};
 
     #[test]
     fn loads_a_recorded_sites_response() {
+        if !fixtures_available() {
+            eprintln!("SKIPPED: no fixtures. Run scripts/capture-fixtures.sh against a controller.");
+            return;
+        }
         let value = fixture(super::DEFAULT_FIXTURE_VERSION, "sites");
         assert!(value.is_object() || value.is_array());
     }
