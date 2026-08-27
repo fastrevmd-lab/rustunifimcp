@@ -17,3 +17,8 @@ controllers.json
 
 # subagent-driven-development scratch
 .superpowers/
+
+# Local UniFi API key — never commit. mecmcp-secret requires mode 0600.
+.unifikey
+*.unifikey
+.unifi-api-key
