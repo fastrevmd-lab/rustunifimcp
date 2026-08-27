@@ -55,6 +55,30 @@ Re-run the script and refresh this table before each cutover.
 - **gap (open)** — no coverage and no decision yet. **A cutover cannot proceed
   with an open gap.**
 
+## Terminology note
+
+**`kind=station` not `kind=client`:** UniFi calls an associated device a
+"client", but `client.rs` in this crate is the HTTP client. The collision would
+land in every import. `Station` is the 802.11 term and reads unambiguously next
+to `Device`. Task 8 defines the variant as `Station`, which serializes as
+`station` in tool calls.
+
+## Assumptions to verify
+
+**WAN connections and DNS map to `kind=network`:** In UniFi's data model, a WAN
+*is* a network — `networkconf` entries carry `purpose: "wan"`, and WAN DNS lives
+on those same entries as `wan_dns1` / `wan_dns2` fields. Therefore:
+- `list_wan_connections` → `unifi_list_resources kind=network` (filtering for
+  `purpose=wan` entries)
+- `list_wan_dns` → `unifi_get_resource kind=network` (reading `wan_dns*` fields
+  from those entries)
+
+**This mapping is asserted, not verified.** Task 4's fixtures are blocked on a
+controller certificate, so no `networkconf` capture exists yet. **Task 8 must
+confirm this against the recorded fixture and add a `Wan` variant if the fields
+are absent.** An unverified mapping stated as verified is exactly the silent
+loss this audit exists to prevent.
+
 ## Accepted gaps
 
 ### Configuration writes (Phase 6)
