@@ -1503,6 +1503,13 @@ impl ResourceKind {
 }
 ```
 
+**Verify the WAN assumption while you are here.** `docs/PARITY-AUDIT.md` maps
+`list_wan_connections` and `list_wan_dns` to `kind=network` on the reasoning that
+a UniFi WAN *is* a network — `networkconf` entries carrying `purpose: "wan"`,
+with WAN DNS on the same entries as `wan_dns1` / `wan_dns2`. Confirm that against
+the recorded `networkconf` fixture. If the fields are not there, add a `Wan`
+variant and update the audit; do not leave the mapping asserted but unchecked.
+
 **Correct the templates against the fixtures Task 4 actually captured.** The paths above are the expected shapes; the recorded responses are the truth. If a fixture came back `.absent`, the template is wrong or the route does not exist on that version — resolve it now, not in Phase 2.
 
 - [ ] **Step 4: Implement one module per kind**
