@@ -68,7 +68,7 @@ including the first fixture capture.
 
 **A wildcard token is read-only — but only if the write-tool registry is
 populated.** `mecmcp-server` enforces the rule against a registry the server
-supplies as a parameter, and `crates/mecmcp-server/src/authorize.rs:237` pins
+supplies as a parameter, and `mecmcp-server`'s `an_empty_write_tool_registry_lets_a_wildcard_reach_a_write_tool` pins
 the failure mode: an empty registry turns every wildcard token into a writer.
 All four operational tools and all seven change-set tools must be registered,
 and a test must assert the list.

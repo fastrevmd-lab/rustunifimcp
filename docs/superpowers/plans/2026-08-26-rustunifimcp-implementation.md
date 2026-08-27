@@ -70,7 +70,7 @@ rustunifimcp-core/tests/
   fixtures/<version>/*.json     recorded controller responses
   version_matrix.rs             which endpoints exist on which version
   changeset_lifecycle.rs        state machine incl. partial apply + rollback failure
-  write_tool_registry.rs        the authorize.rs:237 footgun guard
+  write_tool_registry.rs        the an_empty_write_tool_registry_lets_a_wildcard_reach_a_write_tool footgun guard
   lab.rs                        feature-gated; live controller; not run in CI
 
 packaging/
@@ -1696,7 +1696,7 @@ The first runnable binary. Five read primitives plus three administration tools 
 
 ### Task 10: The write-tool registry and its guard
 
-This comes **first** in Phase 2, before any tool exists, because the failure mode it guards against is silent. `mecmcp-server` enforces "a wildcard token is read-only" against a registry the server passes in as a parameter, and `crates/mecmcp-server/src/authorize.rs:237` pins the consequence in a test of its own: an empty registry turns every wildcard token into a writer.
+This comes **first** in Phase 2, before any tool exists, because the failure mode it guards against is silent. `mecmcp-server` enforces "a wildcard token is read-only" against a registry the server passes in as a parameter, and `mecmcp-server`'s `an_empty_write_tool_registry_lets_a_wildcard_reach_a_write_tool` pins the consequence in a test of its own: an empty registry turns every wildcard token into a writer.
 
 **Files:**
 - Create: `rustunifimcp-core/src/tools/mod.rs`
@@ -1715,7 +1715,7 @@ This comes **first** in Phase 2, before any tool exists, because the failure mod
 //!
 //! `--tools '*'` grants read-only tools only, and that rule is enforced against
 //! a registry this server supplies as a parameter. mecmcp's own
-//! `authorize.rs:237` pins the failure mode: an empty registry turns every
+//! `an_empty_write_tool_registry_lets_a_wildcard_reach_a_write_tool` pins the failure mode: an empty registry turns every
 //! wildcard token into a writer. So the registry is asserted by name here, not
 //! by count -- a count passes a refactor that renames a tool out of it.
 
@@ -1812,7 +1812,7 @@ pub const TOOL_NAMES: &[&str] = &[
 ///
 /// **This must never be empty and must never be computed.** `--tools '*'`
 /// grants read-only tools only, and the rule is enforced against exactly this
-/// slice. `mecmcp-server`'s own `authorize.rs:237` demonstrates that an empty
+/// slice. `mecmcp-server`'s own `an_empty_write_tool_registry_lets_a_wildcard_reach_a_write_tool` demonstrates that an empty
 /// registry turns every wildcard token into a writer, so the list is written
 /// out by hand and asserted by name in `tests/write_tool_registry.rs`.
 pub const WRITE_TOOLS: &[&str] = &[
@@ -1866,7 +1866,7 @@ git add rustunifimcp-core/src/tools/mod.rs rustunifimcp-core/tests/write_tool_re
 git commit -m "feat: the write-tool registry, guarded by name
 
 mecmcp-server enforces wildcard-is-read-only against a registry this server
-passes in. authorize.rs:237 shows what an empty one does: every wildcard token
+passes in. an_empty_write_tool_registry_lets_a_wildcard_reach_a_write_tool shows what an empty one does: every wildcard token
 becomes a writer. The list is hand-written and asserted by name, not by count."
 ```
 

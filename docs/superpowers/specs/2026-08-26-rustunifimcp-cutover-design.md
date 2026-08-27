@@ -100,7 +100,7 @@ explicitly in a token's scope. This is enforced in `mecmcp-server`, not per
 repo.
 
 It is enforced against a **write-tool registry the server supplies as a
-parameter**. `crates/mecmcp-server/src/authorize.rs:237` pins the failure mode
+parameter**. `mecmcp-server`'s `an_empty_write_tool_registry_lets_a_wildcard_reach_a_write_tool` pins the failure mode
 in a test named for it: passing an empty registry turns every wildcard token
 into a writer.
 
@@ -397,7 +397,7 @@ And one this design adds:
 - **A write-tool registry assertion** — a test that the registry passed to
   `mecmcp-server` is non-empty and contains exactly the mutating tools that
   exist at that phase: four after Phase 3, eleven after Phase 6. The assertion
-  is written against an explicit list, not a count, so the `authorize.rs:237`
+  is written against an explicit list, not a count, so the `an_empty_write_tool_registry_lets_a_wildcard_reach_a_write_tool`
   footgun cannot be reintroduced by refactor.
 
 ## Risks
