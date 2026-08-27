@@ -306,22 +306,51 @@ Two artefacts, both inputs to everything after. The parity audit **is** the cuto
 ```sh
 #!/bin/sh
 # scripts/audit-legacy-usage.sh
-# Count invocations of the legacy unifi-mcp tools across Claude Code session
+# Count INVOCATIONS of the legacy unifi-mcp tools across Claude Code session
 # history. Output is TSV: count, tool name. Sorted most-used first.
 #
 # The legacy server is enuno/unifi-mcp-server on LXC 980; its tools appear in
 # transcripts as mcp__unifi-mcp__<name>.
+#
+# A plain `grep -o mcp__unifi-mcp__[a-z_]*` DOES NOT WORK and is the reason this
+# script parses JSON instead. Every session transcript embeds the server's full
+# tool list in its prompt, so grep counts tool *availability*: it returns all
+# ~198 registered tools at a near-uniform ~1,790 hits each (one per session).
+# That sets the parity bar to "everything" and defeats the audit. Only a
+# `"type":"tool_use"` block is an actual call.
 set -eu
 
 HISTORY_ROOT="${HISTORY_ROOT:-$HOME/.claude}"
 
-find "$HISTORY_ROOT" -name '*.jsonl' -type f -print0 \
-  | xargs -0 grep -ho 'mcp__unifi-mcp__[a-z0-9_]*' 2>/dev/null \
-  | sed 's/^mcp__unifi-mcp__//' \
-  | sort \
-  | uniq -c \
-  | sort -rn \
-  | awk '{ printf "%s\t%s\n", $1, $2 }'
+find "$HISTORY_ROOT" -name '*.jsonl' -type f -print0 2>/dev/null \
+  | xargs -0 cat 2>/dev/null \
+  | python3 -c '
+import json, sys, collections
+
+calls = collections.Counter()
+
+def walk(node):
+    """Transcript records nest tool_use blocks at varying depths."""
+    if isinstance(node, dict):
+        if node.get("type") == "tool_use" and str(node.get("name", "")).startswith(
+            "mcp__unifi-mcp__"
+        ):
+            calls[node["name"].removeprefix("mcp__unifi-mcp__")] += 1
+        for value in node.values():
+            walk(value)
+    elif isinstance(node, list):
+        for value in node:
+            walk(value)
+
+for line in sys.stdin:
+    try:
+        walk(json.loads(line))
+    except Exception:
+        continue
+
+for name, count in calls.most_common():
+    print(f"{count}\t{name}")
+'
 ```
 
 - [ ] **Step 2: Run it and confirm it finds something**
@@ -333,7 +362,18 @@ chmod +x scripts/audit-legacy-usage.sh
 ./scripts/audit-legacy-usage.sh | wc -l
 ```
 
-Expected: a non-empty list. **If it returns zero rows, stop and investigate before continuing** — an empty audit would silently set the parity bar to nothing, which is the opposite of what this task is for. Check that `$HISTORY_ROOT` is right and that transcripts actually contain `mcp__unifi-mcp__`.
+Expected, as measured on 2026-08-26: **34 distinct tools, 114 total invocations.**
+
+Two failure modes, in opposite directions, and both are real:
+
+- **Zero rows** — the parity bar would be silently set to nothing. Check that
+  `$HISTORY_ROOT` is right and that transcripts contain `mcp__unifi-mcp__`.
+- **~198 rows at a near-uniform count** — you are counting the tool list in each
+  session's prompt rather than calls, which sets the bar to "everything". That is
+  what the naive `grep` did before this script parsed JSON. If every count lands
+  in the same narrow band, this is what happened.
+
+Neither is a result to write into the audit. Stop and fix the extraction.
 
 - [ ] **Step 3: Write the audit document**
 
