@@ -88,7 +88,7 @@ impl UnifiClient {
     ///
     /// # Errors
     ///
-    /// Returns [`UnifiError::SurfaceNotPermitted`] if the controller has not
+    /// Returns [`UnifiError::SurfaceRequiresConfig`] if the controller has not
     /// opted into the private or cloud surfaces, or [`UnifiError::Malformed`]
     /// for the cloud surface, which is unimplemented in v1.
     pub fn ensure_surface_permitted(
@@ -105,7 +105,7 @@ impl UnifiClient {
             ApiSurface::Cloud if controller.allow_cloud => Err(UnifiError::Malformed(
                 "the cloud Site Manager surface is not implemented in v1".to_owned(),
             )),
-            other => Err(UnifiError::SurfaceNotPermitted { surface: other }),
+            other => Err(UnifiError::SurfaceRequiresConfig { surface: other }),
         }
     }
 
@@ -220,7 +220,7 @@ impl UnifiClient {
     /// # Errors
     ///
     /// Returns:
-    /// - [`UnifiError::SurfaceNotPermitted`] if the controller hasn't opted into
+    /// - [`UnifiError::SurfaceRequiresConfig`] if the controller hasn't opted into
     ///   this surface
     /// - [`UnifiError::PrivateEndpointAbsent`] for 404 on a private surface
     /// - [`UnifiError::Upstream`] for other error statuses
@@ -443,10 +443,7 @@ impl UnifiClient {
             });
         }
 
-        let detail = String::from_utf8_lossy(body)
-            .chars()
-            .take(500)
-            .collect::<String>();
+        let detail = crate::error::sanitize_detail(&String::from_utf8_lossy(body));
 
         Err(UnifiError::Upstream { status, detail })
     }
@@ -480,10 +477,7 @@ impl UnifiClient {
 
         // Treat non-2xx as error, but don't recursively handle it
         if response.status() >= 300 {
-            let detail = String::from_utf8_lossy(response.body())
-                .chars()
-                .take(500)
-                .collect::<String>();
+            let detail = crate::error::sanitize_detail(&String::from_utf8_lossy(response.body()));
             return Err(UnifiError::Upstream {
                 status: response.status(),
                 detail,
@@ -553,7 +547,7 @@ mod tests {
             UnifiClient::ensure_surface_permitted(&controller, ApiSurface::PrivateV2);
         assert!(matches!(
             permitted,
-            Err(crate::error::UnifiError::SurfaceNotPermitted { .. })
+            Err(crate::error::UnifiError::SurfaceRequiresConfig { .. })
         ));
     }
 
