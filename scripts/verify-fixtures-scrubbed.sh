@@ -1,7 +1,7 @@
 #!/bin/sh
 # Verify that fixture files contain no sensitive data.
 #
-# Usage: verify-fixtures-scrubbed.sh <fixture-dir>
+# Usage: verify-fixtures-scrubbed.sh [--allow-missing-denylist] <fixture-dir>
 #
 # Exit codes:
 #   0  all fixtures clean
@@ -15,7 +15,6 @@ if [ $# -lt 1 ]; then
     exit 2
 fi
 
-FIXTURE_DIR="$1"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-exec python3 "$SCRIPT_DIR/verify-fixtures-scrubbed.py" "$FIXTURE_DIR"
+exec python3 "$SCRIPT_DIR/verify-fixtures-scrubbed.py" "$@"
