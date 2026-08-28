@@ -34,6 +34,8 @@ enum Behavior {
     DriftBeforeApply,
     /// The staleness check itself fails, rather than reporting drift.
     PreimageCheckErrors,
+    /// Writes all succeed, but verification cannot confirm them.
+    VerificationFails,
 }
 
 impl MockController {
@@ -43,6 +45,19 @@ impl MockController {
         Self {
             state: Arc::new(MockState {
                 behavior: Behavior::SucceedAll,
+                write_calls: AtomicUsize::new(0),
+                rollback_calls: AtomicUsize::new(0),
+                rollback_history: Mutex::new(Vec::new()),
+            }),
+        }
+    }
+
+    /// Configure the mock so writes succeed but verification cannot confirm them.
+    #[must_use]
+    pub fn failing_verification() -> Self {
+        Self {
+            state: Arc::new(MockState {
+                behavior: Behavior::VerificationFails,
                 write_calls: AtomicUsize::new(0),
                 rollback_calls: AtomicUsize::new(0),
                 rollback_history: Mutex::new(Vec::new()),
@@ -145,7 +160,9 @@ impl ControllerOps for MockController {
             Behavior::FailAt(n) | Behavior::FailAtWithRollbackFailure { fail_at: n, .. } => {
                 index + 1 >= *n
             }
-            Behavior::DriftBeforeApply | Behavior::PreimageCheckErrors => false,
+            Behavior::DriftBeforeApply
+            | Behavior::PreimageCheckErrors
+            | Behavior::VerificationFails => false,
         };
 
         self.state.write_calls.fetch_add(1, Ordering::SeqCst);
@@ -224,7 +241,11 @@ impl ControllerOps for MockController {
         mutations: &[StagedMutation],
         created_ids: &std::collections::HashMap<usize, String>,
     ) -> Result<(), UnifiError> {
-        // Mock verification - always succeeds for testing
+        if matches!(self.state.behavior, Behavior::VerificationFails) {
+            return Err(UnifiError::Malformed(
+                "mock verification could not confirm resource network/id1".to_owned(),
+            ));
+        }
         for (index, mutation) in mutations.iter().enumerate() {
             match mutation {
                 StagedMutation::Create { kind, .. } => {

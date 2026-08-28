@@ -19,7 +19,7 @@ Re-run the script and refresh this table before each cutover.
 | list_sites | 7 | `unifi_list_sites` | planned |
 | get_device_port_overrides | 6 | `unifi_get_resource kind=device` | planned |
 | update_dhcp_reservation | 6 | `unifi_stage_change` (Phase 6) | gap (accepted) |
-| set_device_port_overrides | 4 | `unifi_stage_change` (Phase 6) | gap (accepted) |
+| set_device_port_overrides | 4 | none — no verified write route | gap (open, see below) |
 | create_port_profile | 4 | `unifi_stage_change` (Phase 6) | gap (accepted) |
 | list_dhcp_reservations | 4 | `unifi_list_resources kind=dhcp_reservation` | planned |
 | health_check | 3 | `unifi_site_health_report` | planned |
@@ -78,6 +78,33 @@ controller certificate, so no `networkconf` capture exists yet. **Task 8 must
 confirm this against the recorded fixture and add a `Wan` variant if the fields
 are absent.** An unverified mapping stated as verified is exactly the silent
 loss this audit exists to prevent.
+
+## Open gap: device configuration writes
+
+`set_device_port_overrides` was mapped onto the change-set lifecycle writing
+through `/proxy/network/api/s/{site}/rest/device/{id}`. **That route does not
+exist on UniFi Network 10.5.67.** Probed read-only on 2026-08-28:
+
+| Path | Status |
+|---|---|
+| `/proxy/network/api/s/{site}/rest/device` | 404 |
+| `/proxy/network/api/s/{site}/rest/device/{id}` | 404 |
+| `/proxy/network/api/s/{site}/upd/device/{id}` | 404 |
+| `/proxy/network/api/s/{site}/rest/networkconf` | 200 |
+| `/proxy/network/api/s/{site}/rest/firewallgroup` | 200 |
+| `/proxy/network/v2/api/site/{site}/device` | 200 (read) |
+
+The sibling `rest/*` routes answering 200 rules out the surface and the
+credential: it is the device route specifically that is absent.
+
+The correct route was **not** determined, because finding it means writing port
+overrides to a live controller, and port overrides reconfigure switch ports.
+`kind=device` writes therefore refuse with an explicit error naming the gap.
+Refusing keeps the gap visible; PUTting to a 404 would read as a generic
+controller failure and leave this row looking satisfied.
+
+Device *operations* — restart, locate, adopt, upgrade, port-action — are
+unaffected and ship in `unifi_device_action`.
 
 ## Accepted gaps
 

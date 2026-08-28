@@ -21,6 +21,13 @@ pub struct Outcome {
     pub never_attempted: Vec<StagedMutation>,
     /// Rollback operations that failed.
     pub rollback_failures: Vec<String>,
+    /// Why verification could not confirm the apply, when it could not.
+    ///
+    /// Set only alongside [`State::AppliedUnverified`]. `AppliedUnverified`
+    /// tells an operator the writes went out but were not confirmed; without
+    /// naming which resource failed and why, that is not actionable at the
+    /// hour someone is usually reading it.
+    pub verification_failure: Option<String>,
 }
 
 /// The state of a change set after apply.
@@ -62,6 +69,7 @@ where
             attempted_and_failed: Vec::new(),
             never_attempted: mutations.to_vec(),
             rollback_failures: Vec::new(),
+            verification_failure: None,
         };
     }
 
@@ -91,10 +99,11 @@ where
 
     // If all succeeded, verify they landed as expected
     if attempted_and_failed.is_empty() && never_attempted.is_empty() {
-        let state = match controller.verify_applied(mutations, &created_ids).await {
-            Ok(()) => State::Applied,
-            Err(_) => State::AppliedUnverified,
-        };
+        let (state, verification_failure) =
+            match controller.verify_applied(mutations, &created_ids).await {
+                Ok(()) => (State::Applied, None),
+                Err(error) => (State::AppliedUnverified, Some(error.to_string())),
+            };
         return Outcome {
             state,
             succeeded,
@@ -102,6 +111,7 @@ where
             attempted_and_failed: Vec::new(),
             never_attempted: Vec::new(),
             rollback_failures: Vec::new(),
+            verification_failure,
         };
     }
 
@@ -119,6 +129,7 @@ where
             attempted_and_failed,
             never_attempted,
             rollback_failures: Vec::new(),
+            verification_failure: None,
         },
         Err(rollback_failures) => Outcome {
             state: State::PartialRollbackFailed,
@@ -127,6 +138,7 @@ where
             attempted_and_failed,
             never_attempted,
             rollback_failures,
+            verification_failure: None,
         },
     }
 }

@@ -86,6 +86,27 @@ async fn apply_refuses_when_the_preimage_no_longer_matches() {
     assert_eq!(controller.write_calls(), 0, "nothing was written");
 }
 
+/// An unverified apply must say what it could not confirm.
+///
+/// `AppliedUnverified` exists to tell an operator the writes went out but were
+/// not confirmed. Without naming the resource and the reason, that is a state
+/// with no next action attached, read at the hour when next actions matter
+/// most.
+#[tokio::test]
+async fn an_unverified_apply_carries_the_reason_it_could_not_be_confirmed() {
+    let controller = MockController::failing_verification();
+    let outcome = run_change_set(&controller, five_mutations()).await;
+    assert_eq!(outcome.state, State::AppliedUnverified);
+    let reason = outcome
+        .verification_failure
+        .as_deref()
+        .expect("an unverified apply must record why");
+    assert!(
+        !reason.trim().is_empty(),
+        "the recorded reason must carry detail, not an empty string"
+    );
+}
+
 /// A staleness check that could not run must refuse exactly like one that
 /// found drift.
 ///

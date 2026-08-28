@@ -573,14 +573,32 @@ impl crate::changeset::apply::ControllerOps for UnifiClient {
                 let resource_kind: ResourceKind = serde_json::from_value(kind_value)
                     .map_err(|e| UnifiError::Malformed(format!("unknown resource kind '{kind}': {e}")))?;
 
-                // Device writes use the Private v1 surface, not the Integration API read path.
-                // See docs/PARITY-AUDIT.md:84-93 - set_device_port_overrides writes through
-                // /proxy/network/api/s/{site}/rest/device/{id}, not the Integration v1 devices endpoint.
-                let (surface, template): (ApiSurface, String) = if kind == "device" {
-                    (ApiSurface::PrivateV1, "/proxy/network/api/s/{site}/rest/device/{id}".to_owned())
-                } else {
-                    (resource_kind.surface(), single_resource_template(resource_kind))
-                };
+                // Device configuration writes have no verified route on this
+                // controller family, so they are refused rather than guessed.
+                //
+                // `docs/PARITY-AUDIT.md` maps set_device_port_overrides onto the
+                // change-set lifecycle via /proxy/network/api/s/{site}/rest/device/{id}.
+                // Probed read-only against UniFi Network 10.5.67, that path returns
+                // 404, as does /upd/device/{id}; the sibling rest/networkconf and
+                // rest/firewallgroup return 200, so this is the device route being
+                // absent rather than the surface or the credential.
+                //
+                // Writing port overrides reconfigures switch ports, so the route is
+                // not determined by trying candidates against a live controller.
+                // Until one is confirmed, refusing names the gap; PUTting to a 404
+                // would surface as a generic failure and leave the parity claim
+                // looking satisfied.
+                if kind == "device" {
+                    return Err(UnifiError::Malformed(
+                        "device configuration writes are not supported: no verified \
+                         write route exists for kind 'device' on this controller. \
+                         Device operations (restart, locate, adopt, upgrade, \
+                         port-action) are available through unifi_device_action."
+                            .to_owned(),
+                    ));
+                }
+                let (surface, template): (ApiSurface, String) =
+                    (resource_kind.surface(), single_resource_template(resource_kind));
 
                 let site = self.default_site_for(surface).await?;
 
