@@ -332,4 +332,50 @@ mod tests {
             "WRITE_TOOLS must never be empty — an empty registry lets wildcards reach writes"
         );
     }
+
+    /// The router and the registry must agree, in both directions.
+    ///
+    /// A name in `TOOL_NAMES` the server does not serve is a promise it cannot
+    /// keep — `unifi_add_controller` was exactly that, so its documented
+    /// "edit the file and HUP" guidance could never reach a caller. A tool the
+    /// server serves that is absent from `TOOL_NAMES` is worse: it escapes the
+    /// `WRITE_TOOLS` classification entirely, which is how a mutating tool
+    /// becomes reachable by a wildcard token.
+    #[test]
+    fn the_router_serves_exactly_the_registered_tools() {
+        use rustunifimcp_core::tools::TOOL_NAMES;
+        use std::collections::BTreeSet;
+
+        let router = UnifiServer::unifi_tool_router();
+        let all_tools = router.list_all();
+        let served_names: BTreeSet<String> = all_tools
+            .iter()
+            .map(|tool| tool.name.to_string())
+            .collect();
+        let registered_names: BTreeSet<String> = TOOL_NAMES.iter().map(|s| (*s).to_owned()).collect();
+
+        // Check for tools in TOOL_NAMES but not served.
+        let missing_from_router: Vec<String> = registered_names
+            .difference(&served_names)
+            .cloned()
+            .collect();
+        assert!(
+            missing_from_router.is_empty(),
+            "TOOL_NAMES declares tools the server does not serve: {:?}",
+            missing_from_router
+        );
+
+        // Check for tools served but not in TOOL_NAMES.
+        let missing_from_registry: Vec<String> = served_names
+            .difference(&registered_names)
+            .cloned()
+            .collect();
+        assert!(
+            missing_from_registry.is_empty(),
+            "Server serves tools absent from TOOL_NAMES: {:?}",
+            missing_from_registry
+        );
+
+        // Both directions pass — the sets are equal.
+    }
 }
