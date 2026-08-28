@@ -249,6 +249,26 @@ impl UnifiServer {
             Err(error) => tool_error(error),
         }
     }
+
+    #[tool(
+        name = "unifi_add_controller",
+        description = "Add a controller to the inventory (fails in production - edit config instead)"
+    )]
+    async fn unifi_add_controller(
+        &self,
+        Parameters(_args): Parameters<NoArgs>,
+        context: RequestContext<RoleServer>,
+    ) -> CallToolResult {
+        let caller = Self::caller(&context);
+        if let Err(error) = authorize_call(caller.as_ref(), "unifi_add_controller", None, WRITE_TOOLS) {
+            return tool_error(error);
+        }
+
+        match admin::unifi_add_controller("", "", "", None, None).await {
+            Ok(json) => tool_result(Ok::<_, String>(json), ResultFormat::PrettyJson, RESULT_LIMITS),
+            Err(error) => tool_error(error),
+        }
+    }
 }
 
 /// Apply cache hints to a tool list when the client negotiated 2026-07-28 or later.
