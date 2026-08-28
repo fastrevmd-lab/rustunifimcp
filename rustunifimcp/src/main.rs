@@ -275,15 +275,17 @@ async fn run_inner() -> Result<()> {
     );
 
     // Build server.
-    let server = UnifiServer::new(registry, cli.lab_mode())?;
+    let server = UnifiServer::new(Arc::clone(&registry), cli.lab_mode())?;
 
     // Determine transport.
     match cli.common.transport {
         mecmcp_runtime::cli::Transport::Stdio => {
+            // SIGHUP reloads the inventory in place. Stdio has no token store.
+            install_sighup_reload(registry, None)?;
             serve_stdio(server).await
         }
         mecmcp_runtime::cli::Transport::StreamableHttp => {
-            serve_http(server, &cli).await
+            serve_http(server, &cli, registry).await
         }
     }
 }
@@ -315,6 +317,64 @@ fn load_listener_tls(args: &mecmcp_runtime::cli::Cli) -> Result<Option<Arc<rustl
     }
 }
 
+/// Install a SIGHUP handler that reloads configuration.
+///
+/// On SIGHUP:
+/// - Controller inventory is reloaded from disk
+/// - Token store is reloaded (HTTP mode only)
+///
+/// A reload failure logs at `warn` and retains the previous configuration rather
+/// than terminating the running server.
+///
+/// # Errors
+///
+/// Returns error if the signal handler could not be registered.
+fn install_sighup_reload(
+    registry: Arc<rustunifimcp_core::inventory::ControllerRegistry>,
+    token_store: Option<Arc<mecmcp_auth::TokenStoreFile<mecmcp_auth::NoGrant>>>,
+) -> std::io::Result<()> {
+    mecmcp_runtime::signals::install_hup_handler(move || {
+        // Reload controller inventory.
+        match registry.reload() {
+            Ok(count) => {
+                tracing::info!(
+                    target: "audit",
+                    controllers = count,
+                    "controller inventory reloaded"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    target: "audit",
+                    %error,
+                    "controller inventory reload failed; retaining previous snapshot"
+                );
+            }
+        }
+
+        // Reload token store if present (HTTP mode only).
+        if let Some(ref store) = token_store {
+            match store.reload() {
+                Ok(()) => {
+                    let count = store.store().len();
+                    tracing::info!(
+                        target: "audit",
+                        tokens = count,
+                        "token store reloaded"
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        target: "audit",
+                        %error,
+                        "token store reload failed; retaining previous snapshot"
+                    );
+                }
+            }
+        }
+    })
+}
+
 async fn serve_stdio(
     handler: UnifiServer,
 ) -> Result<()> {
@@ -331,6 +391,7 @@ async fn serve_stdio(
 async fn serve_http(
     handler: UnifiServer,
     cli: &UnifiCli,
+    registry: Arc<rustunifimcp_core::inventory::ControllerRegistry>,
 ) -> Result<()> {
 
     // Load token store if provided.
@@ -341,6 +402,9 @@ async fn serve_http(
     } else {
         None
     };
+
+    // Install SIGHUP handler that reloads both inventory and token store.
+    install_sighup_reload(registry, token_store.clone())?;
 
     let shutdown = CancellationToken::new();
     let router = build_http_router(
@@ -635,4 +699,122 @@ mod tests {
             _ => panic!("expected TokenAction::SetScopes"),
         }
     }
+
+    #[tokio::test]
+    async fn sighup_handler_installs_without_token_store() {
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        // Create a minimal valid controllers.json
+        let mut controllers_file = NamedTempFile::new().unwrap();
+        writeln!(controllers_file, "{{}}").unwrap();
+        controllers_file.flush().unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(controllers_file.path())
+                .unwrap()
+                .permissions();
+            perms.set_mode(0o600);
+            std::fs::set_permissions(controllers_file.path(), perms).unwrap();
+        }
+
+        let registry = Arc::new(
+            rustunifimcp_core::inventory::ControllerRegistry::load(controllers_file.path())
+                .unwrap()
+        );
+
+        // Should install successfully without a token store.
+        let result = install_sighup_reload(registry, None);
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn sighup_handler_installs_with_token_store() {
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        // Create a minimal valid controllers.json
+        let mut controllers_file = NamedTempFile::new().unwrap();
+        writeln!(controllers_file, "{{}}").unwrap();
+        controllers_file.flush().unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(controllers_file.path())
+                .unwrap()
+                .permissions();
+            perms.set_mode(0o600);
+            std::fs::set_permissions(controllers_file.path(), perms).unwrap();
+        }
+
+        // Create a minimal valid tokens.json
+        let mut tokens_file = NamedTempFile::new().unwrap();
+        writeln!(tokens_file, r#"{{"version": 1, "tokens": []}}"#).unwrap();
+        tokens_file.flush().unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(tokens_file.path())
+                .unwrap()
+                .permissions();
+            perms.set_mode(0o600);
+            std::fs::set_permissions(tokens_file.path(), perms).unwrap();
+        }
+
+        let registry = Arc::new(
+            rustunifimcp_core::inventory::ControllerRegistry::load(controllers_file.path())
+                .unwrap()
+        );
+        let token_store = Arc::new(
+            mecmcp_auth::TokenStoreFile::load(tokens_file.path()).unwrap()
+        );
+
+        // Should install successfully with a token store.
+        let result = install_sighup_reload(registry, Some(token_store));
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn malformed_inventory_reload_retains_previous_config() {
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        // Create initial valid controllers.json
+        let mut controllers_file = NamedTempFile::new().unwrap();
+        writeln!(controllers_file, "{{}}").unwrap();
+        controllers_file.flush().unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(controllers_file.path())
+                .unwrap()
+                .permissions();
+            perms.set_mode(0o600);
+            std::fs::set_permissions(controllers_file.path(), perms).unwrap();
+        }
+
+        let registry = Arc::new(
+            rustunifimcp_core::inventory::ControllerRegistry::load(controllers_file.path())
+                .unwrap()
+        );
+
+        // Verify initial load worked
+        assert_eq!(registry.names().len(), 0);
+
+        // Now corrupt the file
+        std::fs::write(controllers_file.path(), "not valid json").unwrap();
+
+        // Reload should fail but not panic
+        let result = registry.reload();
+        assert!(result.is_err());
+
+        // The registry should still be usable with the previous config
+        assert_eq!(registry.names().len(), 0);
+    }
+
 }
