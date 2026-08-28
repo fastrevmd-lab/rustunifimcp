@@ -8,7 +8,7 @@ use crate::error::UnifiError;
 use super::preimage::{Preimage, StagedMutation};
 
 /// A computed diff between pre-image and staged mutations.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct Diff {
     /// Whether the diff was actually computed.
     ///
@@ -21,7 +21,7 @@ pub struct Diff {
 }
 
 /// A single change in a diff.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct Change {
     /// The mutation that will be applied.
     pub mutation: StagedMutation,

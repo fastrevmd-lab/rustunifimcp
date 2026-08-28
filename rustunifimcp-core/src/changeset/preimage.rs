@@ -11,7 +11,7 @@ use serde_json::Value;
 ///
 /// Captures the current state of all resources a change set will touch, so
 /// apply can be refused if the controller drifted since staging.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Preimage {
     resources: Value,
 }
@@ -175,7 +175,7 @@ impl Preimage {
 }
 
 /// A planned mutation against live configuration.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum StagedMutation {
     /// Create a new resource.
     Create {

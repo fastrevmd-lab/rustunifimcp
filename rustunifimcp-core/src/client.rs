@@ -520,6 +520,45 @@ fn percent_encode(s: &str) -> String {
         .collect()
 }
 
+/// Implementation of `ControllerOps` for `UnifiClient`.
+///
+/// This allows `UnifiClient` to be used with `apply_sequentially` and other
+/// change-set machinery.
+impl crate::changeset::apply::ControllerOps for UnifiClient {
+    async fn apply_mutation(
+        &self,
+        _index: usize,
+        _mutation: &crate::changeset::StagedMutation,
+    ) -> Result<(), crate::error::UnifiError> {
+        // Stubbed for now — actual apply would issue REST calls
+        Ok(())
+    }
+
+    async fn rollback_mutation(
+        &self,
+        _index: usize,
+        _mutation: &crate::changeset::StagedMutation,
+        _prior_value: Option<&serde_json::Value>,
+    ) -> Result<(), crate::error::UnifiError> {
+        // Stubbed for now — actual rollback would restore prior state
+        Ok(())
+    }
+
+    async fn preimage_matches(&self) -> bool {
+        // Stubbed for now — would re-check fingerprint
+        true
+    }
+
+    async fn fetch_resource(
+        &self,
+        _kind: &str,
+        _id: &str,
+    ) -> Result<Option<serde_json::Value>, crate::error::UnifiError> {
+        // Stubbed for now — would fetch the resource
+        Ok(None)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::UnifiClient;

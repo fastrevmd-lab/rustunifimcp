@@ -7,7 +7,7 @@ use super::preimage::{Preimage, StagedMutation};
 use super::rollback::rollback_to_preimage;
 
 /// The outcome of applying a change set.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Outcome {
     /// The final state after apply.
     pub state: State,
@@ -24,7 +24,7 @@ pub struct Outcome {
 }
 
 /// The state of a change set after apply.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum State {
     /// All mutations succeeded.
     Applied,

@@ -5,6 +5,9 @@
 //! lifecycle over UniFi's immediate-write REST API as a best-effort approximation,
 //! with explicit honesty about what cannot be guaranteed.
 
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+
 /// Tool descriptions for all seven change-set tools.
 ///
 /// Written here so the honesty tests in `changeset/mod.rs` can run before the
@@ -61,3 +64,102 @@ pub const DESCRIPTIONS: &[(&str, &str)] = &[
          any apply outcome, and whether rollback is available."
     ),
 ];
+
+/// Arguments for `unifi_create_change_set`.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct CreateChangeSetArgs {
+    /// The controller to target.
+    pub controller: String,
+    /// A human-readable description of this change set.
+    pub description: String,
+}
+
+/// Arguments for `unifi_stage_change`.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct StageChangeArgs {
+    /// The controller to target.
+    pub controller: String,
+    /// The change set ID to stage into.
+    pub change_set_id: String,
+    /// The mutations to stage.
+    pub mutations: Vec<MutationSpec>,
+}
+
+/// A mutation specification for staging.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(tag = "operation", rename_all = "snake_case")]
+pub enum MutationSpec {
+    /// Create a new resource.
+    Create {
+        /// The resource kind.
+        kind: String,
+        /// The resource body.
+        body: serde_json::Value,
+    },
+    /// Update an existing resource.
+    Update {
+        /// The resource kind.
+        kind: String,
+        /// The resource ID.
+        id: String,
+        /// The new resource body.
+        body: serde_json::Value,
+    },
+    /// Delete a resource.
+    Delete {
+        /// The resource kind.
+        kind: String,
+        /// The resource ID.
+        id: String,
+    },
+    /// Restore from backup.
+    Restore {
+        /// The backup ID to restore from.
+        backup_id: String,
+    },
+}
+
+/// Arguments for `unifi_diff_change_set`.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct DiffChangeSetArgs {
+    /// The controller to target.
+    pub controller: String,
+    /// The change set ID to diff.
+    pub change_set_id: String,
+}
+
+/// Arguments for `unifi_validate_change_set`.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct ValidateChangeSetArgs {
+    /// The controller to target.
+    pub controller: String,
+    /// The change set ID to validate.
+    pub change_set_id: String,
+}
+
+/// Arguments for `unifi_approve_change_set`.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct ApproveChangeSetArgs {
+    /// The controller to target.
+    pub controller: String,
+    /// The change set ID to approve.
+    pub change_set_id: String,
+}
+
+/// Arguments for `unifi_apply_change_set`.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct ApplyChangeSetArgs {
+    /// The controller to target.
+    pub controller: String,
+    /// The change set ID to apply.
+    pub change_set_id: String,
+}
+
+/// Arguments for `unifi_get_change_set`.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct GetChangeSetArgs {
+    /// The controller to target.
+    pub controller: String,
+    /// The change set ID to retrieve.
+    pub change_set_id: String,
+}

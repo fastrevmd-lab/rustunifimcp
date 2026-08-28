@@ -269,13 +269,27 @@ async fn run_inner() -> Result<()> {
         );
     }
 
+    // Warn if --state-file is not provided.
+    if cli.state_file.is_none() {
+        tracing::warn!(
+            target: "audit",
+            "No --state-file provided; change sets will live in memory only. \
+             Every approval, preview, and in-flight apply will be lost on restart. \
+             Pass --state-file to persist change-set state across restarts."
+        );
+    }
+
     // Load registry.
     let registry = Arc::new(
         rustunifimcp_core::inventory::ControllerRegistry::load(&cli.controllers_file)?
     );
 
+    // Build changeset store.
+    let changeset_store = rustunifimcp::changeset_store::ChangeSetStore::new(cli.state_file.clone())
+        .map_err(|e| anyhow::anyhow!("failed to initialize changeset store: {e}"))?;
+
     // Build server.
-    let server = UnifiServer::new(Arc::clone(&registry), cli.lab_mode())?;
+    let server = UnifiServer::new(Arc::clone(&registry), cli.lab_mode(), changeset_store)?;
 
     // Determine transport.
     match cli.common.transport {
@@ -751,8 +765,10 @@ mod tests {
                 .unwrap()
         );
 
+        let changeset_store = rustunifimcp::changeset_store::ChangeSetStore::new(None).unwrap();
+
         // Build a server for the reload handler.
-        let server = UnifiServer::new(Arc::clone(&registry), false).unwrap();
+        let server = UnifiServer::new(Arc::clone(&registry), false, changeset_store).unwrap();
 
         // Should install successfully without a token store.
         let result = install_sighup_reload(registry, Some(server), None);
@@ -798,7 +814,10 @@ mod tests {
             rustunifimcp_core::inventory::ControllerRegistry::load(controllers_file.path())
                 .unwrap()
         );
-        let server = UnifiServer::new(Arc::clone(&registry), false).unwrap();
+
+        let changeset_store = rustunifimcp::changeset_store::ChangeSetStore::new(None).unwrap();
+        let server = UnifiServer::new(Arc::clone(&registry), false, changeset_store).unwrap();
+
         let token_store = Arc::new(
             mecmcp_auth::TokenStoreFile::load(tokens_file.path()).unwrap()
         );
@@ -871,7 +890,9 @@ mod tests {
             rustunifimcp_core::inventory::ControllerRegistry::load(controllers_file.path())
                 .unwrap()
         );
-        let server = UnifiServer::new(Arc::clone(&registry), false).unwrap();
+
+        let changeset_store = rustunifimcp::changeset_store::ChangeSetStore::new(None).unwrap();
+        let server = UnifiServer::new(Arc::clone(&registry), false, changeset_store).unwrap();
 
         // Initial state: no controllers, no clients
         assert_eq!(registry.names().len(), 0);
