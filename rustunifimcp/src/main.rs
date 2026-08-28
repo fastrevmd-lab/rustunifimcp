@@ -280,8 +280,9 @@ async fn run_inner() -> Result<()> {
     // Determine transport.
     match cli.common.transport {
         mecmcp_runtime::cli::Transport::Stdio => {
-            // SIGHUP reloads the inventory in place. Stdio has no token store.
-            install_sighup_reload(registry, None)?;
+            // SIGHUP reloads the inventory and rebuilds clients.
+            // Clone the server for the reload handler; serve_stdio consumes the original.
+            install_sighup_reload(registry, Some(server.clone()), None)?;
             serve_stdio(server).await
         }
         mecmcp_runtime::cli::Transport::StreamableHttp => {
@@ -321,6 +322,7 @@ fn load_listener_tls(args: &mecmcp_runtime::cli::Cli) -> Result<Option<Arc<rustl
 ///
 /// On SIGHUP:
 /// - Controller inventory is reloaded from disk
+/// - HTTP clients are rebuilt from the new inventory
 /// - Token store is reloaded (HTTP mode only)
 ///
 /// A reload failure logs at `warn` and retains the previous configuration rather
@@ -331,17 +333,19 @@ fn load_listener_tls(args: &mecmcp_runtime::cli::Cli) -> Result<Option<Arc<rustl
 /// Returns error if the signal handler could not be registered.
 fn install_sighup_reload(
     registry: Arc<rustunifimcp_core::inventory::ControllerRegistry>,
+    server: Option<UnifiServer>,
     token_store: Option<Arc<mecmcp_auth::TokenStoreFile<mecmcp_auth::NoGrant>>>,
 ) -> std::io::Result<()> {
     mecmcp_runtime::signals::install_hup_handler(move || {
         // Reload controller inventory.
-        match registry.reload() {
+        let registry_reloaded = match registry.reload() {
             Ok(count) => {
                 tracing::info!(
                     target: "audit",
                     controllers = count,
                     "controller inventory reloaded"
                 );
+                true
             }
             Err(error) => {
                 tracing::warn!(
@@ -349,6 +353,27 @@ fn install_sighup_reload(
                     %error,
                     "controller inventory reload failed; retaining previous snapshot"
                 );
+                false
+            }
+        };
+
+        // Rebuild clients if inventory reload succeeded.
+        if registry_reloaded && let Some(ref srv) = server {
+            match srv.rebuild_clients() {
+                Ok(count) => {
+                    tracing::info!(
+                        target: "audit",
+                        clients = count,
+                        "HTTP clients rebuilt from reloaded inventory"
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        target: "audit",
+                        %error,
+                        "client rebuild failed; retaining previous clients"
+                    );
+                }
             }
         }
 
@@ -403,8 +428,9 @@ async fn serve_http(
         None
     };
 
-    // Install SIGHUP handler that reloads both inventory and token store.
-    install_sighup_reload(registry, token_store.clone())?;
+    // Install SIGHUP handler that reloads inventory, rebuilds clients, and reloads token store.
+    // Clone the handler for the reload callback; build_http_router consumes the original.
+    install_sighup_reload(registry, Some(handler.clone()), token_store.clone())?;
 
     let shutdown = CancellationToken::new();
     let router = build_http_router(
@@ -725,8 +751,11 @@ mod tests {
                 .unwrap()
         );
 
+        // Build a server for the reload handler.
+        let server = UnifiServer::new(Arc::clone(&registry), false).unwrap();
+
         // Should install successfully without a token store.
-        let result = install_sighup_reload(registry, None);
+        let result = install_sighup_reload(registry, Some(server), None);
         assert!(result.is_ok());
     }
 
@@ -769,12 +798,13 @@ mod tests {
             rustunifimcp_core::inventory::ControllerRegistry::load(controllers_file.path())
                 .unwrap()
         );
+        let server = UnifiServer::new(Arc::clone(&registry), false).unwrap();
         let token_store = Arc::new(
             mecmcp_auth::TokenStoreFile::load(tokens_file.path()).unwrap()
         );
 
         // Should install successfully with a token store.
-        let result = install_sighup_reload(registry, Some(token_store));
+        let result = install_sighup_reload(registry, Some(server), Some(token_store));
         assert!(result.is_ok());
     }
 
@@ -815,6 +845,45 @@ mod tests {
 
         // The registry should still be usable with the previous config
         assert_eq!(registry.names().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn client_rebuild_after_reload() {
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        // Create initial valid controllers.json with no controllers
+        let mut controllers_file = NamedTempFile::new().unwrap();
+        writeln!(controllers_file, "{{}}").unwrap();
+        controllers_file.flush().unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(controllers_file.path())
+                .unwrap()
+                .permissions();
+            perms.set_mode(0o600);
+            std::fs::set_permissions(controllers_file.path(), perms).unwrap();
+        }
+
+        let registry = Arc::new(
+            rustunifimcp_core::inventory::ControllerRegistry::load(controllers_file.path())
+                .unwrap()
+        );
+        let server = UnifiServer::new(Arc::clone(&registry), false).unwrap();
+
+        // Initial state: no controllers, no clients
+        assert_eq!(registry.names().len(), 0);
+
+        // Reload should succeed with empty config
+        let result = registry.reload();
+        assert!(result.is_ok());
+
+        // Rebuild clients should succeed
+        let rebuild_result = server.rebuild_clients();
+        assert!(rebuild_result.is_ok());
+        assert_eq!(rebuild_result.unwrap(), 0);
     }
 
 }

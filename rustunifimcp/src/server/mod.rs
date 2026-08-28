@@ -39,8 +39,8 @@ const RESULT_LIMITS: ResultLimits = ResultLimits {
 pub struct UnifiServer {
     /// Controller inventory.
     registry: Arc<ControllerRegistry>,
-    /// Clients per controller.
-    clients: Arc<BTreeMap<String, UnifiClient>>,
+    /// Clients per controller. RwLock allows rebuild on SIGHUP.
+    clients: Arc<std::sync::RwLock<BTreeMap<String, UnifiClient>>>,
     /// Whether lab mode is enabled.
     lab_mode: bool,
     /// Tool router.
@@ -57,23 +57,59 @@ impl UnifiServer {
         registry: Arc<ControllerRegistry>,
         lab_mode: bool,
     ) -> Result<Self, UnifiError> {
-        let mut clients = BTreeMap::new();
-        for name in registry.names() {
-            let controller = registry.get(&name)?;
-            clients.insert(name.clone(), UnifiClient::new(controller)?);
-        }
+        let clients = Self::build_clients(&registry)?;
         Ok(Self {
             registry,
-            clients: Arc::new(clients),
+            clients: Arc::new(std::sync::RwLock::new(clients)),
             lab_mode,
             tool_router: Self::unifi_tool_router(),
         })
     }
 
-    /// Get the client for a controller.
-    fn client_for(&self, controller: &str) -> Result<&UnifiClient, Box<CallToolResult>> {
-        self.clients
+    /// Build HTTP clients for all controllers in the registry.
+    fn build_clients(registry: &ControllerRegistry) -> Result<BTreeMap<String, UnifiClient>, UnifiError> {
+        let mut clients = BTreeMap::new();
+        for name in registry.names() {
+            let controller = registry.get(&name)?;
+            clients.insert(name.clone(), UnifiClient::new(controller)?);
+        }
+        Ok(clients)
+    }
+
+    /// Rebuild all clients from the current registry state.
+    ///
+    /// This is called on SIGHUP after the registry has been reloaded, so that
+    /// configuration changes (endpoint, credential, allow_private_api) take
+    /// effect without restarting the server.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any client cannot be built. On error, the previous
+    /// clients are retained.
+    pub fn rebuild_clients(&self) -> Result<usize, UnifiError> {
+        let new_clients = Self::build_clients(&self.registry)?;
+        let count = new_clients.len();
+
+        let mut clients = self.clients
+            .write()
+            .map_err(|_| UnifiError::Malformed("clients lock poisoned".to_owned()))?;
+
+        *clients = new_clients;
+        Ok(count)
+    }
+
+    /// Get a reference to the client for a controller.
+    ///
+    /// Returns an owned client since we cannot return a reference that outlives
+    /// the RwLock guard. UnifiClient is cheap to clone (Arc-wrapped internals).
+    fn client_for(&self, controller: &str) -> Result<UnifiClient, Box<CallToolResult>> {
+        let clients = self.clients
+            .read()
+            .map_err(|_| Box::new(tool_error("clients lock poisoned".to_owned())))?;
+
+        clients
             .get(controller)
+            .cloned()
             .ok_or_else(|| Box::new(tool_error(format!("unknown controller: {controller}"))))
     }
 
@@ -104,7 +140,7 @@ impl UnifiServer {
             Err(result) => return *result,
         };
 
-        match read::list_resources(client, &args).await {
+        match read::list_resources(&client, &args).await {
             Ok(json) => tool_result(Ok::<_, String>(json), ResultFormat::PrettyJson, RESULT_LIMITS),
             Err(error) => tool_error(error),
         }
@@ -129,7 +165,7 @@ impl UnifiServer {
             Err(result) => return *result,
         };
 
-        match read::get_resource(client, &args).await {
+        match read::get_resource(&client, &args).await {
             Ok(json) => tool_result(Ok::<_, String>(json), ResultFormat::PrettyJson, RESULT_LIMITS),
             Err(error) => tool_error(error),
         }
@@ -154,7 +190,7 @@ impl UnifiServer {
             Err(result) => return *result,
         };
 
-        match read::query_stats(client, &args).await {
+        match read::query_stats(&client, &args).await {
             Ok(json) => tool_result(Ok::<_, String>(json), ResultFormat::PrettyJson, RESULT_LIMITS),
             Err(error) => tool_error(error),
         }
@@ -179,7 +215,7 @@ impl UnifiServer {
             Err(result) => return *result,
         };
 
-        match read::search(client, &args).await {
+        match read::search(&client, &args).await {
             Ok(json) => tool_result(Ok::<_, String>(json), ResultFormat::PrettyJson, RESULT_LIMITS),
             Err(error) => tool_error(error),
         }
@@ -204,7 +240,7 @@ impl UnifiServer {
             Err(result) => return *result,
         };
 
-        match read::list_sites(client, &args).await {
+        match read::list_sites(&client, &args).await {
             Ok(json) => tool_result(Ok::<_, String>(json), ResultFormat::PrettyJson, RESULT_LIMITS),
             Err(error) => tool_error(error),
         }
@@ -289,7 +325,7 @@ impl UnifiServer {
             Err(result) => return *result,
         };
 
-        match ops::device_action(args, client).await {
+        match ops::device_action(args, &client).await {
             Ok(json) => tool_result(Ok::<_, String>(json), ResultFormat::PrettyJson, RESULT_LIMITS),
             Err(error) => tool_error(error),
         }
@@ -314,7 +350,7 @@ impl UnifiServer {
             Err(result) => return *result,
         };
 
-        match ops::client_action(args, client).await {
+        match ops::client_action(args, &client).await {
             Ok(json) => tool_result(Ok::<_, String>(json), ResultFormat::PrettyJson, RESULT_LIMITS),
             Err(error) => tool_error(error),
         }
@@ -339,7 +375,7 @@ impl UnifiServer {
             Err(result) => return *result,
         };
 
-        match ops::backup_action(args, client).await {
+        match ops::backup_action(args, &client).await {
             Ok(json) => tool_result(Ok::<_, String>(json), ResultFormat::PrettyJson, RESULT_LIMITS),
             Err(error) => tool_error(error),
         }
@@ -364,7 +400,7 @@ impl UnifiServer {
             Err(result) => return *result,
         };
 
-        match ops::run_speed_test(args, client).await {
+        match ops::run_speed_test(args, &client).await {
             Ok(json) => tool_result(Ok::<_, String>(json), ResultFormat::PrettyJson, RESULT_LIMITS),
             Err(error) => tool_error(error),
         }

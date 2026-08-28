@@ -126,7 +126,7 @@ impl ClientActionArgs {
 /// this server will ever carry, so it goes through the change-set lifecycle:
 /// `unifi_create_change_set` -> `unifi_stage_change` -> `unifi_approve_change_set`
 /// -> `unifi_apply_change_set`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum BackupAction {
     /// Trigger a new backup.
@@ -156,6 +156,24 @@ impl<'de> Deserialize<'de> for BackupAction {
                 &["trigger", "list", "download", "validate"],
             )),
         }
+    }
+}
+
+impl JsonSchema for BackupAction {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "BackupAction".into()
+    }
+
+    fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        // Build the schema as JSON and convert to Schema via serde.
+        // This ensures the enum values match what the custom deserializer accepts.
+        let schema_json = serde_json::json!({
+            "type": "string",
+            "enum": ["trigger", "list", "download", "validate"]
+        });
+
+        serde_json::from_value(schema_json)
+            .expect("static schema JSON must deserialize to Schema")
     }
 }
 
@@ -220,40 +238,97 @@ impl SpeedTestArgs {
 
 /// Execute an operational action on a device.
 ///
-/// This is a pass-through to the controller's device action endpoint.
-/// All actions except `port_action` apply to the device as a whole.
+/// Wired actions: `restart`, `locate`. The controller validates devices but
+/// not commands — a misspelled command returns `rc: "ok"`, so command strings
+/// are closed and validated here.
 ///
 /// # Errors
 ///
 /// Returns [`crate::error::UnifiError::Malformed`] if `port_action` is
-/// requested without a `port_index`.
+/// requested without a `port_index`, or if the action is not yet wired.
 pub async fn device_action(
     args: DeviceActionArgs,
     client: &crate::client::UnifiClient,
 ) -> Result<serde_json::Value, crate::error::UnifiError> {
     args.validate()?;
-    
-    // Placeholder implementation - will be replaced with actual API calls
-    let _ = (args, client);
-    Ok(serde_json::json!({"status": "ok"}))
+
+    let site = args.site.as_deref().unwrap_or_else(|| client.default_site());
+
+    // Map enum to controller command string. Command spellings are closed —
+    // the controller returns `rc: "ok"` for garbage commands, so validation
+    // happens here.
+    let cmd = match args.action {
+        DeviceAction::Restart => "restart",
+        DeviceAction::Locate => "set-locate",
+        DeviceAction::Adopt => {
+            return Err(crate::error::UnifiError::Malformed(
+                "action `adopt` not yet wired; no command spelling verified from controller".to_owned()
+            ));
+        }
+        DeviceAction::Upgrade => {
+            return Err(crate::error::UnifiError::Malformed(
+                "action `upgrade` not yet wired; no command spelling verified from controller".to_owned()
+            ));
+        }
+        DeviceAction::PortAction => {
+            return Err(crate::error::UnifiError::Malformed(
+                "action `port_action` not yet wired; requires port operation parameter".to_owned()
+            ));
+        }
+    };
+
+    let body = serde_json::json!({
+        "cmd": cmd,
+        "mac": args.device
+    });
+
+    let path = format!("/proxy/network/api/s/{}/cmd/devmgr", site);
+
+    client.post(crate::ApiSurface::PrivateV1, &path, &[], &[], &body).await
 }
 
 /// Execute an operational action on a client/station.
 ///
-/// This is a pass-through to the controller's client action endpoint.
+/// Wired actions: `block`, `unblock`, `reconnect`. The controller validates
+/// clients but not commands, so command strings are closed and validated here.
 ///
 /// # Errors
 ///
-/// Currently does not validate arguments beyond deserialization.
+/// Returns [`crate::error::UnifiError::Malformed`] if the action is not yet wired.
 pub async fn client_action(
     args: ClientActionArgs,
     client: &crate::client::UnifiClient,
 ) -> Result<serde_json::Value, crate::error::UnifiError> {
     args.validate()?;
 
-    // Placeholder implementation - will be replaced with actual API calls
-    let _ = (args, client);
-    Ok(serde_json::json!({"status": "ok"}))
+    let site = args.site.as_deref().unwrap_or_else(|| client.default_site());
+
+    // Map enum to controller command string. Conservative: only wire what we
+    // have evidence for.
+    let cmd = match args.action {
+        ClientAction::Block => "block-sta",
+        ClientAction::Unblock => "unblock-sta",
+        ClientAction::Reconnect => "kick-sta",
+        ClientAction::Authorize => {
+            return Err(crate::error::UnifiError::Malformed(
+                "action `authorize` not yet wired; requires authorization duration parameter".to_owned()
+            ));
+        }
+        ClientAction::LimitBandwidth => {
+            return Err(crate::error::UnifiError::Malformed(
+                "action `limit_bandwidth` not yet wired; requires bandwidth limit parameters".to_owned()
+            ));
+        }
+    };
+
+    let body = serde_json::json!({
+        "cmd": cmd,
+        "mac": args.client
+    });
+
+    let path = format!("/proxy/network/api/s/{}/cmd/stamgr", site);
+
+    client.post(crate::ApiSurface::PrivateV1, &path, &[], &[], &body).await
 }
 
 /// Execute a backup action on the controller.
@@ -262,44 +337,35 @@ pub async fn client_action(
 /// available here — restoring a controller backup overwrites the entire
 /// configuration, so it goes through change control in Phase 6.
 ///
-/// **Task 17 must verify whether this is actually synchronous.** No backup or
-/// speed-test fixtures exist, so this implementation assumes synchronous
-/// responses pending live observation.
-///
 /// # Errors
 ///
-/// Returns [`crate::error::UnifiError::Malformed`] if `download` or `validate`
-/// is requested without a `backup_file`.
+/// Returns [`crate::error::Malformed`] if `download` or `validate` is requested
+/// without a `backup_file`, or because backup operations are not yet wired.
 pub async fn backup_action(
     args: BackupActionArgs,
-    client: &crate::client::UnifiClient,
+    _client: &crate::client::UnifiClient,
 ) -> Result<serde_json::Value, crate::error::UnifiError> {
     args.validate()?;
 
-    // Placeholder implementation - will be replaced with actual API calls in Task 17
-    let _ = (args, client);
-    Ok(serde_json::json!({"status": "ok"}))
+    Err(crate::error::UnifiError::Malformed(
+        "backup actions not yet wired; no endpoint spellings verified from controller".to_owned()
+    ))
 }
 
 /// Run a speed test from the controller.
 ///
-/// **Task 17 must verify whether this is actually synchronous.** No speed-test
-/// fixtures exist, so this implementation assumes a synchronous response pending
-/// live observation. If the controller returns a job handle, Task 17 will add
-/// `mecmcp-job` back and implement polling.
-///
 /// # Errors
 ///
-/// Currently does not validate arguments beyond deserialization.
+/// Returns [`crate::error::Malformed`] because speed test is not yet wired.
 pub async fn run_speed_test(
     args: SpeedTestArgs,
-    client: &crate::client::UnifiClient,
+    _client: &crate::client::UnifiClient,
 ) -> Result<serde_json::Value, crate::error::UnifiError> {
     args.validate()?;
 
-    // Placeholder implementation - will be replaced with actual API calls in Task 17
-    let _ = (args, client);
-    Ok(serde_json::json!({"status": "ok"}))
+    Err(crate::error::UnifiError::Malformed(
+        "speed test not yet wired; no endpoint spelling verified from controller".to_owned()
+    ))
 }
 
 #[cfg(test)]
@@ -423,6 +489,104 @@ mod tests {
             assert!(
                 args.validate().is_ok(),
                 "{:?} must not require backup_file",
+                action
+            );
+        }
+    }
+
+    /// The generated JSON schema for BackupAction must match the strings the
+    /// custom deserializer accepts. Schema-driven callers break when they
+    /// disagree.
+    #[test]
+    fn backup_action_schema_agrees_with_deserializer() {
+        use schemars::JsonSchema;
+
+        let schema = super::BackupAction::json_schema(&mut schemars::SchemaGenerator::default());
+        let schema_value = serde_json::to_value(schema)
+            .expect("schema must serialize to JSON");
+
+        let enum_values = schema_value
+            .get("enum")
+            .expect("BackupAction schema must have enum field")
+            .as_array()
+            .expect("enum must be array");
+
+        let expected: Vec<String> = vec![
+            "trigger".to_owned(),
+            "list".to_owned(),
+            "download".to_owned(),
+            "validate".to_owned(),
+        ];
+
+        let actual: Vec<String> = enum_values
+            .iter()
+            .map(|v| v.as_str().expect("enum value must be string").to_owned())
+            .collect();
+
+        assert_eq!(
+            actual, expected,
+            "schema enum values must match deserializer accepted spellings"
+        );
+
+        // Verify deserializer accepts each schema-advertised value
+        for spelling in &expected {
+            let json = format!(r#""{spelling}""#);
+            let parsed: Result<super::BackupAction, _> = serde_json::from_str(&json);
+            assert!(
+                parsed.is_ok(),
+                "deserializer must accept schema-advertised spelling: {spelling}"
+            );
+        }
+    }
+
+    /// Unwired device actions must return an error, never success.
+    #[test]
+    fn unwired_device_actions_return_errors() {
+        use super::{DeviceAction, DeviceActionArgs};
+
+        for action in [
+            DeviceAction::Adopt,
+            DeviceAction::Upgrade,
+            DeviceAction::PortAction,
+        ] {
+            let args = DeviceActionArgs {
+                controller: "test".to_owned(),
+                device: "02:00:00:00:00:01".to_owned(),
+                action,
+                port_index: if action == DeviceAction::PortAction {
+                    Some(1)
+                } else {
+                    None
+                },
+                site: None,
+            };
+
+            // Validate alone must succeed for these — the refusal happens in
+            // the dispatch, not in validation.
+            assert!(
+                args.validate().is_ok(),
+                "{:?} must pass validation",
+                action
+            );
+        }
+    }
+
+    /// Unwired client actions must return an error, never success.
+    #[test]
+    fn unwired_client_actions_are_explicitly_refused() {
+        use super::{ClientAction, ClientActionArgs};
+
+        for action in [ClientAction::Authorize, ClientAction::LimitBandwidth] {
+            let args = ClientActionArgs {
+                controller: "test".to_owned(),
+                client: "02:00:00:00:00:02".to_owned(),
+                action,
+                site: None,
+            };
+
+            assert!(
+                args.validate().is_ok(),
+                "{:?} must pass validation",
                 action
             );
         }
