@@ -130,6 +130,155 @@ fn init_token_audit() {
         .try_init();
 }
 
+/// A token-mutation audit record, built before the mutation and emitted after.
+///
+/// The scope has to be captured up front because [`TokenAction`] is consumed by
+/// the runtime call, but the record must not be written until the outcome is
+/// known. Emitting on the way in produced audit lines asserting a credential
+/// had been minted when the store write had in fact failed.
+struct PendingTokenAudit {
+    /// Stable operation identifier, e.g. `token_add`.
+    operation: &'static str,
+    /// Audit name of the token acted on.
+    token_name: String,
+    /// Requested controller scope, where the action carries one.
+    devices: Option<Vec<String>>,
+    /// Requested tool scope, where the action carries one.
+    tools: Option<Vec<String>>,
+    /// Whether the named token was in the store beforehand.
+    ///
+    /// `None` where the question does not apply (a mint). For the operations
+    /// that address an existing token, this is what separates a real change
+    /// from a no-op: the runtime returns `Ok(())` either way and reports the
+    /// no-op only on stderr, so without this the audit trail would record a
+    /// revocation of a token that was never there.
+    target_existed: Option<bool>,
+}
+
+/// The outcome word for a token mutation that returned `Ok`.
+///
+/// `Ok` alone does not mean the store changed: revoking a name that is not
+/// present succeeds and reports the no-op only on stderr. `target_existed` is
+/// `None` where presence is not the question (a mint) or could not be read, and
+/// those are reported as succeeded rather than silently downgraded.
+fn success_outcome_word(target_existed: Option<bool>) -> &'static str {
+    match target_existed {
+        Some(false) => "no_op",
+        _ => "succeeded",
+    }
+}
+
+/// Whether `name` is present in the token store at `path`.
+///
+/// Reads only the `name` field of each entry; digests and secrets are never
+/// touched. Returns `None` when the store cannot be read or parsed, so an
+/// unreadable store is reported as unknown rather than as absence.
+fn token_name_present(path: &std::path::Path, name: &str) -> Option<bool> {
+    let raw = std::fs::read_to_string(path).ok()?;
+    let parsed: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    let entries = parsed.get("tokens")?.as_array()?;
+    Some(entries.iter().any(|entry| {
+        entry.get("name").and_then(serde_json::Value::as_str) == Some(name)
+    }))
+}
+
+impl PendingTokenAudit {
+    /// Describe a mutating token action, or `None` for read-only ones.
+    fn describe(action: &TokenAction) -> Option<Self> {
+        match action {
+            TokenAction::Add { name, devices, tools, .. } => Some(Self {
+                operation: "token_add",
+                token_name: name.clone(),
+                devices: Some(devices.clone()),
+                tools: Some(tools.clone()),
+                target_existed: None,
+            }),
+            TokenAction::Revoke { name, tokens_file, .. } => Some(Self {
+                operation: "token_revoke",
+                token_name: name.clone(),
+                devices: None,
+                tools: None,
+                target_existed: token_name_present(tokens_file, name),
+            }),
+            TokenAction::Rotate { name, tokens_file, .. } => Some(Self {
+                operation: "token_rotate",
+                token_name: name.clone(),
+                devices: None,
+                tools: None,
+                target_existed: token_name_present(tokens_file, name),
+            }),
+            TokenAction::SetScopes { name, devices, tools, tokens_file, .. } => Some(Self {
+                operation: "token_set_scope",
+                token_name: name.clone(),
+                devices: devices.clone(),
+                tools: tools.clone(),
+                target_existed: token_name_present(tokens_file, name),
+            }),
+            TokenAction::SetProvenance { name, tokens_file, .. } => Some(Self {
+                operation: "token_set_provenance",
+                token_name: name.clone(),
+                devices: None,
+                tools: None,
+                target_existed: token_name_present(tokens_file, name),
+            }),
+            // Read-only: nothing changes, so there is nothing to attest to.
+            TokenAction::List { .. } => None,
+        }
+    }
+
+    /// Emit the record, carrying whether the mutation actually took effect.
+    ///
+    /// The failure branch records the error text so an auditor can tell a
+    /// rejected mint from one that never reached the store. Scope fields are
+    /// emitted only for the operations that carry scope, so a revoke does not
+    /// render an empty device list that reads like a scope of nothing.
+    fn emit<T, E: std::fmt::Display>(&self, outcome: Result<&T, &E>) {
+        let (operation, token_name) = (self.operation, self.token_name.as_str());
+        let applied = success_outcome_word(self.target_existed);
+        let message = if applied == "no_op" {
+            "token mutation matched no token"
+        } else {
+            "token mutation applied"
+        };
+        match (outcome, self.devices.as_deref(), self.tools.as_deref()) {
+            (Ok(_), Some(devices), Some(tools)) => tracing::info!(
+                target: "audit",
+                operation,
+                token_name,
+                devices = ?devices,
+                tools = ?tools,
+                outcome = applied,
+                message
+            ),
+            (Ok(_), _, _) => tracing::info!(
+                target: "audit",
+                operation,
+                token_name,
+                outcome = applied,
+                message
+            ),
+            (Err(error), Some(devices), Some(tools)) => tracing::warn!(
+                target: "audit",
+                operation,
+                token_name,
+                devices = ?devices,
+                tools = ?tools,
+                outcome = "failed",
+                error = %error,
+                "token mutation failed"
+            ),
+            (Err(error), _, _) => tracing::warn!(
+                target: "audit",
+                operation,
+                token_name,
+                outcome = "failed",
+                error = %error,
+                "token mutation failed"
+            ),
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() {
     if let Err(error) = run().await {
@@ -175,69 +324,31 @@ async fn run_inner() -> Result<()> {
 
         let (action, grant) = token_command_to_action(token_cli.command);
 
-        // Emit audit record for token mutations before executing them.
-        // The record contains the operation and scope, never the secret.
-        match &action {
-            TokenAction::Add { name, devices, tools, .. } => {
-                tracing::info!(
-                    target: "audit",
-                    operation = "token_add",
-                    token_name = name,
-                    devices = ?devices,
-                    tools = ?tools,
-                    "token minted"
-                );
-            }
-            TokenAction::Revoke { name, .. } => {
-                tracing::info!(
-                    target: "audit",
-                    operation = "token_revoke",
-                    token_name = name,
-                    "token revoked"
-                );
-            }
-            TokenAction::Rotate { name, .. } => {
-                tracing::info!(
-                    target: "audit",
-                    operation = "token_rotate",
-                    token_name = name,
-                    "token secret rotated"
-                );
-            }
-            TokenAction::SetScopes { name, devices, tools, .. } => {
-                tracing::info!(
-                    target: "audit",
-                    operation = "token_set_scope",
-                    token_name = name,
-                    devices = ?devices,
-                    tools = ?tools,
-                    "token scope modified"
-                );
-            }
-            TokenAction::SetProvenance { name, provider, provider_tier, on_behalf_of, actor_type, .. } => {
-                tracing::info!(
-                    target: "audit",
-                    operation = "token_set_provenance",
-                    token_name = name,
-                    provider = ?provider,
-                    provider_tier = ?provider_tier,
-                    on_behalf_of = ?on_behalf_of,
-                    actor_type = ?actor_type,
-                    "token provenance modified"
-                );
-            }
-            TokenAction::List { .. } => {
-                // List is read-only and does not need audit logging.
-            }
-        }
+        // Describe the mutation now, emit the record after it runs.
+        //
+        // These records are the forensic trail for credential issuance. Emitting
+        // them before execution logged "token minted" in the past tense for
+        // mints that then failed -- an observed case wrote that line while the
+        // store write returned ENOENT, leaving the audit trail asserting a
+        // credential that does not exist. The scope is captured up front
+        // because the action is consumed by the call; the outcome is attached
+        // afterwards.
+        let pending = PendingTokenAudit::describe(&action);
 
-        return mecmcp_runtime::token_cmd::run_with_grant::<NoGrant>(
+        let outcome = mecmcp_runtime::token_cmd::run_with_grant::<NoGrant>(
             action,
             &[],
             rustunifimcp_core::tools::TOOL_NAMES,
             grant,
         )
         .map_err(|error| anyhow::anyhow!("{error}"));
+
+        if let Some(pending) = pending {
+            pending.emit(outcome.as_ref());
+        }
+
+        return outcome;
+
     }
 
     // Initialize tracing.
@@ -269,13 +380,27 @@ async fn run_inner() -> Result<()> {
         );
     }
 
+    // Warn if --state-file is not provided.
+    if cli.state_file.is_none() {
+        tracing::warn!(
+            target: "audit",
+            "No --state-file provided; change sets will live in memory only. \
+             Every approval, preview, and in-flight apply will be lost on restart. \
+             Pass --state-file to persist change-set state across restarts."
+        );
+    }
+
     // Load registry.
     let registry = Arc::new(
         rustunifimcp_core::inventory::ControllerRegistry::load(&cli.controllers_file)?
     );
 
+    // Build changeset store.
+    let changeset_store = rustunifimcp::changeset_store::ChangeSetStore::new(cli.state_file.clone())
+        .map_err(|e| anyhow::anyhow!("failed to initialize changeset store: {e}"))?;
+
     // Build server.
-    let server = UnifiServer::new(Arc::clone(&registry), cli.lab_mode())?;
+    let server = UnifiServer::new(Arc::clone(&registry), cli.lab_mode(), changeset_store)?;
 
     // Determine transport.
     match cli.common.transport {
@@ -751,8 +876,10 @@ mod tests {
                 .unwrap()
         );
 
+        let changeset_store = rustunifimcp::changeset_store::ChangeSetStore::new(None).unwrap();
+
         // Build a server for the reload handler.
-        let server = UnifiServer::new(Arc::clone(&registry), false).unwrap();
+        let server = UnifiServer::new(Arc::clone(&registry), false, changeset_store).unwrap();
 
         // Should install successfully without a token store.
         let result = install_sighup_reload(registry, Some(server), None);
@@ -798,7 +925,10 @@ mod tests {
             rustunifimcp_core::inventory::ControllerRegistry::load(controllers_file.path())
                 .unwrap()
         );
-        let server = UnifiServer::new(Arc::clone(&registry), false).unwrap();
+
+        let changeset_store = rustunifimcp::changeset_store::ChangeSetStore::new(None).unwrap();
+        let server = UnifiServer::new(Arc::clone(&registry), false, changeset_store).unwrap();
+
         let token_store = Arc::new(
             mecmcp_auth::TokenStoreFile::load(tokens_file.path()).unwrap()
         );
@@ -871,7 +1001,9 @@ mod tests {
             rustunifimcp_core::inventory::ControllerRegistry::load(controllers_file.path())
                 .unwrap()
         );
-        let server = UnifiServer::new(Arc::clone(&registry), false).unwrap();
+
+        let changeset_store = rustunifimcp::changeset_store::ChangeSetStore::new(None).unwrap();
+        let server = UnifiServer::new(Arc::clone(&registry), false, changeset_store).unwrap();
 
         // Initial state: no controllers, no clients
         assert_eq!(registry.names().len(), 0);
@@ -886,4 +1018,80 @@ mod tests {
         assert_eq!(rebuild_result.unwrap(), 0);
     }
 
+}
+
+#[cfg(test)]
+mod audit_tests {
+    use super::*;
+    use std::io::Write;
+
+    fn store_with(names: &[&str]) -> tempfile::NamedTempFile {
+        let entries: Vec<_> = names
+            .iter()
+            .map(|name| serde_json::json!({ "name": name, "digest": "x", "devices": [], "tools": [] }))
+            .collect();
+        let body = serde_json::json!({ "version": 1, "tokens": entries });
+        let mut file = tempfile::NamedTempFile::new().expect("temp file");
+        write!(file, "{body}").expect("write store");
+        file
+    }
+
+    #[test]
+    fn a_revoke_that_matches_nothing_is_not_reported_as_a_change() {
+        // The runtime returns Ok whether or not the name was there, so this is
+        // the only thing standing between the audit trail and a recorded
+        // revocation of a token that never existed.
+        assert_eq!(success_outcome_word(Some(false)), "no_op");
+        assert_eq!(success_outcome_word(Some(true)), "succeeded");
+    }
+
+    #[test]
+    fn an_unreadable_store_does_not_masquerade_as_an_absent_token() {
+        // Unknown must not collapse into "absent" -- that would report a real
+        // revocation as a no-op and hide it from the trail.
+        assert_eq!(success_outcome_word(None), "succeeded");
+    }
+
+    #[test]
+    fn presence_is_read_from_the_store_by_name() {
+        let store = store_with(&["alpha", "beta"]);
+        assert_eq!(token_name_present(store.path(), "alpha"), Some(true));
+        assert_eq!(token_name_present(store.path(), "gamma"), Some(false));
+    }
+
+    #[test]
+    fn a_missing_or_malformed_store_reads_as_unknown_not_absent() {
+        assert_eq!(token_name_present(std::path::Path::new("/nonexistent/t.json"), "a"), None);
+        let mut bad = tempfile::NamedTempFile::new().expect("temp file");
+        write!(bad, "not json").expect("write");
+        assert_eq!(token_name_present(bad.path(), "a"), None);
+    }
+
+    #[test]
+    fn describing_a_revoke_records_whether_the_target_was_there() {
+        let store = store_with(&["present"]);
+        let describe = |name: &str| {
+            PendingTokenAudit::describe(&TokenAction::Revoke {
+                tokens_file: store.path().to_path_buf(),
+                name: name.to_owned(),
+                server_pid: None,
+            })
+            .expect("revoke is a mutating action")
+            .target_existed
+        };
+        assert_eq!(describe("present"), Some(true));
+        assert_eq!(describe("absent"), Some(false));
+    }
+
+    #[test]
+    fn listing_tokens_produces_no_audit_record() {
+        let store = store_with(&["a"]);
+        assert!(
+            PendingTokenAudit::describe(&TokenAction::List {
+                tokens_file: store.path().to_path_buf(),
+            })
+            .is_none(),
+            "a read-only list must not write a mutation record"
+        );
+    }
 }

@@ -285,6 +285,17 @@ fn parse_single_resource(
 ///
 /// Returns [`UnifiError::SurfaceRequiresConfig`] if the kind lives on a private
 /// surface the controller has not opted into, or [`UnifiError::PrivateEndpointAbsent`]
+/// The path template addressing one resource of `kind` by id.
+///
+/// `{id}`, never `{}`: [`mecmcp_openapi::expand_path`] matches placeholders by
+/// name, so an anonymous brace pair can never be supplied and the request fails
+/// before it reaches the controller. This is a function rather than an inline
+/// `format!` so the test exercises the same construction the request does.
+#[must_use]
+pub fn single_resource_template(kind: ResourceKind) -> String {
+    format!("{}/{{id}}", kind.path_template())
+}
+
 /// if a private route has been removed by a controller upgrade.
 pub async fn get_resource(
     client: &UnifiClient,
@@ -297,7 +308,7 @@ pub async fn get_resource(
         &client.default_site_for(surface).await?
     };
 
-    let template = format!("{}/{{}}", args.kind.path_template());
+    let template = single_resource_template(args.kind);
 
     let raw = client
         .get(
@@ -513,6 +524,64 @@ pub async fn list_sites(
 
 #[cfg(test)]
 mod tests {
+
+    /// No path in the crate may carry an anonymous `{}` placeholder.
+    ///
+    /// The first fix of this defect corrected `get_resource` and missed an
+    /// identical construction in `changeset/preimage.rs`, which kept every
+    /// pre-image capture failing -- and with it every change set that touches
+    /// an existing resource. Fixing one occurrence of a defect is not the same
+    /// as fixing the defect, so this sweeps the sources rather than trusting
+    /// that the known sites are all of them.
+    #[test]
+    fn no_source_file_builds_a_path_with_an_anonymous_placeholder() {
+        // Assembled at runtime so this assertion cannot match itself.
+        let needle = format!("{}/{}{}\"", "format!(\"{}", "{", "{}}");
+        for (name, source) in [
+            ("tools/read.rs", include_str!("read.rs")),
+            ("changeset/preimage.rs", include_str!("../changeset/preimage.rs")),
+            ("changeset/apply.rs", include_str!("../changeset/apply.rs")),
+            ("changeset/rollback.rs", include_str!("../changeset/rollback.rs")),
+            ("client.rs", include_str!("../client.rs")),
+        ] {
+            assert!(
+                !source.contains(&needle),
+                "{name} builds a path with an anonymous placeholder, which \
+                 expand_path can never fill"
+            );
+        }
+    }
+
+    /// Every single-resource GET path must actually expand.
+    ///
+    /// `get_resource` builds its path by appending an id segment to the kind's
+    /// list template. That concatenation is invisible to the path-provenance
+    /// test, which checks the constants only -- so an anonymous `{}` shipped
+    /// here and made `unifi_get_resource` fail for every kind, on every
+    /// controller, while the fixture tests stayed green. This expands the real
+    /// template through the real expander, for all of `ResourceKind::ALL`.
+    #[test]
+    fn every_kind_expands_to_a_usable_single_resource_path() {
+        for &kind in crate::model::ResourceKind::ALL {
+            let template = super::single_resource_template(kind);
+            let expanded = mecmcp_openapi::expand_path(
+                &template,
+                &[("site", "default"), ("id", "abc123")],
+            )
+            .unwrap_or_else(|error| {
+                panic!("{kind:?} single-resource path does not expand: {error}")
+            });
+            assert!(
+                expanded.ends_with("/abc123"),
+                "{kind:?} expanded to {expanded}, which does not address the id"
+            );
+            assert!(
+                !expanded.contains('{') && !expanded.contains('}'),
+                "{kind:?} left an unexpanded placeholder: {expanded}"
+            );
+        }
+    }
+
     use super::{GetResourceArgs, ListResourcesArgs, SearchArgs};
     use crate::error::UnifiError;
     use crate::model::ResourceKind;
