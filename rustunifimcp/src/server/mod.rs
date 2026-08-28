@@ -1088,10 +1088,32 @@ mod tests {
         assert_eq!(retrieved.approval_waiver, Some("lab-mode".to_owned()));
     }
 
+    /// Guards against a handler being reduced to a stub again.
+    ///
+    /// Phase 6 shipped the seven change-set tools as honest refusals before
+    /// they were wired to the machinery. That was the correct interim state,
+    /// but it must not silently return: a stubbed handler advertises a tool
+    /// that cannot do its job. This asserts the refusal literal is absent
+    /// from the handler code, so re-stubbing one fails the test run.
     #[test]
-    fn handler_responses_do_not_contain_not_yet_implemented() {
-        // This test is satisfied by the implementation above.
-        // The handlers return real results, not "not yet implemented".
-        // We'll verify this with the stdio proof at the end.
+    fn no_change_set_handler_is_a_stub() {
+        let source = include_str!("mod.rs");
+        let handlers = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("source has a non-test prefix");
+        // Assembled at runtime so this assertion cannot match itself.
+        let needle = ["not", "yet", "implemented"].join(" ");
+        assert!(
+            !handlers.contains(&needle),
+            "a change-set handler still returns the {needle:?} refusal; \
+             Phase 6 requires all seven wired to the change-set machinery"
+        );
+        for tool in WRITE_TOOLS {
+            assert!(
+                source.contains(tool),
+                "write tool {tool} has no handler in this module"
+            );
+        }
     }
 }
