@@ -33,12 +33,31 @@ configuration and nothing else, which makes it the real test of whether
 
 ## Status
 
-**Design approved, implementation starting.**
+**In production. The dependency on the legacy server is retired.**
 
-Implementation was deferred through July and August while `mecmcp` was
-extracted. That gate is now open: `mecmcp` is at **v0.20.0 with 14 crates**, and
-the wait paid — `mecmcp-http` supplies the outbound client, so the UniFi HTTP
-layer never has to be written here at all.
+`rustunifimcp` v0.1.0 serves the full surface — reads, workflows, operational
+actions, and change control — from LXC 981 over TLS, under two-person control.
+The `unifi-mcp-legacy` registration is gone; nothing routes to the Python
+server any more.
+
+**LXC 980 itself is untouched and still running.** It is tagged
+`notmechub;protected` and was never ours to modify: retiring the *dependency*
+never meant acting on the guest. It remains as a rollback path — re-adding its
+registration restores the old surface — and stopping or destroying it is a
+separate decision for its owner.
+
+| Guest | Role | Endpoint |
+|---|---|---|
+| 981 `prod-unifimcp` | production, two-person, TLS | `https://prod-unifimcp.mechub.org:30033/mcp` |
+| 622 `test-twoperson-unifi` | rig, two-person | `http://test-twoperson-unifi.mechub.org:30033/mcp` |
+| 623 `test-labmode-unifi` | rig, `--lab-mode` | `http://test-labmode-unifi.mechub.org:30033/mcp` |
+
+Parity against the legacy surface is recorded in
+[`docs/PARITY-AUDIT.md`](docs/PARITY-AUDIT.md): of 33 legacy tools in the usage
+window, 31 are covered and verified against the live controller, one is an
+accepted gap (`set_device_port_overrides` — no verified write route on
+10.5.67), and one is built but deliberately unverified (`execute_port_action`,
+which cannot be exercised without disrupting a live switch port).
 
 | Document | What it is |
 |---|---|

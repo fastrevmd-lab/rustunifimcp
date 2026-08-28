@@ -12,44 +12,47 @@ Re-run the script and refresh this table before each cutover.
 
 | Legacy tool | Calls | Reachable via | Status |
 |---|---|---|---|
-| create_network | 12 | `unifi_stage_change` (Phase 6) | gap (accepted) |
-| search_clients | 12 | `unifi_search` | planned |
-| list_vlans | 11 | `unifi_list_resources kind=network` | planned |
-| list_devices_by_type | 8 | `unifi_list_resources kind=device` | planned |
-| list_sites | 7 | `unifi_list_sites` | planned |
-| get_device_port_overrides | 6 | `unifi_get_resource kind=device` | planned |
-| update_dhcp_reservation | 6 | `unifi_stage_change` (Phase 6) | gap (accepted) |
-| set_device_port_overrides | 4 | none — no verified write route | gap (open, see below) |
-| create_port_profile | 4 | `unifi_stage_change` (Phase 6) | gap (accepted) |
-| list_dhcp_reservations | 4 | `unifi_list_resources kind=dhcp_reservation` | planned |
-| health_check | 3 | `unifi_site_health_report` | planned |
-| get_client_details | 3 | `unifi_get_resource kind=station` | planned |
-| create_dhcp_reservation | 3 | `unifi_stage_change` (Phase 6) | gap (accepted) |
-| get_dhcp_reservation | 3 | `unifi_get_resource kind=dhcp_reservation` | planned |
-| search_devices | 2 | `unifi_search` | planned |
-| list_port_profiles | 2 | `unifi_list_resources kind=port_profile` | planned |
-| get_device_details | 2 | `unifi_get_resource kind=device` | planned |
-| execute_port_action | 2 | `unifi_device_action action=port_action` | planned |
-| list_firewall_zones_v2 | 2 | `unifi_list_resources kind=firewall_zone` | planned |
-| get_device_by_mac | 2 | `unifi_search` or `unifi_get_resource kind=device` | planned |
-| get_port_profile | 2 | `unifi_get_resource kind=port_profile` | planned |
-| list_active_clients | 2 | `unifi_list_resources kind=station` | planned |
-| get_port_mappings | 1 | `unifi_get_resource kind=device` | planned |
-| list_firewall_policies | 1 | `unifi_list_resources kind=firewall_policy` | planned |
-| get_site_health_summary | 1 | `unifi_site_health_report` | planned |
-| get_flow_risks | 1 | `unifi_traffic_flow_report` | planned |
-| update_port_profile | 1 | `unifi_stage_change` (Phase 6) | gap (accepted) |
-| get_network_details | 1 | `unifi_get_resource kind=network` | planned |
-| list_traffic_routes | 1 | `unifi_list_resources kind=traffic_route` | planned |
-| get_site_inventory | 1 | `unifi_list_resources kind=device` | planned |
-| list_wlans | 1 | `unifi_list_resources kind=wlan` | planned |
-| list_firewall_zones | 1 | `unifi_list_resources kind=firewall_zone` | planned |
-| list_wan_connections | 1 | `unifi_list_resources kind=network` | planned |
-| list_wan_dns | 1 | `unifi_get_resource kind=network` | planned |
+| create_network | 12 | `unifi_stage_change` | covered |
+| search_clients | 12 | `unifi_search` | covered |
+| list_vlans | 11 | `unifi_list_resources kind=network` | covered |
+| list_devices_by_type | 8 | `unifi_list_resources kind=device` | covered |
+| list_sites | 7 | `unifi_list_sites` | covered |
+| get_device_port_overrides | 6 | `unifi_get_resource kind=device` | covered |
+| update_dhcp_reservation | 6 | `unifi_stage_change` | covered |
+| set_device_port_overrides | 4 | none — no verified write route | gap (accepted) |
+| create_port_profile | 4 | `unifi_stage_change` | covered |
+| list_dhcp_reservations | 4 | `unifi_list_resources kind=dhcp_reservation` | covered |
+| health_check | 3 | `unifi_site_health_report` | covered |
+| get_client_details | 3 | `unifi_get_resource kind=station` | covered |
+| create_dhcp_reservation | 3 | `unifi_stage_change` | covered |
+| get_dhcp_reservation | 3 | `unifi_get_resource kind=dhcp_reservation` | covered |
+| search_devices | 2 | `unifi_search` | covered |
+| list_port_profiles | 2 | `unifi_list_resources kind=port_profile` | covered |
+| get_device_details | 2 | `unifi_get_resource kind=device` | covered |
+| execute_port_action | 2 | `unifi_device_action action=port_action` | built, unverified |
+| list_firewall_zones_v2 | 2 | `unifi_list_resources kind=firewall_zone` | covered |
+| get_device_by_mac | 2 | `unifi_search` or `unifi_get_resource kind=device` | covered |
+| get_port_profile | 2 | `unifi_get_resource kind=port_profile` | covered |
+| list_active_clients | 2 | `unifi_list_resources kind=station` | covered |
+| get_port_mappings | 1 | `unifi_get_resource kind=device` | covered |
+| list_firewall_policies | 1 | `unifi_list_resources kind=firewall_policy` | covered |
+| get_site_health_summary | 1 | `unifi_site_health_report` | covered |
+| get_flow_risks | 1 | `unifi_traffic_flow_report` | covered |
+| update_port_profile | 1 | `unifi_stage_change` | covered |
+| get_network_details | 1 | `unifi_get_resource kind=network` | covered |
+| list_traffic_routes | 1 | `unifi_list_resources kind=traffic_route` | covered |
+| get_site_inventory | 1 | `unifi_list_resources kind=device` | covered |
+| list_wlans | 1 | `unifi_list_resources kind=wlan` | covered |
+| list_firewall_zones | 1 | `unifi_list_resources kind=firewall_zone` | covered |
+| list_wan_connections | 1 | `unifi_list_resources kind=network` | covered |
+| list_wan_dns | 1 | `unifi_get_resource kind=network` | covered |
 
 ## Status vocabulary
 
 - **planned** — a named tool in the design covers it; not yet built
+- **built, unverified** — shipped, but not exercised against the live
+  controller because doing so would disrupt the running network. Named
+  separately from **covered** so the distinction is not quietly lost
 - **covered** — built and verified against the live controller
 - **gap (accepted)** — deliberately not carried; the reason is recorded below
 - **gap (open)** — no coverage and no decision yet. **A cutover cannot proceed
@@ -79,7 +82,23 @@ confirm this against the recorded fixture and add a `Wan` variant if the fields
 are absent.** An unverified mapping stated as verified is exactly the silent
 loss this audit exists to prevent.
 
-## Open gap: device configuration writes
+## Built but unverified: port actions
+
+`execute_port_action` maps onto `unifi_device_action action=port_action`, which
+ships. It is not marked **covered** because covered means verified against the
+live controller, and verifying a port action means power-cycling or disabling a
+switch port on a network in use.
+
+The action shares its dispatch path with `restart`, `locate`, `adopt`, and
+`upgrade`, and `locate` **was** verified live and observed on the hardware
+(`locating: false -> true -> false`). That establishes the path; it does not
+establish this action's own payload.
+
+To verify it: run it against a port with nothing attached, on a switch that can
+lose a port without consequence, and watch the port state rather than the
+response body — UniFi returns `rc: "ok"` for commands that do not exist.
+
+## Accepted gap: device configuration writes
 
 `set_device_port_overrides` was mapped onto the change-set lifecycle writing
 through `/proxy/network/api/s/{site}/rest/device/{id}`. **That route does not
@@ -106,13 +125,37 @@ controller failure and leave this row looking satisfied.
 Device *operations* — restart, locate, adopt, upgrade, port-action — are
 unaffected and ship in `unifi_device_action`.
 
+**Accepted at Cutover #2, and what accepting it costs.** Retiring the
+dependency on LXC 980 means `set_device_port_overrides` is not available from
+any registered MCP server. Port overrides remain changeable through the UniFi
+UI, and **980 itself keeps running** — unregistering it is reversible by
+re-adding the entry, so the capability is set aside rather than destroyed.
+
+It is accepted rather than closed because closing it means writing port
+overrides to a live controller to discover which route answers, and port
+overrides reconfigure switch ports on a network in use. The legacy tool was
+called 4 times in the audit window, all read-adjacent to a single switch.
+
 ## Accepted gaps
 
-### Configuration writes (Phase 6)
+### Configuration writes — closed at Cutover #2
 
 **Six legacy tools are configuration writes**: `create_network`,
 `update_dhcp_reservation`, `set_device_port_overrides`, `create_port_profile`,
 `create_dhcp_reservation`, `update_port_profile`.
+
+Five of the six are now **covered** by the change-set lifecycle, which shipped
+in Phase 6. `set_device_port_overrides` is the exception and is accepted above.
+
+**What was verified, and what was inferred.** The lifecycle was exercised
+end-to-end against the live controller for `firewall_group`: create, approve by
+a second principal, apply, verify, an induced partial failure, and a rollback
+that deleted the created resource by its controller-assigned id. `network`,
+`dhcp_reservation`, and `port_profile` resolve through the *same* code path and
+the same Private v1 `rest/*` surface, differing only in the path template that
+`ResourceKind` supplies — but each was **not** separately exercised against the
+controller, because doing so means creating real networks, leases, and port
+profiles on a network in use.
 
 Per the approved design, all configuration writes go through the change-set
 lifecycle (`unifi_stage_change` → `unifi_diff_change_set` →

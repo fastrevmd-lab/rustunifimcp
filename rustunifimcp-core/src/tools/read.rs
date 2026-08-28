@@ -222,6 +222,34 @@ fn parse_single_resource(
     use crate::model::routing::parse_traffic_routes;
     use crate::model::station::parse_stations;
 
+    // A single-resource GET does not always answer in the collection's shape.
+    // The Integration API returns the object itself, so `kind=device` and
+    // `kind=station` reached the collection parsers as a bare object and failed
+    // with "expected an envelope object" -- a message that reads like a
+    // controller fault rather than a shape we never normalised. Normalise once
+    // here instead of teaching every parser two shapes.
+    let normalised;
+    let raw = match raw.get("data") {
+        // Already the collection shape.
+        Some(data) if data.is_array() => raw,
+        // The Integration API answers a single-resource GET with the object
+        // under `data`, not a one-element array. Without this the parser
+        // reports "invalid type: map, expected a sequence".
+        Some(data) => {
+            normalised = serde_json::json!({ "data": [data] });
+            &normalised
+        }
+        None if raw.is_array() => raw,
+        // A bare object, which is how the private surfaces answer.
+        None => {
+            normalised = match kind.surface() {
+                ApiSurface::PrivateV2 => serde_json::json!([raw]),
+                _ => serde_json::json!({ "data": [raw] }),
+            };
+            &normalised
+        }
+    };
+
     // Wrap in an envelope if needed, parse, then extract the single item
     let parsed_vec = match kind {
         ResourceKind::Station => {
