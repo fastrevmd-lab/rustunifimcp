@@ -153,7 +153,9 @@ install -m 0755 -o root -g root rustunifimcp /usr/local/bin/rustunifimcp
 if [ ! -f /etc/unifimcp/controllers.json ]; then
     echo "    Installing example controllers.json..."
     if [ -f packaging/examples/controllers.example.json ]; then
-        install -m 0600 -o root -g unifimcp packaging/examples/controllers.example.json /etc/unifimcp/controllers.json
+        # mecmcp-inventory requires mode 0600 AND ownership by the service user.
+        # Mode 0600 owned by root is unreadable by the unifimcp service.
+        install -m 0600 -o unifimcp -g unifimcp packaging/examples/controllers.example.json /etc/unifimcp/controllers.json
         echo "    NOTE: The example points at /etc/unifimcp/api.key and cannot be used for a"
         echo "          local smoke test without creating that key file first."
     else
@@ -189,7 +191,7 @@ echo "==> Installation complete"
 echo ""
 echo "Next steps:"
 echo "  1. Edit /etc/unifimcp/controllers.json with your UniFi controller details"
-echo "  2. Write the API key to /etc/unifimcp/api.key (mode 0600, owned by root:unifimcp)"
+echo "  2. Write the API key to /etc/unifimcp/api.key (mode 0600, owned by unifimcp:unifimcp)"
 echo "  3. Mint a token, e.g.:"
 echo "       rustunifimcp token add --tokens-file /var/lib/unifimcp/tokens.json \\"
 echo "           --name readonly --tools '*'"
