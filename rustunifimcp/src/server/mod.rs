@@ -24,8 +24,11 @@ use rustunifimcp_core::{
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+/// Empty arguments for parameterless tools.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct NoArgs {}
+
 /// Result size limits for MCP tool responses.
-#[allow(dead_code)]
 const RESULT_LIMITS: ResultLimits = ResultLimits {
     max_text_bytes: 512 * 1024,
     max_json_bytes: 512 * 1024,
@@ -34,15 +37,10 @@ const RESULT_LIMITS: ResultLimits = ResultLimits {
 /// The UniFi MCP server.
 #[derive(Clone)]
 pub struct UnifiServer {
-    #[allow(dead_code)]
     /// Controller inventory.
-    #[allow(dead_code)]
     registry: Arc<ControllerRegistry>,
-    #[allow(dead_code)]
     /// Clients per controller.
-    #[allow(dead_code)]
     clients: Arc<BTreeMap<String, UnifiClient>>,
-    #[allow(dead_code)]
     /// Whether lab mode is enabled.
     lab_mode: bool,
     /// Tool router.
@@ -68,11 +66,10 @@ impl UnifiServer {
             registry,
             clients: Arc::new(clients),
             lab_mode,
-            tool_router: Default::default(),
+            tool_router: Self::unifi_tool_router(),
         })
     }
 
-    #[allow(dead_code)]
     /// Get the client for a controller.
     fn client_for(&self, controller: &str) -> Result<&UnifiClient, Box<CallToolResult>> {
         self.clients
@@ -80,7 +77,6 @@ impl UnifiServer {
             .ok_or_else(|| Box::new(tool_error(format!("unknown controller: {controller}"))))
     }
 
-    #[allow(dead_code)]
     /// Recover the caller from the request context.
     fn caller(context: &RequestContext<RoleServer>) -> Option<mecmcp_auth::CallerCtx<NoGrant>> {
         caller_from_extensions::<NoGrant>(&context.extensions).cloned()
@@ -220,7 +216,7 @@ impl UnifiServer {
     )]
     async fn unifi_list_controllers(
         &self,
-        _params: Parameters<()>,
+        _params: Parameters<NoArgs>,
         context: RequestContext<RoleServer>,
     ) -> CallToolResult {
         let caller = Self::caller(&context);
@@ -240,7 +236,7 @@ impl UnifiServer {
     )]
     async fn unifimcp_status(
         &self,
-        _params: Parameters<()>,
+        _params: Parameters<NoArgs>,
         context: RequestContext<RoleServer>,
     ) -> CallToolResult {
         let caller = Self::caller(&context);

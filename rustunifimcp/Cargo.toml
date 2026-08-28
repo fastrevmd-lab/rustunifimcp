@@ -11,6 +11,7 @@ authors.workspace = true
 [dependencies]
 rustunifimcp-core.workspace = true
 mecmcp-auth.workspace = true
+mecmcp-http.workspace = true
 mecmcp-runtime.workspace = true
 mecmcp-server.workspace = true
 mecmcp-transport.workspace = true
@@ -23,9 +24,7 @@ tokio.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
-
-[dev-dependencies]
-rustunifimcp-core.workspace = true
+rustls.workspace = true
 
 [lints]
 workspace = true
