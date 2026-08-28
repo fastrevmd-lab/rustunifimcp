@@ -132,10 +132,15 @@ pub trait ControllerOps {
     ) -> impl std::future::Future<Output = Result<(), crate::error::UnifiError>> + Send;
 
     /// Roll back a single mutation.
+    ///
+    /// For creates, `prior_value` will be `None` (delete the created resource).
+    /// For updates, `prior_value` contains the original state to restore.
+    /// For deletes, `prior_value` contains the deleted resource to re-create.
     fn rollback_mutation(
         &self,
         index: usize,
         mutation: &StagedMutation,
+        prior_value: Option<&serde_json::Value>,
     ) -> impl std::future::Future<Output = Result<(), crate::error::UnifiError>> + Send;
 
     /// Check if the pre-image still matches the controller state.

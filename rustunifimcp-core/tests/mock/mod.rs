@@ -6,7 +6,7 @@
 use rustunifimcp_core::changeset::{ControllerOps, StagedMutation};
 use rustunifimcp_core::error::UnifiError;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 /// Mock controller state shared across async calls.
 #[derive(Clone)]
@@ -18,6 +18,8 @@ struct MockState {
     behavior: Behavior,
     write_calls: AtomicUsize,
     rollback_calls: AtomicUsize,
+    /// Records (index, prior_value) for each rollback call
+    rollback_history: Mutex<Vec<(usize, Option<serde_json::Value>)>>,
 }
 
 #[derive(Clone)]
@@ -37,6 +39,7 @@ impl MockController {
                 behavior: Behavior::SucceedAll,
                 write_calls: AtomicUsize::new(0),
                 rollback_calls: AtomicUsize::new(0),
+                rollback_history: Mutex::new(Vec::new()),
             }),
         }
     }
@@ -96,6 +99,16 @@ impl MockController {
         self.state.rollback_calls.load(Ordering::SeqCst)
     }
 
+    /// Get the rollback history (index, prior_value) for each call.
+    #[must_use]
+    pub fn rollback_history(&self) -> Vec<(usize, Option<serde_json::Value>)> {
+        self.state
+            .rollback_history
+            .lock()
+            .expect("lock should not be poisoned")
+            .clone()
+    }
+
     /// Check if the pre-image matches (for drift detection).
     #[must_use]
     pub fn preimage_matches_sync(&self) -> bool {
@@ -125,7 +138,12 @@ impl ControllerOps for MockController {
         }
     }
 
-    async fn rollback_mutation(&self, index: usize, _mutation: &StagedMutation) -> Result<(), UnifiError> {
+    async fn rollback_mutation(
+        &self,
+        index: usize,
+        _mutation: &StagedMutation,
+        prior_value: Option<&serde_json::Value>,
+    ) -> Result<(), UnifiError> {
         let should_fail = match &self.state.behavior {
             Behavior::FailAtWithRollbackFailure { rollback_fail_at, .. } => {
                 index + 1 >= *rollback_fail_at
@@ -134,6 +152,13 @@ impl ControllerOps for MockController {
         };
 
         self.state.rollback_calls.fetch_add(1, Ordering::SeqCst);
+
+        // Record the rollback call with its prior_value
+        self.state
+            .rollback_history
+            .lock()
+            .expect("lock should not be poisoned")
+            .push((index, prior_value.cloned()));
 
         if should_fail {
             Err(UnifiError::Upstream {

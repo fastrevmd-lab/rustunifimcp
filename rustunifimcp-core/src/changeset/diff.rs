@@ -27,6 +27,10 @@ pub struct Change {
     pub mutation: StagedMutation,
     /// A preview of what this change does.
     pub preview: String,
+    /// The value before the change (None for creates).
+    pub before: Option<serde_json::Value>,
+    /// The value after the change (None for deletes).
+    pub after: Option<serde_json::Value>,
 }
 
 /// Compute a diff between the pre-image and staged mutations.
@@ -35,14 +39,26 @@ pub struct Change {
 ///
 /// Returns an error if the diff computation fails.
 pub fn diff_against_preimage(
-    _preimage: &Preimage,
+    preimage: &Preimage,
     mutations: &[StagedMutation],
 ) -> Result<Diff, UnifiError> {
     let changes = mutations
         .iter()
-        .map(|mutation| Change {
-            preview: mutation.preview(),
-            mutation: mutation.clone(),
+        .map(|mutation| {
+            let (before, after) = match mutation {
+                StagedMutation::Create { body, .. } => (None, Some(body.clone())),
+                StagedMutation::Update { id, body, .. } => {
+                    (preimage.get_resource(id), Some(body.clone()))
+                }
+                StagedMutation::Delete { id, .. } => (preimage.get_resource(id), None),
+            };
+
+            Change {
+                preview: mutation.preview(),
+                mutation: mutation.clone(),
+                before,
+                after,
+            }
         })
         .collect();
 
@@ -55,6 +71,7 @@ pub fn diff_against_preimage(
 #[cfg(test)]
 mod tests {
     use crate::testing::{fixture, DEFAULT_FIXTURE_VERSION};
+    use serde_json::json;
 
     /// An empty diff is not the same as a diff that was never computed.
     #[test]
@@ -66,5 +83,50 @@ mod tests {
         let diff = super::diff_against_preimage(&preimage, &[]).expect("diffs");
         assert!(diff.computed);
         assert!(diff.changes.is_empty());
+    }
+
+    /// The diff must show before and after values from the pre-image and mutations.
+    #[test]
+    fn diff_shows_before_and_after_values_for_update() {
+        use super::{Preimage, StagedMutation};
+
+        let preimage_data = json!({
+            "data": [{
+                "_id": "id1",
+                "name": "before_value"
+            }]
+        });
+        let preimage = Preimage::from_fixture(&preimage_data);
+
+        let mutations = vec![StagedMutation::update(
+            "network",
+            "id1",
+            json!({"name": "after_value"}),
+        )];
+
+        let diff = super::diff_against_preimage(&preimage, &mutations).expect("diff");
+
+        assert_eq!(diff.changes.len(), 1);
+        let change = &diff.changes[0];
+
+        assert!(
+            change.before.is_some(),
+            "update should have a before value from pre-image"
+        );
+        assert_eq!(
+            change.before.as_ref().expect("before value").get("name").and_then(|v| v.as_str()),
+            Some("before_value"),
+            "before should be the pre-image value"
+        );
+
+        assert!(
+            change.after.is_some(),
+            "update should have an after value from the mutation"
+        );
+        assert_eq!(
+            change.after.as_ref().expect("after value").get("name").and_then(|v| v.as_str()),
+            Some("after_value"),
+            "after should be the mutation value"
+        );
     }
 }

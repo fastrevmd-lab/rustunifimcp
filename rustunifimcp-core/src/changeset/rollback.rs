@@ -14,7 +14,7 @@ use super::preimage::{Preimage, StagedMutation};
 /// An empty Vec indicates success; a non-empty Vec indicates partial rollback.
 pub async fn rollback_to_preimage<C>(
     controller: &C,
-    _preimage: &Preimage,
+    preimage: &Preimage,
     succeeded: &[StagedMutation],
 ) -> Result<(), Vec<String>>
 where
@@ -22,13 +22,23 @@ where
 {
     let mut failures = Vec::new();
 
-    // Roll back in reverse order
-    for (index, mutation) in succeeded.iter().enumerate() {
-        if let Err(e) = controller.rollback_mutation(index, mutation).await {
+    // Roll back in reverse order - last mutation first
+    for (forward_index, mutation) in succeeded.iter().enumerate().rev() {
+        // Extract the prior value from the pre-image based on mutation type
+        let prior_value = match mutation {
+            StagedMutation::Create { .. } => None, // No prior value for creates
+            StagedMutation::Update { id, .. } | StagedMutation::Delete { id, .. } => {
+                preimage.get_resource(id)
+            }
+        };
+
+        if let Err(e) = controller
+            .rollback_mutation(forward_index, mutation, prior_value.as_ref())
+            .await
+        {
             failures.push(format!(
-                "rollback failed for {}: {}",
+                "rollback failed for {} (mutation {forward_index}): {e}",
                 mutation.preview(),
-                e
             ));
         }
     }

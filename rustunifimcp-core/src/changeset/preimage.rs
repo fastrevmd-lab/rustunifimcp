@@ -59,6 +59,25 @@ impl Preimage {
         }
     }
 
+    /// Get the pre-image entry for a resource by ID.
+    ///
+    /// Returns `None` if the resource does not exist in the pre-image (which is
+    /// expected for creates, and an error for updates/deletes).
+    #[must_use]
+    pub fn get_resource(&self, id: &str) -> Option<Value> {
+        if let Some(data) = self.resources.get("data").and_then(|d| d.as_array()) {
+            data.iter()
+                .find(|item| {
+                    item.get("_id")
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|item_id| item_id == id)
+                })
+                .cloned()
+        } else {
+            None
+        }
+    }
+
 }
 
 /// A planned mutation against live configuration.
