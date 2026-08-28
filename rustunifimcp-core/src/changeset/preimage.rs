@@ -27,15 +27,108 @@ impl Preimage {
 
     /// Capture a pre-image from a live controller.
     ///
+    /// Fetches the current state of all resources that will be touched by the
+    /// mutations. For creates, no prior state exists (recorded as absence). For
+    /// updates and deletes, the resource is fetched and stored.
+    ///
     /// # Errors
     ///
-    /// Returns an error if any resource fetch fails.
+    /// Returns an error if any resource fetch fails or if a mutation kind cannot
+    /// be parsed.
     pub async fn capture_preimage(
-        _client: &crate::client::UnifiClient,
-        _mutations: &[StagedMutation],
+        client: &crate::client::UnifiClient,
+        mutations: &[StagedMutation],
     ) -> Result<Self, UnifiError> {
-        // Implementation deferred — Task 27 wires this to the real client
-        unimplemented!("capture_preimage requires real client integration")
+        use crate::model::{unwrap_enveloped_data, ResourceKind};
+        use crate::ApiSurface;
+
+        let mut data = Vec::new();
+
+        for mutation in mutations {
+            match mutation {
+                StagedMutation::Create { .. } => {
+                    // Creates have no prior state - absence is recorded by not
+                    // adding anything to the data array. This explicit non-presence
+                    // is what lets rollback delete a created resource rather than
+                    // guessing.
+                    continue;
+                }
+                StagedMutation::Restore { .. } => {
+                    // Restores overwrite the entire controller state. The pre-image
+                    // would be the whole controller, which is not meaningful to capture.
+                    continue;
+                }
+                StagedMutation::Update { kind, id, .. } | StagedMutation::Delete { kind, id } => {
+                    // Parse the kind string to ResourceKind
+                    let kind_value = serde_json::Value::String(kind.clone());
+                    let resource_kind: ResourceKind = serde_json::from_value(kind_value)
+                        .map_err(|e| UnifiError::Malformed(format!(
+                            "invalid resource kind '{}': {}", kind, e
+                        )))?;
+
+                    let surface = resource_kind.surface();
+                    let site = client.default_site_for(surface).await?;
+                    let template = format!("{}/{{}}", resource_kind.path_template());
+
+                    // Fetch the resource
+                    let raw = client
+                        .get(
+                            surface,
+                            &template,
+                            &[("site", &site), ("id", id)],
+                            &[],
+                        )
+                        .await
+                        .map_err(|e| UnifiError::Malformed(format!(
+                            "failed to capture pre-image for {} {}: {}",
+                            kind, id, e
+                        )))?;
+
+                    // Extract the resource from the envelope based on surface
+                    let resource = match surface {
+                        ApiSurface::Supported | ApiSurface::PrivateV1 => {
+                            // These surfaces wrap responses in {"data": [...]}
+                            let items = unwrap_enveloped_data(&raw)?;
+                            if items.is_empty() {
+                                return Err(UnifiError::Malformed(format!(
+                                    "resource {} {} not found for pre-image capture", kind, id
+                                )));
+                            }
+                            items[0].clone()
+                        }
+                        ApiSurface::PrivateV2 => {
+                            // Private v2 returns a bare array
+                            if let Some(arr) = raw.as_array() {
+                                if arr.is_empty() {
+                                    return Err(UnifiError::Malformed(format!(
+                                        "resource {} {} not found for pre-image capture", kind, id
+                                    )));
+                                }
+                                arr[0].clone()
+                            } else if raw.is_object() {
+                                // Sometimes returns a single object
+                                raw
+                            } else {
+                                return Err(UnifiError::Malformed(format!(
+                                    "unexpected response format for {} {}", kind, id
+                                )));
+                            }
+                        }
+                        ApiSurface::Cloud => {
+                            return Err(UnifiError::Malformed(
+                                "cloud surface not supported".to_owned()
+                            ));
+                        }
+                    };
+
+                    data.push(resource);
+                }
+            }
+        }
+
+        Ok(Self {
+            resources: serde_json::json!({"data": data}),
+        })
     }
 
     /// Check if this pre-image covers a given mutation.
@@ -56,6 +149,7 @@ impl Preimage {
             }
             StagedMutation::Create { .. } => true, // Creates don't need pre-image coverage
             StagedMutation::Delete { .. } => true, // Deletes are checked at validate time
+            StagedMutation::Restore { .. } => true, // Restores have no meaningful pre-image
         }
     }
 
@@ -106,6 +200,15 @@ pub enum StagedMutation {
         /// The resource ID.
         id: String,
     },
+    /// Restore entire controller configuration from a backup.
+    ///
+    /// This overwrites the entire controller state and cannot be undone by
+    /// rollback. The pre-image for a restore would be the entire controller,
+    /// so no meaningful pre-image is captured.
+    Restore {
+        /// The backup ID to restore from.
+        backup_id: String,
+    },
 }
 
 impl StagedMutation {
@@ -137,6 +240,16 @@ impl StagedMutation {
         }
     }
 
+    /// Stage a controller restore from backup.
+    ///
+    /// This overwrites the entire controller configuration and cannot be undone.
+    #[must_use]
+    pub fn restore(backup_id: impl Into<String>) -> Self {
+        Self::Restore {
+            backup_id: backup_id.into(),
+        }
+    }
+
     /// Preview this mutation as a human-readable string.
     #[must_use]
     pub fn preview(&self) -> String {
@@ -144,6 +257,11 @@ impl StagedMutation {
             Self::Create { kind, .. } => format!("create {kind}"),
             Self::Update { kind, id, .. } => format!("update {kind} {id}"),
             Self::Delete { kind, id } => format!("delete {kind} {id}"),
+            Self::Restore { backup_id } => format!(
+                "restore from backup {} (overwrites entire controller configuration, \
+                 cannot be undone by rollback)",
+                backup_id
+            ),
         }
     }
 }
@@ -170,5 +288,29 @@ mod tests {
             super::super::validate::validate_locally(&preimage, &[staged]).is_err(),
             "a mutation with no pre-image coverage must not reach apply"
         );
+    }
+}
+
+#[cfg(test)]
+mod restore_tests {
+    use super::StagedMutation;
+
+    /// Restore overwrites the entire controller configuration. It is not an
+    /// operational action, and there must be no path to it that skips approval.
+    #[test]
+    fn restore_is_not_reachable_through_backup_action() {
+        let raw = r#"{"controller":"home","action":"restore","backup_id":"x"}"#;
+        let parsed: Result<crate::tools::ops::BackupActionArgs, _> =
+            serde_json::from_str(raw);
+        assert!(parsed.is_err(), "restore must not parse as an operational action");
+    }
+
+    #[test]
+    fn a_staged_restore_declares_its_blast_radius() {
+        let staged = StagedMutation::restore("backup-2026-08-26");
+        let rendered = staged.preview();
+        let lowered = rendered.to_lowercase();
+        assert!(lowered.contains("entire"), "{rendered}");
+        assert!(lowered.contains("cannot be undone by rollback"), "{rendered}");
     }
 }

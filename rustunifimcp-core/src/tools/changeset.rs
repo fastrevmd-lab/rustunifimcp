@@ -18,17 +18,17 @@ pub const DESCRIPTIONS: &[(&str, &str)] = &[
          over live state rather than a staged candidate."
     ),
     (
-        "unifi_stage_actions",
-        "Stages one or more actions into an existing change set. Each action is \
+        "unifi_stage_change",
+        "Stages one or more changes into an existing change set. Each change is \
          recorded as a planned mutation against live configuration. Because UniFi \
          writes directly to running state, staging is a planning step only — it \
          snapshots the current state as a pre-image and defers the actual writes \
          until apply."
     ),
     (
-        "unifi_get_change_set_diff",
+        "unifi_diff_change_set",
         "Returns a diff showing what applying the change set would do, based on \
-         the staged actions and the current running state. Because UniFi has no \
+         the staged changes and the current running state. Because UniFi has no \
          candidate to diff against running, this is a projection of the planned \
          mutations, not a server-generated diff."
     ),
@@ -40,6 +40,13 @@ pub const DESCRIPTIONS: &[(&str, &str)] = &[
          staleness. It cannot detect issues the controller would find on apply."
     ),
     (
+        "unifi_approve_change_set",
+        "Approves a change set for apply. Requires approval by a different principal \
+         than the one who created the set (two-person control). In lab mode, approval \
+         is automatically waived at creation time. The approval binds to the exact \
+         pre-image captured at staging."
+    ),
+    (
         "unifi_apply_change_set",
         "Applies the staged changes as a sequence of independent REST calls \
          against live configuration. UniFi has no candidate configuration and no \
@@ -48,16 +55,9 @@ pub const DESCRIPTIONS: &[(&str, &str)] = &[
          can itself fail."
     ),
     (
-        "unifi_rollback_change_set",
-        "Attempts to revert the change set by replaying the stored pre-image as \
-         a sequence of REST calls. Because UniFi has no checkpoint to roll back \
-         to, this is best-effort compensation — the rollback itself can fail \
-         partway through. Only available after a failed or partial apply."
-    ),
-    (
-        "unifi_get_change_set_status",
-        "Returns the current status of a change set: pending, applied, failed, \
-         partial, or rolled back. Includes the fingerprint, staged actions, any \
-         apply outcome, and whether rollback is available."
+        "unifi_get_change_set",
+        "Returns the current status and contents of a change set: pending, applied, \
+         failed, partial, or rolled back. Includes the fingerprint, staged changes, \
+         any apply outcome, and whether rollback is available."
     ),
 ];

@@ -32,6 +32,13 @@ fn the_write_tool_registry_holds_exactly_the_mutating_tools() {
         "unifi_client_action",
         "unifi_device_action",
         "unifi_run_speed_test",
+        "unifi_create_change_set",
+        "unifi_stage_change",
+        "unifi_diff_change_set",
+        "unifi_validate_change_set",
+        "unifi_approve_change_set",
+        "unifi_apply_change_set",
+        "unifi_get_change_set",
     ];
     expected.sort_unstable();
 

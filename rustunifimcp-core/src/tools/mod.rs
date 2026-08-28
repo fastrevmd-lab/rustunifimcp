@@ -36,6 +36,14 @@ pub const TOOL_NAMES: &[&str] = &[
     "unifi_traffic_flow_report",
     "unifi_firewall_audit",
     "unifi_client_troubleshoot",
+    // Change sets (7)
+    "unifi_create_change_set",
+    "unifi_stage_change",
+    "unifi_diff_change_set",
+    "unifi_validate_change_set",
+    "unifi_approve_change_set",
+    "unifi_apply_change_set",
+    "unifi_get_change_set",
 ];
 
 /// The mutating tools, passed to `mecmcp_server::authorize_call`.
@@ -53,5 +61,12 @@ pub const WRITE_TOOLS: &[&str] = &[
     "unifi_client_action",
     "unifi_backup_action",
     "unifi_run_speed_test",
-    // Phase 6 adds the seven change-set tools here.
+    // Phase 6 — change-set lifecycle
+    "unifi_create_change_set",
+    "unifi_stage_change",
+    "unifi_diff_change_set",
+    "unifi_validate_change_set",
+    "unifi_approve_change_set",
+    "unifi_apply_change_set",
+    "unifi_get_change_set",
 ];

@@ -51,6 +51,11 @@ pub fn diff_against_preimage(
                     (preimage.get_resource(id), Some(body.clone()))
                 }
                 StagedMutation::Delete { id, .. } => (preimage.get_resource(id), None),
+                StagedMutation::Restore { backup_id } => {
+                    // Restore overwrites the entire controller, so there's no meaningful
+                    // before/after at the resource level. The backup_id is the "after".
+                    (None, Some(serde_json::json!({"backup_id": backup_id})))
+                }
             };
 
             Change {

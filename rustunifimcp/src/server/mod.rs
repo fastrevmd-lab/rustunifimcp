@@ -530,6 +530,121 @@ impl UnifiServer {
             Err(error) => tool_error(error),
         }
     }
+
+    // Change-set lifecycle tools (Phase 6)
+    // Full implementation deferred to change-set integration
+
+    #[tool(
+        name = "unifi_create_change_set",
+        description = "Creates a new change set with a fingerprint snapshot of current running configuration"
+    )]
+    async fn unifi_create_change_set(
+        &self,
+        Parameters(_args): Parameters<NoArgs>,
+        context: RequestContext<RoleServer>,
+    ) -> CallToolResult {
+        let caller = Self::caller(&context);
+        if let Err(error) = authorize_call(caller.as_ref(), "unifi_create_change_set", None, WRITE_TOOLS) {
+            return tool_error(error);
+        }
+        tool_error("unifi_create_change_set not yet implemented")
+    }
+
+    #[tool(
+        name = "unifi_stage_change",
+        description = "Stages one or more changes into an existing change set"
+    )]
+    async fn unifi_stage_change(
+        &self,
+        Parameters(_args): Parameters<NoArgs>,
+        context: RequestContext<RoleServer>,
+    ) -> CallToolResult {
+        let caller = Self::caller(&context);
+        if let Err(error) = authorize_call(caller.as_ref(), "unifi_stage_change", None, WRITE_TOOLS) {
+            return tool_error(error);
+        }
+        tool_error("unifi_stage_change not yet implemented")
+    }
+
+    #[tool(
+        name = "unifi_diff_change_set",
+        description = "Returns a diff showing what applying the change set would do"
+    )]
+    async fn unifi_diff_change_set(
+        &self,
+        Parameters(_args): Parameters<NoArgs>,
+        context: RequestContext<RoleServer>,
+    ) -> CallToolResult {
+        let caller = Self::caller(&context);
+        if let Err(error) = authorize_call(caller.as_ref(), "unifi_diff_change_set", None, WRITE_TOOLS) {
+            return tool_error(error);
+        }
+        tool_error("unifi_diff_change_set not yet implemented")
+    }
+
+    #[tool(
+        name = "unifi_validate_change_set",
+        description = "Validates the change set as far as possible without applying it"
+    )]
+    async fn unifi_validate_change_set(
+        &self,
+        Parameters(_args): Parameters<NoArgs>,
+        context: RequestContext<RoleServer>,
+    ) -> CallToolResult {
+        let caller = Self::caller(&context);
+        if let Err(error) = authorize_call(caller.as_ref(), "unifi_validate_change_set", None, WRITE_TOOLS) {
+            return tool_error(error);
+        }
+        tool_error("unifi_validate_change_set not yet implemented")
+    }
+
+    #[tool(
+        name = "unifi_approve_change_set",
+        description = "Approves a change set for apply (requires two-person control)"
+    )]
+    async fn unifi_approve_change_set(
+        &self,
+        Parameters(_args): Parameters<NoArgs>,
+        context: RequestContext<RoleServer>,
+    ) -> CallToolResult {
+        let caller = Self::caller(&context);
+        if let Err(error) = authorize_call(caller.as_ref(), "unifi_approve_change_set", None, WRITE_TOOLS) {
+            return tool_error(error);
+        }
+        tool_error("unifi_approve_change_set not yet implemented")
+    }
+
+    #[tool(
+        name = "unifi_apply_change_set",
+        description = "Applies the staged changes as a sequence of independent REST calls"
+    )]
+    async fn unifi_apply_change_set(
+        &self,
+        Parameters(_args): Parameters<NoArgs>,
+        context: RequestContext<RoleServer>,
+    ) -> CallToolResult {
+        let caller = Self::caller(&context);
+        if let Err(error) = authorize_call(caller.as_ref(), "unifi_apply_change_set", None, WRITE_TOOLS) {
+            return tool_error(error);
+        }
+        tool_error("unifi_apply_change_set not yet implemented")
+    }
+
+    #[tool(
+        name = "unifi_get_change_set",
+        description = "Returns the current status and contents of a change set"
+    )]
+    async fn unifi_get_change_set(
+        &self,
+        Parameters(_args): Parameters<NoArgs>,
+        context: RequestContext<RoleServer>,
+    ) -> CallToolResult {
+        let caller = Self::caller(&context);
+        if let Err(error) = authorize_call(caller.as_ref(), "unifi_get_change_set", None, WRITE_TOOLS) {
+            return tool_error(error);
+        }
+        tool_error("unifi_get_change_set not yet implemented")
+    }
 }
 
 /// Apply cache hints to a tool list when the client negotiated 2026-07-28 or later.

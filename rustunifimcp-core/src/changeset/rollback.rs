@@ -30,6 +30,14 @@ where
             StagedMutation::Update { id, .. } | StagedMutation::Delete { id, .. } => {
                 preimage.get_resource(id)
             }
+            StagedMutation::Restore { .. } => {
+                // Restores cannot be rolled back - the entire controller was overwritten
+                failures.push(format!(
+                    "cannot rollback {} (mutation {forward_index}): restores cannot be undone",
+                    mutation.preview(),
+                ));
+                continue;
+            }
         };
 
         if let Err(e) = controller

@@ -49,7 +49,7 @@ pub fn check_references(data: &Value, mutations: &[StagedMutation]) -> Result<()
         // Check if this mutation references a zone
         let body = match mutation {
             StagedMutation::Create { body, .. } | StagedMutation::Update { body, .. } => body,
-            StagedMutation::Delete { .. } => continue,
+            StagedMutation::Delete { .. } | StagedMutation::Restore { .. } => continue,
         };
 
         // Check if the body references a zone_id

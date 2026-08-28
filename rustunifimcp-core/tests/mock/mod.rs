@@ -173,4 +173,13 @@ impl ControllerOps for MockController {
     async fn preimage_matches(&self) -> bool {
         self.preimage_matches_sync()
     }
+
+    async fn fetch_resource(
+        &self,
+        _kind: &str,
+        _id: &str,
+    ) -> Result<Option<serde_json::Value>, UnifiError> {
+        // Mock always reports resources as existing for verification
+        Ok(Some(serde_json::json!({"_id": _id})))
+    }
 }
