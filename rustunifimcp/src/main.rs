@@ -1,14 +1,134 @@
 //! `rustunifimcp` — enterprise MCP server for UniFi Network.
 
-use rustunifimcp::cli::UnifiCli;
+use rustunifimcp::cli::{UnifiCli, TokenCli, TokenCommand};
 use rustunifimcp::server::UnifiServer;
 use rustunifimcp::http_transport::build_http_router;
 use anyhow::{Context as _, Result, bail};
 use clap::Parser;
+use mecmcp_auth::NoGrant;
+use mecmcp_runtime::cli::{Command, TokenAction};
 use mecmcp_transport::{LimitsConfig, serve_router};
 use rmcp::ServiceExt;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
+
+/// Convert `TokenCommand` to `TokenAction`.
+///
+/// UniFi uses `NoGrant`, so no vendor grant is built.
+fn token_command_to_action(command: TokenCommand) -> (TokenAction, Option<NoGrant>) {
+    match command {
+        TokenCommand::Add {
+            tokens_file,
+            name,
+            devices,
+            tools,
+            provider,
+            provider_tier,
+            on_behalf_of,
+            actor_type,
+            server_pid,
+        } => (
+            TokenAction::Add {
+                tokens_file,
+                name,
+                devices,
+                tools,
+                provider,
+                provider_tier,
+                on_behalf_of,
+                actor_type,
+                server_pid,
+            },
+            None,
+        ),
+        TokenCommand::Revoke {
+            tokens_file,
+            name,
+            server_pid,
+        } => (
+            TokenAction::Revoke {
+                tokens_file,
+                name,
+                server_pid,
+            },
+            None,
+        ),
+        TokenCommand::List { tokens_file } => (TokenAction::List { tokens_file }, None),
+        TokenCommand::Rotate {
+            tokens_file,
+            name,
+            server_pid,
+        } => (
+            TokenAction::Rotate {
+                tokens_file,
+                name,
+                server_pid,
+            },
+            None,
+        ),
+        TokenCommand::SetScope {
+            tokens_file,
+            name,
+            devices,
+            tools,
+            yes,
+            server_pid,
+        } => (
+            TokenAction::SetScopes {
+                tokens_file,
+                name,
+                devices,
+                tools,
+                yes,
+                server_pid,
+            },
+            None,
+        ),
+    }
+}
+
+/// Install a minimal audit subscriber for token operations.
+///
+/// Token commands are dispatched before the server's full `init_audit`, so
+/// without a subscriber every token mutation — a mint, a revoke, a privilege
+/// widening — is written to disk having left no record. A pre-existing
+/// subscriber already installed is not an error worth refusing a token
+/// operation over.
+fn init_token_audit() {
+    use tracing_subscriber::Layer as _;
+    use tracing_subscriber::layer::SubscriberExt as _;
+    use tracing_subscriber::util::SubscriberInitExt as _;
+    use tracing_subscriber::{EnvFilter, filter::filter_fn, fmt};
+
+    // Two layers, each with its own filter, because the audit record must not
+    // be reachable by RUST_LOG at all.
+    //
+    // Adding `audit=info` to the env filter is not enough: `EnvFilter` picks
+    // the most specific matching directive, so a field-specific value such as
+    // `audit[{tool}]=off` still wins over a target-only one. Measured — the
+    // widening applied and stderr stayed empty:
+    //
+    //     RUST_LOG=audit=off            audit lines: 1
+    //     RUST_LOG=audit[{tool}]=off    audit lines: 0   <- silent widening
+    //
+    // So the audit layer carries a plain predicate instead, which no
+    // environment variable participates in.
+    let audit_layer = fmt::layer()
+        .with_writer(std::io::stderr)
+        .with_filter(filter_fn(|metadata| metadata.target() == "audit"));
+
+    // Everything else follows RUST_LOG as usual, minus the audit target so a
+    // permissive filter cannot print the record twice.
+    let general_layer = fmt::layer()
+        .with_writer(std::io::stderr)
+        .with_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
+        .with_filter(filter_fn(|metadata| metadata.target() != "audit"));
+
+    let _ = tracing_subscriber::registry()
+        .with(audit_layer)
+        .with(general_layer)
+        .try_init();
+}
 
 #[tokio::main]
 async fn main() {
@@ -25,6 +145,44 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
 async fn run_inner() -> Result<()> {
     // Install crypto provider.
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+    // Dispatch token commands before parsing UnifiCli.
+    //
+    // This keeps grant-specific flags (--devices, --tools) off the server's help
+    // and allows them to appear after the subcommand where they belong. The
+    // flattened Cli still declares its own `token` subcommand, but TokenCli owns
+    // the complete token surface including --help when argv names `token`.
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("token") {
+        // Build args for TokenCli: [program_name, add/revoke/list/rotate, ...]
+        // Skip "token" at index 1 since TokenCli expects the subcommand directly.
+        let token_args = std::iter::once(args[0].clone())
+            .chain(args.iter().skip(2).cloned())
+            .collect::<Vec<_>>();
+        let token_cli = TokenCli::parse_from(token_args);
+
+        // Install a subscriber before dispatching. `run_with_grant` emits the
+        // scope change as a `target: "audit"` event, and this path returns
+        // long before the server's normal tracing init, so without one every token
+        // mutation — a mint, a revoke, a privilege widening — is written to
+        // disk having left no record that it happened.
+        //
+        // Deliberately minimal: the token CLI carries no audit flags, so there
+        // is no log file, journald sink, or redaction policy to honour. The
+        // operator running the command is the audience, and stderr is where
+        // they are looking.
+        init_token_audit();
+
+        let (action, grant) = token_command_to_action(token_cli.command);
+        return mecmcp_runtime::token_cmd::run_with_grant::<NoGrant>(
+            action,
+            &[],
+            rustunifimcp_core::tools::TOOL_NAMES,
+            grant,
+        )
+        .map_err(|error| anyhow::anyhow!("{error}"));
+    }
+
     // Initialize tracing.
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -33,7 +191,19 @@ async fn run_inner() -> Result<()> {
         )
         .init();
 
-    let cli = UnifiCli::parse();
+    let mut cli = UnifiCli::parse();
+
+    if let Some(Command::Token { .. }) = cli.common.command.take() {
+        // This path fires when a server flag precedes the subcommand
+        // (e.g., `--controllers-file X token add ...`). The early dispatch at argv[1]
+        // does not intercept it, so TokenCli's grant-specific flags (--devices,
+        // --tools) are unavailable. Refuse rather than silently minting a
+        // grantless token.
+        bail!(
+            "token subcommand must appear before server flags; use: \
+             rustunifimcp token add [options]"
+        );
+    }
 
     if cli.lab_mode() {
         tracing::warn!(
@@ -300,5 +470,94 @@ mod tests {
 
         let result = load_listener_tls(&cli);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn token_command_to_action_add() {
+        use std::path::PathBuf;
+        let command = TokenCommand::Add {
+            tokens_file: PathBuf::from("/tmp/tokens.json"),
+            name: "test".to_string(),
+            devices: vec!["*".to_string()],
+            tools: vec!["*".to_string()],
+            provider: None,
+            provider_tier: None,
+            on_behalf_of: None,
+            actor_type: None,
+            server_pid: None,
+        };
+
+        let (action, grant) = token_command_to_action(command);
+        assert!(grant.is_none());
+        match action {
+            TokenAction::Add { name, .. } => assert_eq!(name, "test"),
+            _ => panic!("expected TokenAction::Add"),
+        }
+    }
+
+    #[test]
+    fn token_command_to_action_revoke() {
+        use std::path::PathBuf;
+        let command = TokenCommand::Revoke {
+            tokens_file: PathBuf::from("/tmp/tokens.json"),
+            name: "test".to_string(),
+            server_pid: None,
+        };
+
+        let (action, grant) = token_command_to_action(command);
+        assert!(grant.is_none());
+        match action {
+            TokenAction::Revoke { name, .. } => assert_eq!(name, "test"),
+            _ => panic!("expected TokenAction::Revoke"),
+        }
+    }
+
+    #[test]
+    fn token_command_to_action_list() {
+        use std::path::PathBuf;
+        let command = TokenCommand::List {
+            tokens_file: PathBuf::from("/tmp/tokens.json"),
+        };
+
+        let (action, grant) = token_command_to_action(command);
+        assert!(grant.is_none());
+        assert!(matches!(action, TokenAction::List { .. }));
+    }
+
+    #[test]
+    fn token_command_to_action_rotate() {
+        use std::path::PathBuf;
+        let command = TokenCommand::Rotate {
+            tokens_file: PathBuf::from("/tmp/tokens.json"),
+            name: "test".to_string(),
+            server_pid: None,
+        };
+
+        let (action, grant) = token_command_to_action(command);
+        assert!(grant.is_none());
+        match action {
+            TokenAction::Rotate { name, .. } => assert_eq!(name, "test"),
+            _ => panic!("expected TokenAction::Rotate"),
+        }
+    }
+
+    #[test]
+    fn token_command_to_action_set_scope() {
+        use std::path::PathBuf;
+        let command = TokenCommand::SetScope {
+            tokens_file: PathBuf::from("/tmp/tokens.json"),
+            name: "test".to_string(),
+            devices: Some(vec!["*".to_string()]),
+            tools: Some(vec!["*".to_string()]),
+            yes: false,
+            server_pid: None,
+        };
+
+        let (action, grant) = token_command_to_action(command);
+        assert!(grant.is_none());
+        match action {
+            TokenAction::SetScopes { name, .. } => assert_eq!(name, "test"),
+            _ => panic!("expected TokenAction::SetScopes"),
+        }
     }
 }

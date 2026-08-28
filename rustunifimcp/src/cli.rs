@@ -88,7 +88,7 @@ pub enum TokenCommand {
         /// Comma-separated controller names, or '*' for all.
         #[arg(long, value_delimiter = ',')]
         devices: Vec<String>,
-        /// Comma-separated tool names, or '*' for all.
+        /// Comma-separated tool names, or '*' for read-only tools only.
         #[arg(long, value_delimiter = ',')]
         tools: Vec<String>,
         /// Provider name (e.g., "anthropic", "ollama"). Optional.
