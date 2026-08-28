@@ -105,6 +105,69 @@ pub struct ListSitesArgs {
     pub controller: String,
 }
 
+/// Parses a raw resource response through the appropriate model parser.
+///
+/// This is where raw controller JSON becomes typed, filtered resources. Each
+/// `ResourceKind` that has a parser is routed through it; kinds without one
+/// return the raw payload.
+fn parse_resource_list(
+    kind: ResourceKind,
+    raw: &serde_json::Value,
+) -> Result<serde_json::Value, UnifiError> {
+    use crate::model::device::parse_devices;
+    use crate::model::firewall::{parse_firewall_groups, parse_firewall_policies, parse_firewall_zones};
+    use crate::model::network::{parse_dhcp_reservations, parse_networks, parse_port_profiles, parse_radius_profiles, parse_wlans};
+    use crate::model::routing::parse_traffic_routes;
+    use crate::model::station::parse_stations;
+
+    match kind {
+        ResourceKind::Station => {
+            let parsed = parse_stations(raw)?;
+            serde_json::to_value(parsed).map_err(|e| UnifiError::Malformed(e.to_string()))
+        }
+        ResourceKind::Device => {
+            let parsed = parse_devices(raw)?;
+            serde_json::to_value(parsed).map_err(|e| UnifiError::Malformed(e.to_string()))
+        }
+        ResourceKind::Network => {
+            let parsed = parse_networks(raw)?;
+            serde_json::to_value(parsed).map_err(|e| UnifiError::Malformed(e.to_string()))
+        }
+        ResourceKind::Wlan => {
+            let parsed = parse_wlans(raw)?;
+            serde_json::to_value(parsed).map_err(|e| UnifiError::Malformed(e.to_string()))
+        }
+        ResourceKind::PortProfile => {
+            let parsed = parse_port_profiles(raw)?;
+            serde_json::to_value(parsed).map_err(|e| UnifiError::Malformed(e.to_string()))
+        }
+        ResourceKind::DhcpReservation => {
+            let parsed = parse_dhcp_reservations(raw)?;
+            serde_json::to_value(parsed).map_err(|e| UnifiError::Malformed(e.to_string()))
+        }
+        ResourceKind::FirewallPolicy => {
+            let parsed = parse_firewall_policies(raw)?;
+            serde_json::to_value(parsed).map_err(|e| UnifiError::Malformed(e.to_string()))
+        }
+        ResourceKind::FirewallZone => {
+            let parsed = parse_firewall_zones(raw)?;
+            serde_json::to_value(parsed).map_err(|e| UnifiError::Malformed(e.to_string()))
+        }
+        ResourceKind::FirewallGroup => {
+            let parsed = parse_firewall_groups(raw)?;
+            serde_json::to_value(parsed).map_err(|e| UnifiError::Malformed(e.to_string()))
+        }
+        ResourceKind::TrafficRoute => {
+            let parsed = parse_traffic_routes(raw)?;
+            serde_json::to_value(parsed).map_err(|e| UnifiError::Malformed(e.to_string()))
+        }
+        ResourceKind::RadiusProfile => {
+            let parsed = parse_radius_profiles(raw)?;
+            serde_json::to_value(parsed).map_err(|e| UnifiError::Malformed(e.to_string()))
+        }
+    }
+}
+
 /// List resources of one kind.
 ///
 /// # Errors
@@ -130,7 +193,7 @@ pub async fn list_resources(
         &client.default_site_for(surface).await?
     };
 
-    client
+    let raw = client
         .get(
             surface,
             args.kind.path_template(),
@@ -140,7 +203,80 @@ pub async fn list_resources(
                 ("limit", &page.size.to_string()),
             ],
         )
-        .await
+        .await?;
+
+    parse_resource_list(args.kind, &raw)
+}
+
+/// Parses a single-resource response through the appropriate model parser.
+///
+/// Controllers may return a single object or an enveloped object; this function
+/// handles both by normalizing to the parsed model type.
+fn parse_single_resource(
+    kind: ResourceKind,
+    raw: &serde_json::Value,
+) -> Result<serde_json::Value, UnifiError> {
+    use crate::model::device::parse_devices;
+    use crate::model::firewall::{parse_firewall_groups, parse_firewall_policies, parse_firewall_zones};
+    use crate::model::network::{parse_dhcp_reservations, parse_networks, parse_port_profiles, parse_radius_profiles, parse_wlans};
+    use crate::model::routing::parse_traffic_routes;
+    use crate::model::station::parse_stations;
+
+    // Wrap in an envelope if needed, parse, then extract the single item
+    let parsed_vec = match kind {
+        ResourceKind::Station => {
+            let parsed = parse_stations(raw)?;
+            serde_json::to_value(parsed).map_err(|e| UnifiError::Malformed(e.to_string()))?
+        }
+        ResourceKind::Device => {
+            let parsed = parse_devices(raw)?;
+            serde_json::to_value(parsed).map_err(|e| UnifiError::Malformed(e.to_string()))?
+        }
+        ResourceKind::Network => {
+            let parsed = parse_networks(raw)?;
+            serde_json::to_value(parsed).map_err(|e| UnifiError::Malformed(e.to_string()))?
+        }
+        ResourceKind::Wlan => {
+            let parsed = parse_wlans(raw)?;
+            serde_json::to_value(parsed).map_err(|e| UnifiError::Malformed(e.to_string()))?
+        }
+        ResourceKind::PortProfile => {
+            let parsed = parse_port_profiles(raw)?;
+            serde_json::to_value(parsed).map_err(|e| UnifiError::Malformed(e.to_string()))?
+        }
+        ResourceKind::DhcpReservation => {
+            let parsed = parse_dhcp_reservations(raw)?;
+            serde_json::to_value(parsed).map_err(|e| UnifiError::Malformed(e.to_string()))?
+        }
+        ResourceKind::FirewallPolicy => {
+            let parsed = parse_firewall_policies(raw)?;
+            serde_json::to_value(parsed).map_err(|e| UnifiError::Malformed(e.to_string()))?
+        }
+        ResourceKind::FirewallZone => {
+            let parsed = parse_firewall_zones(raw)?;
+            serde_json::to_value(parsed).map_err(|e| UnifiError::Malformed(e.to_string()))?
+        }
+        ResourceKind::FirewallGroup => {
+            let parsed = parse_firewall_groups(raw)?;
+            serde_json::to_value(parsed).map_err(|e| UnifiError::Malformed(e.to_string()))?
+        }
+        ResourceKind::TrafficRoute => {
+            let parsed = parse_traffic_routes(raw)?;
+            serde_json::to_value(parsed).map_err(|e| UnifiError::Malformed(e.to_string()))?
+        }
+        ResourceKind::RadiusProfile => {
+            let parsed = parse_radius_profiles(raw)?;
+            serde_json::to_value(parsed).map_err(|e| UnifiError::Malformed(e.to_string()))?
+        }
+    };
+
+    // If parsing returned an array with one item, return that item; otherwise return as-is
+    if let Some(arr) = parsed_vec.as_array()
+        && arr.len() == 1
+    {
+        return Ok(arr[0].clone());
+    }
+    Ok(parsed_vec)
 }
 
 /// Get a single resource by ID.
@@ -163,14 +299,16 @@ pub async fn get_resource(
 
     let template = format!("{}/{{}}", args.kind.path_template());
 
-    client
+    let raw = client
         .get(
             surface,
             &template,
             &[("site", site), ("id", &args.id)],
             &[],
         )
-        .await
+        .await?;
+
+    parse_single_resource(args.kind, &raw)
 }
 
 /// Query statistics for a subject.
@@ -449,6 +587,84 @@ mod tests {
         assert!(
             error_text.contains("all search legs refused"),
             "error must clearly state nothing was searched: {error_text}"
+        );
+    }
+
+    /// Every ResourceKind must route through a model parser.
+    ///
+    /// This is the coverage test that would have caught the DHCP reservation
+    /// bypass: every kind must have a parser wired in parse_resource_list, or
+    /// appear in an explicit commented list of kinds with no parser yet (there
+    /// are none currently — all kinds have parsers).
+    #[test]
+    fn every_resource_kind_has_a_parser_wired() {
+        use crate::model::ResourceKind;
+        use crate::testing::{fixture, fixtures_available, DEFAULT_FIXTURE_VERSION};
+
+        if !fixtures_available() {
+            eprintln!("SKIPPED: no fixtures. Run scripts/capture-fixtures.sh against a controller.");
+            return;
+        }
+
+        // For each kind, verify that parse_resource_list succeeds on the
+        // recorded fixture (proving the parser is wired).
+        for kind in ResourceKind::ALL {
+            let fixture_name = match kind {
+                ResourceKind::Station => "clients",
+                ResourceKind::Device => "devices",
+                ResourceKind::Network => "networkconf",
+                ResourceKind::Wlan => "wlanconf",
+                ResourceKind::PortProfile => "portconf",
+                ResourceKind::DhcpReservation => "user",
+                ResourceKind::FirewallGroup => "firewallgroup",
+                ResourceKind::RadiusProfile => "radiusprofile",
+                ResourceKind::FirewallPolicy => "policies",
+                ResourceKind::FirewallZone => "zones",
+                ResourceKind::TrafficRoute => "traffic_routes",
+            };
+
+            let raw = fixture(DEFAULT_FIXTURE_VERSION, fixture_name);
+            super::parse_resource_list(*kind, &raw)
+                .unwrap_or_else(|e| panic!("{kind:?} parser not wired or failed: {e}"));
+        }
+    }
+
+    /// DHCP reservations must return strictly fewer rows than the raw /rest/user payload.
+    ///
+    /// This is the regression test for the architectural gap: parse_dhcp_reservations
+    /// filters to `use_fixedip: true`, but list_resources was bypassing the parser,
+    /// so callers got all 260 user records instead of the 46 actual reservations.
+    #[test]
+    fn dhcp_reservation_list_is_filtered() {
+        use crate::testing::{fixture, fixtures_available, DEFAULT_FIXTURE_VERSION};
+
+        if !fixtures_available() {
+            eprintln!("SKIPPED: no fixtures. Run scripts/capture-fixtures.sh against a controller.");
+            return;
+        }
+
+        let raw = fixture(DEFAULT_FIXTURE_VERSION, "user");
+        let total_users = crate::model::unwrap_enveloped_data(&raw)
+            .expect("envelope")
+            .len();
+
+        let parsed = super::parse_resource_list(ResourceKind::DhcpReservation, &raw)
+            .expect("parse dhcp reservations");
+        let parsed_count = parsed
+            .as_array()
+            .expect("parsed result is an array")
+            .len();
+
+        assert!(
+            parsed_count < total_users,
+            "parse_dhcp_reservations must filter: got {parsed_count}, expected < {total_users}"
+        );
+
+        // The 10.5.67 fixture has 257 total users, 46 with use_fixedip.
+        // Verify the exact count to prove the filter worked.
+        assert_eq!(
+            parsed_count, 46,
+            "10.5.67 fixture should have exactly 46 reservations"
         );
     }
 }
