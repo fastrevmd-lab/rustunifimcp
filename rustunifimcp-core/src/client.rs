@@ -528,34 +528,198 @@ impl crate::changeset::apply::ControllerOps for UnifiClient {
     async fn apply_mutation(
         &self,
         _index: usize,
-        _mutation: &crate::changeset::StagedMutation,
-    ) -> Result<(), crate::error::UnifiError> {
-        // Stubbed for now — actual apply would issue REST calls
-        Ok(())
+        mutation: &crate::changeset::StagedMutation,
+    ) -> Result<Option<String>, crate::error::UnifiError> {
+        use crate::changeset::StagedMutation;
+        use crate::model::{unwrap_enveloped_data, ResourceKind};
+        use crate::tools::read::single_resource_template;
+
+        match mutation {
+            StagedMutation::Create { kind, body } => {
+                let kind_value = serde_json::Value::String(kind.clone());
+                let resource_kind: ResourceKind = serde_json::from_value(kind_value)
+                    .map_err(|e| UnifiError::Malformed(format!("unknown resource kind '{kind}': {e}")))?;
+
+                let surface = resource_kind.surface();
+                let site = self.default_site_for(surface).await?;
+                let template = resource_kind.path_template();
+
+                let response = self.post(surface, template, &[("site", &site)], &[], body).await?;
+
+                // Extract the created resource ID from the response
+                let items = match surface {
+                    ApiSurface::Supported | ApiSurface::PrivateV1 => unwrap_enveloped_data(&response)?,
+                    ApiSurface::PrivateV2 => response.as_array()
+                        .ok_or_else(|| UnifiError::Malformed("expected Private v2 bare array".to_owned()))?,
+                    ApiSurface::Cloud => {
+                        return Err(UnifiError::Malformed("cloud surface not supported".to_owned()));
+                    }
+                };
+
+                if items.is_empty() {
+                    return Err(UnifiError::Malformed(format!("create {kind}: response has no data")));
+                }
+
+                let id = items[0]
+                    .get("_id")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| UnifiError::Malformed(format!("create {kind}: response has no _id")))?;
+
+                Ok(Some(id.to_owned()))
+            }
+
+            StagedMutation::Update { kind, id, body } => {
+                let kind_value = serde_json::Value::String(kind.clone());
+                let resource_kind: ResourceKind = serde_json::from_value(kind_value)
+                    .map_err(|e| UnifiError::Malformed(format!("unknown resource kind '{kind}': {e}")))?;
+
+                let surface = resource_kind.surface();
+                let site = self.default_site_for(surface).await?;
+                let template = single_resource_template(resource_kind);
+
+                self.put(surface, &template, &[("site", &site), ("id", id)], &[], body).await?;
+
+                Ok(None)
+            }
+
+            StagedMutation::Delete { kind, id } => {
+                let kind_value = serde_json::Value::String(kind.clone());
+                let resource_kind: ResourceKind = serde_json::from_value(kind_value)
+                    .map_err(|e| UnifiError::Malformed(format!("unknown resource kind '{kind}': {e}")))?;
+
+                let surface = resource_kind.surface();
+                let site = self.default_site_for(surface).await?;
+                let template = single_resource_template(resource_kind);
+
+                self.delete(surface, &template, &[("site", &site), ("id", id)], &[]).await?;
+
+                Ok(None)
+            }
+
+            StagedMutation::Restore { .. } => {
+                Err(UnifiError::Malformed("backup restore not implemented".to_owned()))
+            }
+        }
     }
 
     async fn rollback_mutation(
         &self,
         _index: usize,
-        _mutation: &crate::changeset::StagedMutation,
-        _prior_value: Option<&serde_json::Value>,
+        mutation: &crate::changeset::StagedMutation,
+        prior_value: Option<&serde_json::Value>,
+        created_id: Option<&str>,
     ) -> Result<(), crate::error::UnifiError> {
-        // Stubbed for now — actual rollback would restore prior state
-        Ok(())
+        use crate::changeset::StagedMutation;
+        use crate::model::ResourceKind;
+        use crate::tools::read::single_resource_template;
+
+        match mutation {
+            StagedMutation::Create { kind, .. } => {
+                // Rollback a create by deleting the created resource
+                let id = created_id.ok_or_else(|| {
+                    UnifiError::Malformed(format!("rollback create {kind}: no created_id provided"))
+                })?;
+
+                let kind_value = serde_json::Value::String(kind.clone());
+                let resource_kind: ResourceKind = serde_json::from_value(kind_value)
+                    .map_err(|e| UnifiError::Malformed(format!("unknown resource kind '{kind}': {e}")))?;
+
+                let surface = resource_kind.surface();
+                let site = self.default_site_for(surface).await?;
+                let template = single_resource_template(resource_kind);
+
+                self.delete(surface, &template, &[("site", &site), ("id", id)], &[]).await?;
+
+                Ok(())
+            }
+
+            StagedMutation::Update { kind, id, .. } => {
+                // Rollback an update by restoring the prior value
+                let prior = prior_value.ok_or_else(|| {
+                    UnifiError::Malformed(format!("rollback update {kind} {id}: no prior_value"))
+                })?;
+
+                let kind_value = serde_json::Value::String(kind.clone());
+                let resource_kind: ResourceKind = serde_json::from_value(kind_value)
+                    .map_err(|e| UnifiError::Malformed(format!("unknown resource kind '{kind}': {e}")))?;
+
+                let surface = resource_kind.surface();
+                let site = self.default_site_for(surface).await?;
+                let template = single_resource_template(resource_kind);
+
+                self.put(surface, &template, &[("site", &site), ("id", id)], &[], prior).await?;
+
+                Ok(())
+            }
+
+            StagedMutation::Delete { kind, .. } => {
+                // Rollback a delete by re-creating the resource
+                let prior = prior_value.ok_or_else(|| {
+                    UnifiError::Malformed(format!("rollback delete {kind}: no prior_value"))
+                })?;
+
+                let kind_value = serde_json::Value::String(kind.clone());
+                let resource_kind: ResourceKind = serde_json::from_value(kind_value)
+                    .map_err(|e| UnifiError::Malformed(format!("unknown resource kind '{kind}': {e}")))?;
+
+                let surface = resource_kind.surface();
+                let site = self.default_site_for(surface).await?;
+                let template = resource_kind.path_template();
+
+                self.post(surface, template, &[("site", &site)], &[], prior).await?;
+
+                Ok(())
+            }
+
+            StagedMutation::Restore { .. } => {
+                Err(UnifiError::Malformed("restore rollback not supported".to_owned()))
+            }
+        }
     }
 
     async fn preimage_matches(&self) -> bool {
-        // Stubbed for now — would re-check fingerprint
+        // No drift detection implemented yet - always report match
         true
     }
 
     async fn fetch_resource(
         &self,
-        _kind: &str,
-        _id: &str,
+        kind: &str,
+        id: &str,
     ) -> Result<Option<serde_json::Value>, crate::error::UnifiError> {
-        // Stubbed for now — would fetch the resource
-        Ok(None)
+        use crate::model::{unwrap_enveloped_data, ResourceKind};
+        use crate::tools::read::single_resource_template;
+
+        let kind_value = serde_json::Value::String(kind.to_owned());
+        let resource_kind: ResourceKind = serde_json::from_value(kind_value)
+            .map_err(|e| UnifiError::Malformed(format!("unknown resource kind '{kind}': {e}")))?;
+
+        let surface = resource_kind.surface();
+        let site = self.default_site_for(surface).await?;
+        let template = single_resource_template(resource_kind);
+
+        let response = self.get(surface, &template, &[("site", &site), ("id", id)], &[]).await;
+
+        match response {
+            Ok(raw) => {
+                let items = match surface {
+                    ApiSurface::Supported | ApiSurface::PrivateV1 => unwrap_enveloped_data(&raw)?,
+                    ApiSurface::PrivateV2 => raw.as_array()
+                        .ok_or_else(|| UnifiError::Malformed("expected Private v2 bare array".to_owned()))?,
+                    ApiSurface::Cloud => {
+                        return Err(UnifiError::Malformed("cloud surface not supported".to_owned()));
+                    }
+                };
+
+                if items.is_empty() {
+                    Ok(None)
+                } else {
+                    Ok(Some(items[0].clone()))
+                }
+            }
+            Err(UnifiError::Upstream { status: 404, .. }) => Ok(None),
+            Err(e) => Err(e),
+        }
     }
 }
 

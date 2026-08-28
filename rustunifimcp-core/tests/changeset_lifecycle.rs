@@ -124,11 +124,15 @@ async fn rollback_of_update_passes_preimage_value() {
         "the pre-image value should be the original"
     );
 
-    // Second rollback (index 0, the create) should have None
+    // Second rollback (index 0, the create) should have None prior_value but a created_id
     assert_eq!(history[1].0, 0, "second rollback should be for index 0");
     assert!(
         history[1].1.is_none(),
-        "create rollback should receive None (delete it)"
+        "create rollback should receive None prior_value"
+    );
+    assert!(
+        history[1].2.is_some(),
+        "create rollback should receive the created ID"
     );
 }
 
@@ -137,15 +141,40 @@ async fn rollback_of_update_passes_preimage_value() {
 async fn rollback_proceeds_in_reverse_order() {
     let controller = MockController::new().fail_at(4);
     let _outcome = run_change_set(&controller, five_mutations()).await;
-    
+
     let history = controller.rollback_history();
     assert_eq!(history.len(), 3, "three mutations should be rolled back");
-    
+
     // Rollback order should be reverse: index 2, then 1, then 0
-    let indices: Vec<usize> = history.iter().map(|(idx, _)| *idx).collect();
+    let indices: Vec<usize> = history.iter().map(|(idx, _, _)| *idx).collect();
     assert_eq!(
         indices,
         vec![2, 1, 0],
         "rollback must proceed in reverse order"
+    );
+}
+
+/// Rollback of a create must use the ID returned by the create operation.
+#[tokio::test]
+async fn rollback_of_create_uses_returned_id() {
+    let controller = MockController::new().fail_at(2);
+    let mutations = vec![
+        StagedMutation::create("network", json!({"name": "test1"})),
+        StagedMutation::create("network", json!({"name": "test2"})), // This will fail
+    ];
+
+    let preimage = Preimage::from_fixture(&json!({"data": []}));
+    let _outcome = apply_sequentially(&controller, &preimage, &mutations).await;
+
+    let history = controller.rollback_history();
+    assert_eq!(history.len(), 1, "first create should be rolled back");
+
+    // The rollback should receive the created ID
+    assert_eq!(history[0].0, 0, "rollback is for index 0");
+    assert!(history[0].1.is_none(), "create rollback has no prior_value");
+    assert_eq!(
+        history[0].2.as_deref(),
+        Some("mock-network-0"),
+        "rollback must receive the exact ID returned by the create"
     );
 }

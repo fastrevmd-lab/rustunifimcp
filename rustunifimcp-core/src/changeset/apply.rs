@@ -65,12 +65,16 @@ where
     let mut succeeded = Vec::new();
     let mut attempted_and_failed = Vec::new();
     let mut never_attempted = Vec::new();
+    let mut created_ids: std::collections::HashMap<usize, String> = std::collections::HashMap::new();
 
     // Apply mutations sequentially
     for (index, mutation) in mutations.iter().enumerate() {
         match controller.apply_mutation(index, mutation).await {
-            Ok(()) => {
+            Ok(created_id) => {
                 succeeded.push(mutation.clone());
+                if let Some(id) = created_id {
+                    created_ids.insert(index, id);
+                }
             }
             Err(_) => {
                 // This mutation failed
@@ -95,7 +99,7 @@ where
     }
 
     // Partial failure - attempt rollback
-    let rollback_result = rollback_to_preimage(controller, preimage, &succeeded).await;
+    let rollback_result = rollback_to_preimage(controller, preimage, &succeeded, &created_ids).await;
 
     let mut failed = attempted_and_failed.clone();
     failed.extend(never_attempted.clone());
@@ -125,15 +129,18 @@ where
 /// Implemented by both `UnifiClient` and `MockController`.
 pub trait ControllerOps {
     /// Apply a single mutation.
+    ///
+    /// Returns `Ok(Some(id))` for successful creates, where `id` is the controller-assigned
+    /// resource ID. Returns `Ok(None)` for successful updates, deletes, and restores.
     fn apply_mutation(
         &self,
         index: usize,
         mutation: &StagedMutation,
-    ) -> impl std::future::Future<Output = Result<(), crate::error::UnifiError>> + Send;
+    ) -> impl std::future::Future<Output = Result<Option<String>, crate::error::UnifiError>> + Send;
 
     /// Roll back a single mutation.
     ///
-    /// For creates, `prior_value` will be `None` (delete the created resource).
+    /// For creates, `prior_value` will be `None` and `created_id` will hold the ID to delete.
     /// For updates, `prior_value` contains the original state to restore.
     /// For deletes, `prior_value` contains the deleted resource to re-create.
     fn rollback_mutation(
@@ -141,6 +148,7 @@ pub trait ControllerOps {
         index: usize,
         mutation: &StagedMutation,
         prior_value: Option<&serde_json::Value>,
+        created_id: Option<&str>,
     ) -> impl std::future::Future<Output = Result<(), crate::error::UnifiError>> + Send;
 
     /// Check if the pre-image still matches the controller state.

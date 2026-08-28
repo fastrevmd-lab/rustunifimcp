@@ -8,6 +8,9 @@ use rustunifimcp_core::error::UnifiError;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
+/// Rollback history entry: (index, prior_value, created_id).
+type RollbackEntry = (usize, Option<serde_json::Value>, Option<String>);
+
 /// Mock controller state shared across async calls.
 #[derive(Clone)]
 pub struct MockController {
@@ -18,8 +21,8 @@ struct MockState {
     behavior: Behavior,
     write_calls: AtomicUsize,
     rollback_calls: AtomicUsize,
-    /// Records (index, prior_value) for each rollback call
-    rollback_history: Mutex<Vec<(usize, Option<serde_json::Value>)>>,
+    /// Records (index, prior_value, created_id) for each rollback call
+    rollback_history: Mutex<Vec<RollbackEntry>>,
 }
 
 #[derive(Clone)]
@@ -99,9 +102,9 @@ impl MockController {
         self.state.rollback_calls.load(Ordering::SeqCst)
     }
 
-    /// Get the rollback history (index, prior_value) for each call.
+    /// Get the rollback history (index, prior_value, created_id) for each call.
     #[must_use]
-    pub fn rollback_history(&self) -> Vec<(usize, Option<serde_json::Value>)> {
+    pub fn rollback_history(&self) -> Vec<RollbackEntry> {
         self.state
             .rollback_history
             .lock()
@@ -117,7 +120,7 @@ impl MockController {
 }
 
 impl ControllerOps for MockController {
-    async fn apply_mutation(&self, index: usize, _mutation: &StagedMutation) -> Result<(), UnifiError> {
+    async fn apply_mutation(&self, index: usize, mutation: &StagedMutation) -> Result<Option<String>, UnifiError> {
         let should_fail = match &self.state.behavior {
             Behavior::SucceedAll => false,
             Behavior::FailAt(n) | Behavior::FailAtWithRollbackFailure { fail_at: n, .. } => {
@@ -134,7 +137,12 @@ impl ControllerOps for MockController {
                 detail: format!("mock failure at mutation {}", index + 1),
             })
         } else {
-            Ok(())
+            // Return a mock ID for creates
+            let created_id = match mutation {
+                StagedMutation::Create { kind, .. } => Some(format!("mock-{}-{}", kind, index)),
+                _ => None,
+            };
+            Ok(created_id)
         }
     }
 
@@ -143,6 +151,7 @@ impl ControllerOps for MockController {
         index: usize,
         _mutation: &StagedMutation,
         prior_value: Option<&serde_json::Value>,
+        created_id: Option<&str>,
     ) -> Result<(), UnifiError> {
         let should_fail = match &self.state.behavior {
             Behavior::FailAtWithRollbackFailure { rollback_fail_at, .. } => {
@@ -153,12 +162,12 @@ impl ControllerOps for MockController {
 
         self.state.rollback_calls.fetch_add(1, Ordering::SeqCst);
 
-        // Record the rollback call with its prior_value
+        // Record the rollback call with its prior_value and created_id
         self.state
             .rollback_history
             .lock()
             .expect("lock should not be poisoned")
-            .push((index, prior_value.cloned()));
+            .push((index, prior_value.cloned(), created_id.map(str::to_owned)));
 
         if should_fail {
             Err(UnifiError::Upstream {

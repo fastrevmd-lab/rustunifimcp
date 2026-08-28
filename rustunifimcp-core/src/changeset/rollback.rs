@@ -16,6 +16,7 @@ pub async fn rollback_to_preimage<C>(
     controller: &C,
     preimage: &Preimage,
     succeeded: &[StagedMutation],
+    created_ids: &std::collections::HashMap<usize, String>,
 ) -> Result<(), Vec<String>>
 where
     C: ControllerOps,
@@ -40,8 +41,10 @@ where
             }
         };
 
+        let created_id = created_ids.get(&forward_index).map(String::as_str);
+
         if let Err(e) = controller
-            .rollback_mutation(forward_index, mutation, prior_value.as_ref())
+            .rollback_mutation(forward_index, mutation, prior_value.as_ref(), created_id)
             .await
         {
             failures.push(format!(
