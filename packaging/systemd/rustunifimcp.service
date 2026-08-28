@@ -1,0 +1,84 @@
+[Unit]
+Description=rustunifimcp — UniFi controller MCP server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=unifimcp
+Group=unifimcp
+ExecStart=/usr/local/bin/rustunifimcp \
+    --controllers-file /etc/unifimcp/controllers.json \
+    --tokens-file /var/lib/unifimcp/tokens.json \
+    --transport streamable-http \
+    --host 127.0.0.1 --port 30033 \
+    --allowed-host unifimcp.example.org \
+    --allowed-origin https://unifimcp.example.org \
+    --tls-cert /etc/unifimcp/tls/fullchain.pem \
+    --tls-key /etc/unifimcp/tls/privkey.pem \
+    --audit-format json \
+    --audit-log-file /var/lib/unifimcp/audit.jsonl \
+    --audit-journald
+Restart=on-failure
+RestartSec=5
+UMask=0077
+EnvironmentFile=-/etc/unifimcp/secrets.env
+
+# /etc/unifimcp stays read-only to the service. This is deliberate: it is what
+# makes editing the inventory a root operation rather than something the server
+# could be talked into. rust-junosmcp's add_device fails under the same sandbox,
+# and keeping the sandbox narrow is the documented preference.
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+NoNewPrivileges=yes
+StateDirectory=unifimcp
+StateDirectoryMode=0700
+ReadWritePaths=/var/lib/unifimcp
+
+# Seccomp filter and syscall restrictions
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @obsolete @mount @swap @reboot @module
+SystemCallArchitectures=native
+
+# Drop all capabilities
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+# Additional hardening
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RemoveIPC=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+MemoryDenyWriteExecute=yes
+LockPersonality=yes
+
+# Network access control (allow all for UniFi API)
+# NOTE: IPAddressAllow/IPAddressDeny are accepted by systemd and reported by
+# `systemctl show`, but are NOT enforced in an unprivileged LXC — systemd cannot
+# attach the cgroup BPF program there. Every guest in this fleet is one. The
+# directives stay because they do enforce on a normal host or privileged
+# container, but do not read them as active protection here. The installer
+# probes real enforcement and prints ENFORCED / NOT ENFORCED / NO POLICY /
+# UNKNOWN. See the operations doc, "Enforcing it where systemd cannot" (mecmcp#322).
+IPAddressDeny=any
+IPAddressAllow=localhost
+IPAddressAllow=link-local
+IPAddressAllow=192.168.0.0/16
+IPAddressAllow=10.0.0.0/8
+IPAddressAllow=172.16.0.0/12
+
+TimeoutStopSec=45
+
+[Install]
+WantedBy=multi-user.target
