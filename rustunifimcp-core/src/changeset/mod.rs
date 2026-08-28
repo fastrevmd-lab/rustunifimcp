@@ -12,7 +12,7 @@ pub mod preimage;
 pub mod rollback;
 pub mod validate;
 
-pub use apply::{apply_sequentially, verify_applied, ControllerOps, Outcome, State};
+pub use apply::{apply_sequentially, ControllerOps, Outcome, State};
 pub use diff::{diff_against_preimage, Change, Diff};
 pub use preimage::{Preimage, StagedMutation};
 pub use rollback::rollback_to_preimage;

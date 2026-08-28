@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! Mock controller for lifecycle testing.
 //!
 //! A plain in-memory struct that simulates UniFi controller behavior without
@@ -216,5 +217,33 @@ impl ControllerOps for MockController {
     ) -> Result<Option<serde_json::Value>, UnifiError> {
         // Mock always reports resources as existing for verification
         Ok(Some(serde_json::json!({"_id": _id})))
+    }
+
+    async fn verify_applied(
+        &self,
+        mutations: &[StagedMutation],
+        created_ids: &std::collections::HashMap<usize, String>,
+    ) -> Result<(), UnifiError> {
+        // Mock verification - always succeeds for testing
+        for (index, mutation) in mutations.iter().enumerate() {
+            match mutation {
+                StagedMutation::Create { kind, .. } => {
+                    // Verify we have a created ID for this create
+                    if created_ids.get(&index).is_none() {
+                        return Err(UnifiError::Malformed(format!(
+                            "create {}: no created ID for verification",
+                            kind
+                        )));
+                    }
+                }
+                StagedMutation::Update { .. } | StagedMutation::Delete { .. } => {
+                    // Mock always reports success for updates and deletes
+                }
+                StagedMutation::Restore { .. } => {
+                    // Skip verification for restores
+                }
+            }
+        }
+        Ok(())
     }
 }

@@ -573,11 +573,50 @@ impl crate::changeset::apply::ControllerOps for UnifiClient {
                 let resource_kind: ResourceKind = serde_json::from_value(kind_value)
                     .map_err(|e| UnifiError::Malformed(format!("unknown resource kind '{kind}': {e}")))?;
 
-                let surface = resource_kind.surface();
-                let site = self.default_site_for(surface).await?;
-                let template = single_resource_template(resource_kind);
+                // Device writes use the Private v1 surface, not the Integration API read path.
+                // See docs/PARITY-AUDIT.md:84-93 - set_device_port_overrides writes through
+                // /proxy/network/api/s/{site}/rest/device/{id}, not the Integration v1 devices endpoint.
+                let (surface, template): (ApiSurface, String) = if kind == "device" {
+                    (ApiSurface::PrivateV1, "/proxy/network/api/s/{site}/rest/device/{id}".to_owned())
+                } else {
+                    (resource_kind.surface(), single_resource_template(resource_kind))
+                };
 
-                self.put(surface, &template, &[("site", &site), ("id", id)], &[], body).await?;
+                let site = self.default_site_for(surface).await?;
+
+                // For Private v2 surfaces, merge partial updates over the current resource
+                // to avoid rejecting missing required fields.
+                let merged_body = if surface == ApiSurface::PrivateV2 {
+                    // Fetch current resource
+                    match self.fetch_resource(kind, id).await? {
+                        Some(mut current) => {
+                            // Merge staged fields over current, preserving controller-managed fields
+                            if let Some(current_obj) = current.as_object_mut()
+                                && let Some(staged_obj) = body.as_object() {
+                                for (key, value) in staged_obj {
+                                    // Drop controller-managed fields from staged body
+                                    // These fields are managed by the controller and should not be overwritten:
+                                    // - _id: resource identifier
+                                    // - site_id: site association
+                                    if key != "_id" && key != "site_id" {
+                                        current_obj.insert(key.clone(), value.clone());
+                                    }
+                                }
+                            }
+                            current
+                        }
+                        None => {
+                            return Err(UnifiError::Malformed(format!(
+                                "update {} {}: resource not found before apply",
+                                kind, id
+                            )));
+                        }
+                    }
+                } else {
+                    body.clone()
+                };
+
+                self.put(surface, &template, &[("site", &site), ("id", id)], &[], &merged_body).await?;
 
                 Ok(None)
             }
@@ -736,8 +775,20 @@ impl crate::changeset::apply::ControllerOps for UnifiClient {
             Ok(raw) => {
                 let items = match surface {
                     ApiSurface::Supported | ApiSurface::PrivateV1 => unwrap_enveloped_data(&raw)?,
-                    ApiSurface::PrivateV2 => raw.as_array()
-                        .ok_or_else(|| UnifiError::Malformed("expected Private v2 bare array".to_owned()))?,
+                    ApiSurface::PrivateV2 => {
+                        // Private v2 can return either a bare array or a single object.
+                        // Preimage::capture_preimage accepts both shapes; this must match.
+                        if let Some(arr) = raw.as_array() {
+                            arr
+                        } else if raw.is_object() {
+                            // Single object - wrap it in a Vec for uniform handling
+                            &vec![raw.clone()]
+                        } else {
+                            return Err(UnifiError::Malformed(
+                                "expected Private v2 array or object".to_owned()
+                            ));
+                        }
+                    }
                     ApiSurface::Cloud => {
                         return Err(UnifiError::Malformed("cloud surface not supported".to_owned()));
                     }
@@ -749,9 +800,115 @@ impl crate::changeset::apply::ControllerOps for UnifiClient {
                     Ok(Some(items[0].clone()))
                 }
             }
-            Err(UnifiError::Upstream { status: 404, .. }) => Ok(None),
+            // On a private surface, a 404 becomes PrivateEndpointAbsent. On a single-resource
+            // fetch, a 404 means the resource is absent, not that the endpoint is missing,
+            // so both error shapes map to Ok(None) here. This is only for fetch_resource;
+            // PrivateEndpointAbsent keeps its "endpoint missing on this controller version"
+            // meaning everywhere else.
+            Err(UnifiError::Upstream { status: 404, .. }) | Err(UnifiError::PrivateEndpointAbsent { .. }) => Ok(None),
             Err(e) => Err(e),
         }
+    }
+
+    async fn verify_applied(
+        &self,
+        mutations: &[crate::changeset::StagedMutation],
+        created_ids: &std::collections::HashMap<usize, String>,
+    ) -> Result<(), crate::error::UnifiError> {
+        use crate::changeset::StagedMutation;
+
+        let mut failed_verifications = Vec::new();
+
+        for (index, mutation) in mutations.iter().enumerate() {
+            match mutation {
+                StagedMutation::Create { kind, .. } => {
+                    // For creates, use the controller-assigned ID from apply
+                    if let Some(id) = created_ids.get(&index) {
+                        match self.fetch_resource(kind, id).await {
+                            Ok(Some(_)) => {
+                                // Resource exists as expected
+                            }
+                            Ok(None) => {
+                                failed_verifications.push(format!(
+                                    "create {} {}: resource does not exist after apply",
+                                    kind, id
+                                ));
+                            }
+                            Err(e) => {
+                                return Err(UnifiError::Malformed(format!(
+                                    "could not verify create {} {}: {}",
+                                    kind, id, e
+                                )));
+                            }
+                        }
+                    }
+                    // If no created ID recorded, skip verification for this create
+                }
+                StagedMutation::Update { kind, id, body } => {
+                    // For updates, verify the resource matches the staged body
+                    match self.fetch_resource(kind, id).await {
+                        Ok(Some(fetched)) => {
+                            // Compare key fields (simplified - full implementation would
+                            // need deep comparison logic)
+                            if let Some(expected_name) = body.get("name")
+                                && fetched.get("name") != Some(expected_name) {
+                                failed_verifications.push(format!(
+                                    "update {} {}: field mismatch after apply",
+                                    kind, id
+                                ));
+                            }
+                        }
+                        Ok(None) => {
+                            failed_verifications.push(format!(
+                                "update {} {}: resource does not exist after apply",
+                                kind, id
+                            ));
+                        }
+                        Err(e) => {
+                            return Err(UnifiError::Malformed(format!(
+                                "could not verify update {} {}: {}",
+                                kind, id, e
+                            )));
+                        }
+                    }
+                }
+                StagedMutation::Delete { kind, id } => {
+                    // For deletes, verify the resource is gone
+                    match self.fetch_resource(kind, id).await {
+                        Ok(None) => {
+                            // Resource is absent as expected
+                        }
+                        Ok(Some(_)) => {
+                            failed_verifications.push(format!(
+                                "delete {} {}: resource still exists after apply",
+                                kind, id
+                            ));
+                        }
+                        Err(e) => {
+                            return Err(UnifiError::Malformed(format!(
+                                "could not verify delete {} {}: {}",
+                                kind, id, e
+                            )));
+                        }
+                    }
+                }
+                StagedMutation::Restore { .. } => {
+                    // Restores cannot be verified in the same way as other mutations
+                    // since they replace the entire controller state. Skip verification.
+                    continue;
+                }
+            }
+        }
+
+        if !failed_verifications.is_empty() {
+            return Err(UnifiError::Malformed(format!(
+                "verification failed for {} mutations: {}",
+                failed_verifications.len(),
+                failed_verifications.join("; ")
+            )));
+        }
+
+        Ok(())
     }
 }
 

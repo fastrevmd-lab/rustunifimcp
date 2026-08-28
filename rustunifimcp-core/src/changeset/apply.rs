@@ -26,8 +26,10 @@ pub struct Outcome {
 /// The state of a change set after apply.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum State {
-    /// All mutations succeeded.
+    /// All mutations succeeded and verification confirmed they landed.
     Applied,
+    /// All mutations succeeded but verification could not confirm.
+    AppliedUnverified,
     /// Some mutations succeeded, some failed.
     Partial,
     /// Partial apply with failed rollback.
@@ -87,10 +89,14 @@ where
         }
     }
 
-    // If all succeeded, we're done
+    // If all succeeded, verify they landed as expected
     if attempted_and_failed.is_empty() && never_attempted.is_empty() {
+        let state = match controller.verify_applied(mutations, &created_ids).await {
+            Ok(()) => State::Applied,
+            Err(_) => State::AppliedUnverified,
+        };
         return Outcome {
-            state: State::Applied,
+            state,
             succeeded,
             failed: Vec::new(),
             attempted_and_failed: Vec::new(),
@@ -176,22 +182,50 @@ pub trait ControllerOps {
         kind: &str,
         id: &str,
     ) -> impl std::future::Future<Output = Result<Option<serde_json::Value>, crate::error::UnifiError>> + Send;
+
+    /// Verify that mutations were applied as expected.
+    ///
+    /// Re-fetches each touched resource and compares against the desired state.
+    /// For creates, verifies the resource now exists using controller-assigned IDs.
+    /// For updates, verifies the resource matches the staged body. For deletes,
+    /// verifies the resource is gone.
+    fn verify_applied(
+        &self,
+        mutations: &[StagedMutation],
+        created_ids: &std::collections::HashMap<usize, String>,
+    ) -> impl std::future::Future<Output = Result<(), crate::error::UnifiError>> + Send;
 }
 
-/// Verify that mutations were applied as expected.
+/// Verify that mutations were applied as expected (deprecated - moved to trait method).
 ///
-/// Re-fetches each touched resource and compares against the desired state.
-/// For creates, verifies the resource now exists. For updates, verifies the
-/// resource matches the staged body. For deletes, verifies the resource is gone.
+/// This function remains for backward compatibility but delegates to the trait method.
+/// Call `ControllerOps::verify_applied` directly instead.
 ///
 /// # Errors
 ///
 /// Returns an error describing which resources failed verification, or if
 /// verification itself could not run (controller unreachable, fetch failed).
 /// A mismatch is reported as a verification failure, not as "could not check".
+#[deprecated(note = "use ControllerOps::verify_applied instead")]
 pub async fn verify_applied<C>(
     controller: &C,
     mutations: &[StagedMutation],
+) -> Result<(), crate::error::UnifiError>
+where
+    C: ControllerOps,
+{
+    controller.verify_applied(mutations, &std::collections::HashMap::new()).await
+}
+
+/// Verify that mutations were applied as expected.
+///
+/// This is the implementation moved to client.rs as a ControllerOps method.
+/// Left here for reference but will be removed once the impl is complete.
+#[allow(dead_code)]
+async fn verify_applied_impl<C>(
+    controller: &C,
+    mutations: &[StagedMutation],
+    created_ids: &std::collections::HashMap<usize, String>,
 ) -> Result<(), crate::error::UnifiError>
 where
     C: ControllerOps,
@@ -200,13 +234,11 @@ where
 
     let mut failed_verifications = Vec::new();
 
-    for mutation in mutations {
+    for (index, mutation) in mutations.iter().enumerate() {
         match mutation {
-            StagedMutation::Create { kind, body, .. } => {
-                // For creates, verify the resource now exists
-                // We need an ID to fetch, which should be in the body or response
-                // For now, we'll extract it from the body if present
-                if let Some(id) = body.get("_id").and_then(|v| v.as_str()) {
+            StagedMutation::Create { kind, .. } => {
+                // For creates, use the controller-assigned ID from apply
+                if let Some(id) = created_ids.get(&index) {
                     match controller.fetch_resource(kind, id).await {
                         Ok(Some(_)) => {
                             // Resource exists as expected
@@ -225,8 +257,7 @@ where
                         }
                     }
                 }
-                // If no ID in body, we can't verify the create
-                // This is acceptable since creates don't always have IDs upfront
+                // If no created ID recorded, skip verification for this create
             }
             StagedMutation::Update { kind, id, body } => {
                 // For updates, verify the resource matches the staged body

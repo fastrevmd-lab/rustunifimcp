@@ -857,6 +857,7 @@ impl UnifiServer {
         // Build result
         let state_str = match outcome.state {
             State::Applied => "applied",
+            State::AppliedUnverified => "applied_unverified",
             State::Partial => "partial",
             State::PartialRollbackFailed => "partial_rollback_failed",
             State::RefusedStale => "refused_stale",
@@ -899,6 +900,7 @@ impl UnifiServer {
         let state_str = if let Some(ref outcome) = change_set.outcome {
             match outcome.state {
                 State::Applied => "applied",
+                State::AppliedUnverified => "applied_unverified",
                 State::Partial => "partial",
                 State::PartialRollbackFailed => "partial_rollback_failed",
                 State::RefusedStale => "refused_stale",
