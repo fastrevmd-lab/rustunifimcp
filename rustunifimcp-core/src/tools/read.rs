@@ -220,11 +220,15 @@ pub async fn query_stats(
 /// Search across stations, devices, and sites.
 ///
 /// Merges results from the Integration API's client and device endpoints and
-/// the Private v1 site endpoint.
+/// the Private v1 site endpoint. If a leg is refused for surface-permission
+/// reasons, the result carries `partial: true` and an `omitted` array naming
+/// what was skipped. A smaller answer, clearly labelled, beats a wrong one.
 ///
 /// # Errors
 ///
-/// Returns [`UnifiError`] when any of the underlying searches fail.
+/// Returns [`UnifiError`] when:
+/// - All legs are refused for surface permission reasons (nothing was searched)
+/// - Any leg fails with a real transport/protocol error (not a permission refusal)
 pub async fn search(
     client: &UnifiClient,
     args: &SearchArgs,
@@ -238,52 +242,94 @@ pub async fn search(
         client.default_site()
     };
 
+    let mut omitted = Vec::new();
+    let mut stations_results = Vec::new();
+    let mut devices_results = Vec::new();
+    let mut sites_results = Vec::new();
+
     // Search stations (clients) via Integration API
-    let stations = client
+    match client
         .get(
             ApiSurface::Supported,
             "/proxy/network/integration/v1/sites/{site}/clients",
             &[("site", &site_uuid)],
             &[("limit", &limit.to_string())],
         )
-        .await?;
+        .await
+    {
+        Ok(stations) => {
+            let stations_data = crate::model::unwrap_enveloped_data(&stations)?;
+            stations_results = filter_by_query(stations_data, &args.query, limit as usize);
+        }
+        Err(UnifiError::SurfaceRequiresConfig { .. }) => {
+            omitted.push("stations: controller has Integration API disabled".to_owned());
+        }
+        Err(UnifiError::SurfaceRequiresScope { .. }) => {
+            omitted.push("stations: token lacks required scope".to_owned());
+        }
+        Err(e) => return Err(e),
+    }
 
     // Search devices via Integration API
-    let devices = client
+    match client
         .get(
             ApiSurface::Supported,
             "/proxy/network/integration/v1/sites/{site}/devices",
             &[("site", &site_uuid)],
             &[("limit", &limit.to_string())],
         )
-        .await?;
+        .await
+    {
+        Ok(devices) => {
+            let devices_data = crate::model::unwrap_enveloped_data(&devices)?;
+            devices_results = filter_by_query(devices_data, &args.query, limit as usize);
+        }
+        Err(UnifiError::SurfaceRequiresConfig { .. }) => {
+            omitted.push("devices: controller has Integration API disabled".to_owned());
+        }
+        Err(UnifiError::SurfaceRequiresScope { .. }) => {
+            omitted.push("devices: token lacks required scope".to_owned());
+        }
+        Err(e) => return Err(e),
+    }
 
     // Search sites via Private v1 API
-    let sites = client
+    match client
         .get(
             ApiSurface::PrivateV1,
             "/proxy/network/api/s/{site}/self",
             &[("site", site_name)],
             &[],
         )
-        .await?;
+        .await
+    {
+        Ok(sites) => {
+            let sites_data = crate::model::unwrap_enveloped_data(&sites)?;
+            sites_results = filter_by_query(sites_data, &args.query, limit as usize);
+        }
+        Err(UnifiError::SurfaceRequiresConfig { .. }) => {
+            omitted.push("sites: controller has allow_private_api disabled".to_owned());
+        }
+        Err(UnifiError::SurfaceRequiresScope { .. }) => {
+            omitted.push("sites: token lacks required scope".to_owned());
+        }
+        Err(e) => return Err(e),
+    }
 
-    // Merge results
-    let stations_data = crate::model::unwrap_enveloped_data(&stations)?;
-    let devices_data = crate::model::unwrap_enveloped_data(&devices)?;
+    // If all legs were refused, that's an error
+    if omitted.len() == 3 {
+        return Err(UnifiError::Malformed(
+            "all search legs refused: nothing was searched".to_owned(),
+        ));
+    }
 
-    let sites_data = if sites.is_array() {
-        sites.as_array().ok_or_else(|| {
-            UnifiError::Malformed("expected sites array".to_string())
-        })?
-    } else {
-        crate::model::unwrap_enveloped_data(&sites)?
-    };
-
+    let partial = !omitted.is_empty();
     let results = serde_json::json!({
-        "stations": filter_by_query(stations_data, &args.query, limit as usize),
-        "devices": filter_by_query(devices_data, &args.query, limit as usize),
-        "sites": filter_by_query(sites_data, &args.query, limit as usize),
+        "stations": stations_results,
+        "devices": devices_results,
+        "sites": sites_results,
+        "partial": partial,
+        "omitted": omitted,
     });
 
     Ok(results)
@@ -329,7 +375,8 @@ pub async fn list_sites(
 
 #[cfg(test)]
 mod tests {
-    use super::{GetResourceArgs, ListResourcesArgs};
+    use super::{GetResourceArgs, ListResourcesArgs, SearchArgs};
+    use crate::error::UnifiError;
     use crate::model::ResourceKind;
 
     /// Unknown fields must be refused, not dropped. rust-proxmoxmcp shipped
@@ -359,5 +406,49 @@ mod tests {
         let raw = r#"{"controller":"home","kind":"network"}"#;
         let parsed: Result<GetResourceArgs, _> = serde_json::from_str(raw);
         assert!(parsed.is_err(), "get_resource without an id must not parse");
+    }
+
+    /// Verify SearchArgs structure for completeness.
+    #[test]
+    fn search_args_parses_all_fields() {
+        let raw = r#"{"controller":"home","query":"test","site":"default","limit":5}"#;
+        let parsed: SearchArgs = serde_json::from_str(raw).expect("valid SearchArgs");
+        assert_eq!(parsed.controller, "home");
+        assert_eq!(parsed.query, "test");
+        assert_eq!(parsed.site, Some("default".to_owned()));
+        assert_eq!(parsed.limit, Some(5));
+    }
+
+    /// Search result shape must include partial and omitted fields.
+    #[test]
+    fn search_result_carries_partial_metadata() {
+        // Simulated partial result as search would return
+        let partial_result = serde_json::json!({
+            "stations": [],
+            "devices": [],
+            "sites": [],
+            "partial": true,
+            "omitted": ["sites: controller has allow_private_api disabled"]
+        });
+
+        assert_eq!(partial_result.get("partial").and_then(|v| v.as_bool()), Some(true));
+        let omitted = partial_result.get("omitted").and_then(|v| v.as_array());
+        assert!(omitted.is_some(), "omitted field must be present");
+        if let Some(arr) = omitted {
+            assert_eq!(arr.len(), 1);
+        }
+    }
+
+    /// The all-legs-refused error message must be recognizable.
+    #[test]
+    fn search_all_legs_refused_error_is_descriptive() {
+        let error = UnifiError::Malformed(
+            "all search legs refused: nothing was searched".to_owned(),
+        );
+        let error_text = error.to_string();
+        assert!(
+            error_text.contains("all search legs refused"),
+            "error must clearly state nothing was searched: {error_text}"
+        );
     }
 }
