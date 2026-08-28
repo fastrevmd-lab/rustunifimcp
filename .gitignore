@@ -14,3 +14,20 @@ controllers.json
 
 .env
 .DS_Store
+
+# subagent-driven-development scratch
+.superpowers/
+
+# Local UniFi API key — never commit. mecmcp-secret requires mode 0600.
+.unifikey
+*.unifikey
+.unifi-api-key
+
+# Recorded controller fixtures are captured from a live controller and are
+# deliberately not published. A fresh clone has none. Regenerate with
+# scripts/capture-fixtures.sh against a live controller.
+rustunifimcp-core/tests/fixtures/*/
+!rustunifimcp-core/tests/fixtures/README.md
+
+# Real fixture denylist is local-only (contains the identifiers it protects).
+scripts/fixture-denylist.txt

@@ -121,11 +121,21 @@ cheaply.
 
 | Tool | Notes |
 |---|---|
-| `unifi_list_resources` | `kind` = `firewall_policy \| firewall_zone \| firewall_group \| network \| wlan \| port_profile \| dhcp_reservation \| traffic_route \| radius_profile \| client \| device \| voucher \| …` |
+| `unifi_list_resources` | `kind` = `firewall_policy \| firewall_zone \| firewall_group \| network \| wlan \| port_profile \| dhcp_reservation \| traffic_route \| radius_profile \| station \| device \| voucher \| …` |
 | `unifi_get_resource` | `kind`, `id` |
 | `unifi_query_stats` | `subject` = `site \| device \| client \| wlan \| flow`, plus a time window |
 | `unifi_search` | Free-text across clients, devices, and sites |
 | `unifi_list_sites` | |
+
+**Amended 2026-08-26: `client` is spelled `station`.** UniFi calls an associated
+device a "client", but `client.rs` in this crate is the HTTP client, and the
+collision would land in every import. `Station` is the 802.11 term and reads
+unambiguously next to `Device`. The serialized `kind` value a caller passes is
+therefore `station`.
+
+**WAN is not a separate kind.** In UniFi's data model a WAN is a network:
+`networkconf` entries carry `purpose: "wan"`, and WAN DNS lives on those same
+entries. `list_wan_connections` and `list_wan_dns` are both `kind=network`.
 
 The `kind` enum is where the collapsed surface goes. Roughly 130 of the current
 server's tools are `list_x` / `get_x` pairs that differ only in the resource

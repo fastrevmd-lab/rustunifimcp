@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "devices": {
+    "home": {
+      "endpoint": "https://unifi.example.org",
+      "site": "default",
+      "api_key_file": "/etc/unifimcp/api.key",
+      "allow_private_api": true
+    }
+  }
+}

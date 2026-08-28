@@ -1,126 +1,77 @@
 # rustunifimcp plan
 
-Phase sequence for building the UniFi Network MCP server described in
-[`docs/superpowers/specs/2026-07-24-rustunifimcp-design.md`](docs/superpowers/specs/2026-07-24-rustunifimcp-design.md).
+Phase sequence for building the UniFi Network MCP server and retiring the
+dependency on LXC 980.
 
-Written 2026-07-24. **Implementation has not started and is gated on `mecmcp`.**
+Design of record:
+[`docs/superpowers/specs/2026-08-26-rustunifimcp-cutover-design.md`](docs/superpowers/specs/2026-08-26-rustunifimcp-cutover-design.md),
+which supersedes the sequencing written 2026-07-24 and corrects seven facts in
+[`2026-07-24-rustunifimcp-design.md`](docs/superpowers/specs/2026-07-24-rustunifimcp-design.md).
+The 2026-07-24 document remains authoritative for the tool surface, the API
+tagging scheme, and the change-control adaptation.
 
-## The gate
+Rewritten 2026-08-26.
 
-`rustunifimcp` is built mecmcp-native by design — it contains no local auth,
-transport, audit, policy, inventory, or change-control code. Today `mecmcp` has
-shipped exactly one crate, `mecmcp-auth` (tag `auth-v0.1.1`). Everything else in
-its crate map is planned but unwritten.
+## The gate is open
 
-Starting implementation now would mean writing local versions of the missing
-crates and promising to upstream them later. That is the third divergent
-implementation, and preventing it is the entire reason `mecmcp` exists. So the
-order is: **finish `mecmcp`, then build this.**
+The previous version of this file deferred all implementation on the grounds
+that `mecmcp` had tagged exactly one crate. That is no longer true. `mecmcp` is
+at **v0.20.0 with 14 crates**, and every phase gate this file used to carry has
+opened.
 
-The phases below each name the crates they need. A phase is unblocked when its
-crates are tagged.
+Waiting was the right call and it paid: `mecmcp-http` now supplies the outbound
+client, so the UniFi HTTP layer never has to be written here at all.
 
-## Phase 0 — Upstream feedback *(do this now, before mecmcp-changeset is written)*
+## Sequence
 
-One design issue is already known and should reach `mecmcp` before the crate it
-affects gets written.
+Two cutovers. 981 goes live without change control; 980 keeps serving
+configuration writes until Phase 7 removes the last dependency on it.
 
-`mecmcp-changeset`'s `DeviceTransaction` trait assumes candidate configuration:
-stage off to the side, diff against running, validate on-box, apply atomically.
-Junos and PAN-OS both provide this. **UniFi provides none of it** — every write
-is an immediate REST call against live configuration.
+| Phase | What | Blocks on |
+|---|---|---|
+| **0a** | Upstream: `Atomicity` capability against `mecmcp-changeset` — filed as [mecmcp#335](https://github.com/fastrevmd-lab/mecmcp/issues/335) ✅ | — |
+| **0b** | Controller certificate — issue `unifi.mechub.org`, install, renewal hook | — |
+| **0c** | Recorded fixtures + the legacy parity audit | 0b |
+| **1** | UniFi client and resource model; no MCP surface | 0c |
+| **2** | Read-only server (5 read + 3 admin) → deploy 623, then 622 | 1 |
+| **3** | Operational actions (4), individually scoped | 2 |
+| **4** | Workflows (5) | 2 |
+| **5** | **Cutover #1 → 981.** Read, ops, workflows, admin live | 3, 4 |
+| **6** | Change control (7 tools), including `backup restore` | 0a, 5 |
+| **7** | **Cutover #2.** 980 dependency dropped; 981 tagged `protected` | 6 |
 
-The trait needs to expose what a vendor can actually promise:
+Phase detail, exit criteria, and the reasoning behind each are in the design
+document. What follows is only what an operator needs at a glance.
 
-```rust
-pub struct Atomicity {
-    pub atomic_apply: bool,        // UniFi: false
-    pub dry_run_validation: bool,  // UniFi: false
-    pub guaranteed_rollback: bool, // UniFi: false
-}
-```
+## Guests
 
-Shared code that renders approval prompts can then be honest per vendor rather
-than uniformly optimistic. File this against `mecmcp` as the first concrete
-piece of evidence that a third vendor stresses the abstraction usefully.
+| VMID | Name | IP | Endpoint | Mode |
+|---|---|---|---|---|
+| 622 | `test-twoperson-unifi` | 192.168.1.242 | `http://test-twoperson-unifi.mechub.org:30033/mcp` | two-person |
+| 623 | `test-labmode-unifi` | 192.168.1.243 | `http://test-labmode-unifi.mechub.org:30033/mcp` | `--lab-mode` |
+| 981 | `prod-unifimcp` | 192.168.1.216 | `https://prod-unifimcp.mechub.org:30033/mcp` | two-person, TLS |
 
-**Gate:** none. **Output:** a mecmcp issue.
+Both rigs are `disposable`-tagged. **981 is tagged `protected` only at Phase 7**
+— doing it earlier would make the guardrail block the rebuilds the earlier
+phases need.
 
-## Phase 1 — Client and resource model
+**LXC 980 is never modified.** It is tagged `notmechub;protected`; retirement
+means ceasing to depend on it, exactly as `rustproxmoxmcp` treats LXC 970.
 
-The UniFi HTTP client and the typed resource model, with no MCP surface at all.
-Fixture-driven, no network in tests.
+## Two things that will bite if forgotten
 
-- API-key authentication, TLS verification on by default
-- The four-surface tag enum (`Supported`, `PrivateV1`, `PrivateV2`, `Cloud`) and
-  its scope gating
-- Typed models for the resource kinds the tool surface addresses
-- Recorded-fixture tests plus the controller version matrix
+**There is no way to disable TLS verification.** `mecmcp-http` says so in its
+own documentation, and no `danger_accept_invalid_certs` exists anywhere in
+`mecmcp`. The controller's self-signed `CN=unifi.local` certificate does not
+cover `192.168.1.30`, so **Phase 0b blocks every call to the live controller**,
+including the first fixture capture.
 
-**Gate:** none — this is the vendor-specific layer, and it is the one part of
-the project that does not depend on `mecmcp` at all. It can be built in parallel
-with mecmcp development.
-
-**Exit:** the client reads every resource kind in the design from recorded
-fixtures, and the version matrix distinguishes at least two controller versions.
-
-## Phase 2 — Read-only server
-
-The first runnable binary: the five read primitives plus the three
-administration tools, served over hardened streamable-HTTP with bearer auth,
-scopes, and audit.
-
-**Gate:** `mecmcp-auth` ✅, `mecmcp-transport`, `mecmcp-runtime`,
-`mecmcp-audit`, `mecmcp-inventory`.
-
-**Exit:** deployed alongside the Python server in the lab, answering read
-queries against the live controller with a bearer token and an audit trail.
-Tool count in the single digits.
-
-## Phase 3 — Operational actions
-
-`unifi_device_action`, `unifi_client_action`, `unifi_backup_action`,
-`unifi_run_speed_test`. Individually scoped; `backup restore` gated separately
-for blast radius.
-
-**Gate:** `mecmcp-policy`.
-
-**Exit:** an operator token can restart an AP and block a client; a read-only
-token provably cannot.
-
-## Phase 4 — Change control
-
-The seven change-set tools, implementing `DeviceTransaction` over UniFi's
-non-atomic REST semantics: pre-image capture, client-side diff, local
-validation, sequential apply, verify, best-effort rollback.
-
-**Gate:** `mecmcp-changeset`, including the Phase 0 atomicity capability.
-
-**Exit:** a firewall-policy change is planned, approved by a second principal,
-applied, and verified — and a deliberately-induced partial failure is recorded
-as partial and rolled back, with the rollback's own failure mode tested.
-
-## Phase 5 — Workflows
-
-`unifi_site_health_report`, `unifi_topology_report`, `unifi_firewall_audit`,
-`unifi_traffic_flow_report`, `unifi_client_troubleshoot`.
-
-**Gate:** phases 1–2.
-
-**Exit:** each workflow answers in one call what the Python server needed a
-dozen for.
-
-## Phase 6 — Cutover
-
-Packaging (systemd unit, LXC install script) matching the sibling servers, then
-parity review against the workflows actually used against LXC 603, then
-replacement.
-
-**Gate:** phases 1–5.
-
-**Exit:** LXC 603 runs `rustunifimcp`; the Python server is stopped but its
-container is kept intact for rollback, per the pattern used for the
-rustjunosmcp 0.7 → 0.8 migration.
+**A wildcard token is read-only — but only if the write-tool registry is
+populated.** `mecmcp-server` enforces the rule against a registry the server
+supplies as a parameter, and `mecmcp-server`'s `an_empty_write_tool_registry_lets_a_wildcard_reach_a_write_tool` pins
+the failure mode: an empty registry turns every wildcard token into a writer.
+All four operational tools and all seven change-set tools must be registered,
+and a test must assert the list.
 
 ## Constraints
 
@@ -129,6 +80,7 @@ Inherited from `mecmcp` and non-negotiable per phase:
 - Edition 2024, MSRV 1.88
 - `missing_docs = "warn"`, `unsafe_code = "forbid"`, `clippy::all = "warn"`
   (priority −1), `dbg_macro = "deny"`, `todo = "deny"`, `unwrap_used = "warn"`
+- `[profile.release]` present from the first release
 - MIT, single license
-- mecmcp crates as git dependencies pinned by tag
-- TLS verification defaults on; disabling it is an explicit, logged flag
+- `mecmcp` crates as git dependencies pinned to an exact tag
+- TLS verification is always on; there is no flag to turn it off

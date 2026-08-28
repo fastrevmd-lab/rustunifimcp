@@ -1,0 +1,20 @@
+# Fixture identifier denylist — EXAMPLE TEMPLATE
+#
+# This file contains case-insensitive substrings that must not appear in fixture
+# files. Before capturing a new controller version, add any personal or site-
+# specific identifiers to this list.
+#
+# IMPORTANT: The real denylist is NOT committed because it necessarily contains
+# the identifying information it exists to protect. Copy this file to
+# `fixture-denylist.txt` and add your own identifiers before capturing fixtures.
+#
+# Entries are checked as substrings (case-insensitive) against all string values
+# in fixture JSON files.
+#
+# Format: one identifier per line, lines starting with # are comments.
+
+# Example entries — replace these with YOUR identifiers:
+# your-site-name
+# your-surname
+# your-ssid-prefix
+# family-member-names

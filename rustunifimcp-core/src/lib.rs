@@ -8,6 +8,14 @@
 //! Implementation has not started; see `PLAN.md` at the workspace root for the
 //! phase sequence and the `mecmcp` crates each phase is gated on.
 
+pub mod client;
+pub mod error;
+pub mod inventory;
+pub mod model;
+pub mod testing;
+pub mod tools;
+pub mod version;
+
 /// The UniFi API surface an endpoint belongs to.
 ///
 /// Every endpoint carries its surface so a deployment can decline the
