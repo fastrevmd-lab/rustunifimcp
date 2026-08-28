@@ -7,6 +7,7 @@
 pub mod admin;
 pub mod ops;
 pub mod read;
+pub mod workflow;
 
 /// Every tool this server registers.
 ///
@@ -28,6 +29,10 @@ pub const TOOL_NAMES: &[&str] = &[
     "unifi_client_action",
     "unifi_backup_action",
     "unifi_run_speed_test",
+    // Workflows (3)
+    "unifi_site_health_report",
+    "unifi_topology_report",
+    "unifi_traffic_flow_report",
 ];
 
 /// The mutating tools, passed to `mecmcp_server::authorize_call`.
