@@ -6,6 +6,7 @@
 
 use crate::client::UnifiClient;
 use crate::error::UnifiError;
+use crate::model::ResourceKind;
 use crate::ApiSurface;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -177,7 +178,7 @@ pub async fn site_health_report(
     match client
         .get(
             ApiSurface::Supported,
-            "/proxy/network/integration/v1/sites/{site}/devices",
+            ResourceKind::Device.path_template(),
             &[("site", &site_uuid)],
             &[],
         )
@@ -197,6 +198,7 @@ pub async fn site_health_report(
     }
 
     // Fetch health via Private v1 API
+    // Note: stat/health has no ResourceKind entry; path verified in capture-fixtures.sh
     match client
         .get(
             ApiSurface::PrivateV1,
@@ -220,6 +222,7 @@ pub async fn site_health_report(
     }
 
     // Fetch device statistics via Private v1 API
+    // Note: stat/device has no ResourceKind entry; path verified in capture-fixtures.sh
     match client
         .get(
             ApiSurface::PrivateV1,
@@ -291,6 +294,7 @@ pub async fn topology_report(
     let mut networks_result = Vec::new();
 
     // Fetch topology edges via Private v2 API
+    // Note: topology has no ResourceKind entry; path verified in capture-fixtures.sh
     match client
         .get(
             ApiSurface::PrivateV2,
@@ -318,7 +322,7 @@ pub async fn topology_report(
     match client
         .get(
             ApiSurface::Supported,
-            "/proxy/network/integration/v1/sites/{site}/devices",
+            ResourceKind::Device.path_template(),
             &[("site", &site_uuid)],
             &[],
         )
@@ -341,7 +345,7 @@ pub async fn topology_report(
     match client
         .get(
             ApiSurface::PrivateV1,
-            "/proxy/network/api/s/{site}/rest/networkconf",
+            ResourceKind::Network.path_template(),
             &[("site", site_name)],
             &[],
         )
@@ -405,7 +409,7 @@ pub async fn traffic_flow_report(
     match client
         .get(
             ApiSurface::Supported,
-            "/proxy/network/integration/v1/sites/{site}/clients",
+            ResourceKind::Station.path_template(),
             &[("site", &site_uuid)],
             &[],
         )
@@ -425,6 +429,7 @@ pub async fn traffic_flow_report(
     }
 
     // Fetch station statistics via Private v1 API
+    // Note: stat/sta has no ResourceKind entry; path verified in capture-fixtures.sh
     let mut query = Vec::new();
     if let Some(start) = args.start {
         query.push(("start", start.to_string()));
@@ -509,7 +514,7 @@ pub async fn firewall_audit(
     match client
         .get(
             ApiSurface::PrivateV2,
-            "/proxy/network/v2/api/site/{site}/firewall/policies",
+            ResourceKind::FirewallPolicy.path_template(),
             &[("site", site_name)],
             &[],
         )
@@ -531,7 +536,7 @@ pub async fn firewall_audit(
     match client
         .get(
             ApiSurface::PrivateV2,
-            "/proxy/network/v2/api/site/{site}/firewall/zones",
+            ResourceKind::FirewallZone.path_template(),
             &[("site", site_name)],
             &[],
         )
@@ -618,7 +623,7 @@ pub async fn client_troubleshoot(
     match client
         .get(
             ApiSurface::Supported,
-            "/proxy/network/integration/v1/sites/{site}/devices",
+            ResourceKind::Device.path_template(),
             &[("site", &site_uuid)],
             &[],
         )
@@ -640,7 +645,7 @@ pub async fn client_troubleshoot(
     match client
         .get(
             ApiSurface::PrivateV2,
-            "/proxy/network/v2/api/site/{site}/firewall/policies",
+            ResourceKind::FirewallPolicy.path_template(),
             &[("site", site_name)],
             &[],
         )
@@ -662,7 +667,7 @@ pub async fn client_troubleshoot(
     match client
         .get(
             ApiSurface::PrivateV2,
-            "/proxy/network/v2/api/site/{site}/firewall/zones",
+            ResourceKind::FirewallZone.path_template(),
             &[("site", site_name)],
             &[],
         )
