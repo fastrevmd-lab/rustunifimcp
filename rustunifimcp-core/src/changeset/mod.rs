@@ -6,6 +6,18 @@
 //! [`Atomicity`], so shared code that renders approval prompts can say so rather
 //! than offering commit-confirmed semantics the vendor cannot deliver.
 
+pub mod apply;
+pub mod diff;
+pub mod preimage;
+pub mod rollback;
+pub mod validate;
+
+pub use apply::{apply_sequentially, verify_applied, ControllerOps, Outcome, State};
+pub use diff::{diff_against_preimage, Change, Diff};
+pub use preimage::{Preimage, StagedMutation};
+pub use rollback::rollback_to_preimage;
+pub use validate::{check_references, validate_locally};
+
 // Atomicity type is not yet in mecmcp-changeset v0.20.0.
 // Tracked: https://github.com/fastrevmd-lab/mecmcp/issues/335
 /// What a vendor's transaction implementation can actually guarantee.
