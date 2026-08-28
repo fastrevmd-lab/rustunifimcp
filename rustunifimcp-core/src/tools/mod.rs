@@ -4,6 +4,7 @@
 //! follows the mechub family: typed primitives, a change-control lifecycle, and
 //! a small number of workflows that earn their names.
 
+pub mod admin;
 pub mod read;
 
 /// Every tool this server registers.
