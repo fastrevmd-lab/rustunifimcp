@@ -68,7 +68,7 @@ pub fn check_references(data: &Value, mutations: &[StagedMutation]) -> Result<()
 
 #[cfg(test)]
 mod tests {
-    use crate::testing::{fixture, DEFAULT_FIXTURE_VERSION};
+    use crate::testing::{DEFAULT_FIXTURE_VERSION, fixture};
 
     /// Referential checks are local because no controller-side dry run exists.
     #[test]

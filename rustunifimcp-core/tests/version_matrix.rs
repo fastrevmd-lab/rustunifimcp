@@ -7,7 +7,7 @@
 
 use rustunifimcp_core::model::ResourceKind;
 use rustunifimcp_core::testing::{fixtures_available, is_absent};
-use rustunifimcp_core::version::{endpoint_availability, Availability};
+use rustunifimcp_core::version::{Availability, endpoint_availability};
 
 /// Every version directory under tests/fixtures/.
 fn recorded_versions() -> Vec<String> {

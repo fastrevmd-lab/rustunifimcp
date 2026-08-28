@@ -2,10 +2,10 @@
 //!
 //! Each test demonstrates a specific fix from the codex review.
 
-use rustunifimcp_core::changeset::{apply_sequentially, Preimage, StagedMutation, State};
+use rustunifimcp_core::changeset::{Preimage, StagedMutation, State, apply_sequentially};
 use rustunifimcp_core::error::UnifiError;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 mod mock;
 use mock::MockController;
@@ -165,7 +165,8 @@ async fn creates_are_verified_by_controller_assigned_id() {
             // Check that we received a created ID for the create mutation
             for (index, mutation) in mutations.iter().enumerate() {
                 if matches!(mutation, StagedMutation::Create { .. })
-                    && created_ids.get(&index).is_some() {
+                    && created_ids.get(&index).is_some()
+                {
                     self.verify_called.store(true, Ordering::SeqCst);
                 }
             }

@@ -75,16 +75,14 @@ pub fn diff_against_preimage(
 
 #[cfg(test)]
 mod tests {
-    use crate::testing::{fixture, DEFAULT_FIXTURE_VERSION};
+    use crate::testing::{DEFAULT_FIXTURE_VERSION, fixture};
     use serde_json::json;
 
     /// An empty diff is not the same as a diff that was never computed.
     #[test]
     fn a_no_op_change_set_is_distinguishable_from_an_uncomputed_one() {
-        let preimage = super::Preimage::from_fixture(&fixture(
-            DEFAULT_FIXTURE_VERSION,
-            "networkconf",
-        ));
+        let preimage =
+            super::Preimage::from_fixture(&fixture(DEFAULT_FIXTURE_VERSION, "networkconf"));
         let diff = super::diff_against_preimage(&preimage, &[]).expect("diffs");
         assert!(diff.computed);
         assert!(diff.changes.is_empty());
@@ -119,7 +117,12 @@ mod tests {
             "update should have a before value from pre-image"
         );
         assert_eq!(
-            change.before.as_ref().expect("before value").get("name").and_then(|v| v.as_str()),
+            change
+                .before
+                .as_ref()
+                .expect("before value")
+                .get("name")
+                .and_then(|v| v.as_str()),
             Some("before_value"),
             "before should be the pre-image value"
         );
@@ -129,7 +132,12 @@ mod tests {
             "update should have an after value from the mutation"
         );
         assert_eq!(
-            change.after.as_ref().expect("after value").get("name").and_then(|v| v.as_str()),
+            change
+                .after
+                .as_ref()
+                .expect("after value")
+                .get("name")
+                .and_then(|v| v.as_str()),
             Some("after_value"),
             "after should be the mutation value"
         );

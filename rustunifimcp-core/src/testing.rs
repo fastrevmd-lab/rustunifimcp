@@ -84,7 +84,9 @@ mod tests {
     #[test]
     fn loads_a_recorded_sites_response() {
         if !fixtures_available() {
-            eprintln!("SKIPPED: no fixtures. Run scripts/capture-fixtures.sh against a controller.");
+            eprintln!(
+                "SKIPPED: no fixtures. Run scripts/capture-fixtures.sh against a controller."
+            );
             return;
         }
         let value = fixture(super::DEFAULT_FIXTURE_VERSION, "sites");

@@ -26,10 +26,12 @@ pub mod stats;
 ///
 /// Both the Integration API and the Private v1 surface wrap their payload as
 /// an object with a `data` array; this helper handles both.
-pub(crate) fn unwrap_enveloped_data(val: &serde_json::Value) -> Result<&Vec<serde_json::Value>, UnifiError> {
-    val.get("data")
-        .and_then(|d| d.as_array())
-        .ok_or_else(|| UnifiError::Malformed("expected an envelope object with a `data` array".to_string()))
+pub(crate) fn unwrap_enveloped_data(
+    val: &serde_json::Value,
+) -> Result<&Vec<serde_json::Value>, UnifiError> {
+    val.get("data").and_then(|d| d.as_array()).ok_or_else(|| {
+        UnifiError::Malformed("expected an envelope object with a `data` array".to_string())
+    })
 }
 
 /// Unwraps the Private v2 API response (plain array `[...]`).
@@ -98,9 +100,7 @@ impl ResourceKind {
             | Self::DhcpReservation
             | Self::FirewallGroup
             | Self::RadiusProfile => ApiSurface::PrivateV1,
-            Self::FirewallPolicy | Self::FirewallZone | Self::TrafficRoute => {
-                ApiSurface::PrivateV2
-            }
+            Self::FirewallPolicy | Self::FirewallZone | Self::TrafficRoute => ApiSurface::PrivateV2,
         }
     }
 
@@ -126,8 +126,8 @@ impl ResourceKind {
 #[cfg(test)]
 mod tests {
     use super::ResourceKind;
-    use crate::testing::{fixture, fixtures_available, DEFAULT_FIXTURE_VERSION};
     use crate::ApiSurface;
+    use crate::testing::{DEFAULT_FIXTURE_VERSION, fixture, fixtures_available};
 
     /// Every kind must declare a surface. A kind whose surface is wrong is how
     /// an undocumented route gets reached by a supported-only deployment.
@@ -152,16 +152,15 @@ mod tests {
 
     #[test]
     fn firewall_zones_are_tagged_private_v2() {
-        assert_eq!(
-            ResourceKind::FirewallZone.surface(),
-            ApiSurface::PrivateV2
-        );
+        assert_eq!(ResourceKind::FirewallZone.surface(), ApiSurface::PrivateV2);
     }
 
     #[test]
     fn sites_parse_from_the_recorded_response() {
         if !fixtures_available() {
-            eprintln!("SKIPPED: no fixtures. Run scripts/capture-fixtures.sh against a controller.");
+            eprintln!(
+                "SKIPPED: no fixtures. Run scripts/capture-fixtures.sh against a controller."
+            );
             return;
         }
         let raw = fixture(DEFAULT_FIXTURE_VERSION, "sites");
@@ -175,12 +174,13 @@ mod tests {
     #[test]
     fn networks_parse_from_the_recorded_response() {
         if !fixtures_available() {
-            eprintln!("SKIPPED: no fixtures. Run scripts/capture-fixtures.sh against a controller.");
+            eprintln!(
+                "SKIPPED: no fixtures. Run scripts/capture-fixtures.sh against a controller."
+            );
             return;
         }
         let raw = fixture(DEFAULT_FIXTURE_VERSION, "networkconf");
-        let networks =
-            crate::model::network::parse_networks(&raw).expect("networks parse");
+        let networks = crate::model::network::parse_networks(&raw).expect("networks parse");
         assert!(!networks.is_empty());
     }
 }

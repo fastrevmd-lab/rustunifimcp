@@ -119,9 +119,10 @@ pub struct RadiusProfile {
 pub fn parse_networks(val: &serde_json::Value) -> Result<Vec<Network>, UnifiError> {
     let data = super::unwrap_enveloped_data(val)?;
     data.iter()
-        .map(|item| serde_json::from_value(item.clone()).map_err(|e| {
-            UnifiError::Malformed(format!("network parse failed: {e}"))
-        }))
+        .map(|item| {
+            serde_json::from_value(item.clone())
+                .map_err(|e| UnifiError::Malformed(format!("network parse failed: {e}")))
+        })
         .collect()
 }
 
@@ -129,9 +130,10 @@ pub fn parse_networks(val: &serde_json::Value) -> Result<Vec<Network>, UnifiErro
 pub fn parse_wlans(val: &serde_json::Value) -> Result<Vec<Wlan>, UnifiError> {
     let data = super::unwrap_enveloped_data(val)?;
     data.iter()
-        .map(|item| serde_json::from_value(item.clone()).map_err(|e| {
-            UnifiError::Malformed(format!("wlan parse failed: {e}"))
-        }))
+        .map(|item| {
+            serde_json::from_value(item.clone())
+                .map_err(|e| UnifiError::Malformed(format!("wlan parse failed: {e}")))
+        })
         .collect()
 }
 
@@ -139,9 +141,10 @@ pub fn parse_wlans(val: &serde_json::Value) -> Result<Vec<Wlan>, UnifiError> {
 pub fn parse_port_profiles(val: &serde_json::Value) -> Result<Vec<PortProfile>, UnifiError> {
     let data = super::unwrap_enveloped_data(val)?;
     data.iter()
-        .map(|item| serde_json::from_value(item.clone()).map_err(|e| {
-            UnifiError::Malformed(format!("port profile parse failed: {e}"))
-        }))
+        .map(|item| {
+            serde_json::from_value(item.clone())
+                .map_err(|e| UnifiError::Malformed(format!("port profile parse failed: {e}")))
+        })
         .collect()
 }
 
@@ -150,7 +153,9 @@ pub fn parse_port_profiles(val: &serde_json::Value) -> Result<Vec<PortProfile>, 
 /// The `/rest/user` endpoint returns every known client, not only those with
 /// a fixed-IP assignment. A reservation is marked by `use_fixedip: true` in
 /// the record; this function filters to only actual reservations.
-pub fn parse_dhcp_reservations(val: &serde_json::Value) -> Result<Vec<DhcpReservation>, UnifiError> {
+pub fn parse_dhcp_reservations(
+    val: &serde_json::Value,
+) -> Result<Vec<DhcpReservation>, UnifiError> {
     let data = super::unwrap_enveloped_data(val)?;
     data.iter()
         .filter(|item| {
@@ -158,9 +163,10 @@ pub fn parse_dhcp_reservations(val: &serde_json::Value) -> Result<Vec<DhcpReserv
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false)
         })
-        .map(|item| serde_json::from_value(item.clone()).map_err(|e| {
-            UnifiError::Malformed(format!("dhcp reservation parse failed: {e}"))
-        }))
+        .map(|item| {
+            serde_json::from_value(item.clone())
+                .map_err(|e| UnifiError::Malformed(format!("dhcp reservation parse failed: {e}")))
+        })
         .collect()
 }
 
@@ -168,16 +174,17 @@ pub fn parse_dhcp_reservations(val: &serde_json::Value) -> Result<Vec<DhcpReserv
 pub fn parse_radius_profiles(val: &serde_json::Value) -> Result<Vec<RadiusProfile>, UnifiError> {
     let data = super::unwrap_enveloped_data(val)?;
     data.iter()
-        .map(|item| serde_json::from_value(item.clone()).map_err(|e| {
-            UnifiError::Malformed(format!("radius profile parse failed: {e}"))
-        }))
+        .map(|item| {
+            serde_json::from_value(item.clone())
+                .map_err(|e| UnifiError::Malformed(format!("radius profile parse failed: {e}")))
+        })
         .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::parse_dhcp_reservations;
-    use crate::testing::{fixture, fixtures_available, DEFAULT_FIXTURE_VERSION};
+    use crate::testing::{DEFAULT_FIXTURE_VERSION, fixture, fixtures_available};
 
     /// The `/rest/user` endpoint returns all known clients, not only those
     /// with a fixed-IP reservation. Verify that the parser filters to actual
@@ -209,6 +216,10 @@ mod tests {
         );
 
         // The expected count for 10.5.67 specifically.
-        assert_eq!(reservations.len(), 46, "10.5.67 fixture has 46 reservations");
+        assert_eq!(
+            reservations.len(),
+            46,
+            "10.5.67 fixture has 46 reservations"
+        );
     }
 }

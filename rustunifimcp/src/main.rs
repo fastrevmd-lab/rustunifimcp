@@ -1,14 +1,14 @@
 //! `rustunifimcp` — enterprise MCP server for UniFi Network.
 
-use rustunifimcp::cli::{UnifiCli, TokenCli, TokenCommand};
-use rustunifimcp::server::UnifiServer;
-use rustunifimcp::http_transport::build_http_router;
 use anyhow::{Context as _, Result, bail};
 use clap::Parser;
 use mecmcp_auth::NoGrant;
 use mecmcp_runtime::cli::{Command, TokenAction};
 use mecmcp_transport::{LimitsConfig, serve_router};
 use rmcp::ServiceExt;
+use rustunifimcp::cli::{TokenCli, TokenCommand, UnifiCli};
+use rustunifimcp::http_transport::build_http_router;
+use rustunifimcp::server::UnifiServer;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
@@ -177,44 +177,63 @@ fn token_name_present(path: &std::path::Path, name: &str) -> Option<bool> {
     let raw = std::fs::read_to_string(path).ok()?;
     let parsed: serde_json::Value = serde_json::from_str(&raw).ok()?;
     let entries = parsed.get("tokens")?.as_array()?;
-    Some(entries.iter().any(|entry| {
-        entry.get("name").and_then(serde_json::Value::as_str) == Some(name)
-    }))
+    Some(
+        entries
+            .iter()
+            .any(|entry| entry.get("name").and_then(serde_json::Value::as_str) == Some(name)),
+    )
 }
 
 impl PendingTokenAudit {
     /// Describe a mutating token action, or `None` for read-only ones.
     fn describe(action: &TokenAction) -> Option<Self> {
         match action {
-            TokenAction::Add { name, devices, tools, .. } => Some(Self {
+            TokenAction::Add {
+                name,
+                devices,
+                tools,
+                ..
+            } => Some(Self {
                 operation: "token_add",
                 token_name: name.clone(),
                 devices: Some(devices.clone()),
                 tools: Some(tools.clone()),
                 target_existed: None,
             }),
-            TokenAction::Revoke { name, tokens_file, .. } => Some(Self {
+            TokenAction::Revoke {
+                name, tokens_file, ..
+            } => Some(Self {
                 operation: "token_revoke",
                 token_name: name.clone(),
                 devices: None,
                 tools: None,
                 target_existed: token_name_present(tokens_file, name),
             }),
-            TokenAction::Rotate { name, tokens_file, .. } => Some(Self {
+            TokenAction::Rotate {
+                name, tokens_file, ..
+            } => Some(Self {
                 operation: "token_rotate",
                 token_name: name.clone(),
                 devices: None,
                 tools: None,
                 target_existed: token_name_present(tokens_file, name),
             }),
-            TokenAction::SetScopes { name, devices, tools, tokens_file, .. } => Some(Self {
+            TokenAction::SetScopes {
+                name,
+                devices,
+                tools,
+                tokens_file,
+                ..
+            } => Some(Self {
                 operation: "token_set_scope",
                 token_name: name.clone(),
                 devices: devices.clone(),
                 tools: tools.clone(),
                 target_existed: token_name_present(tokens_file, name),
             }),
-            TokenAction::SetProvenance { name, tokens_file, .. } => Some(Self {
+            TokenAction::SetProvenance {
+                name, tokens_file, ..
+            } => Some(Self {
                 operation: "token_set_provenance",
                 token_name: name.clone(),
                 devices: None,
@@ -348,7 +367,6 @@ async fn run_inner() -> Result<()> {
         }
 
         return outcome;
-
     }
 
     // Initialize tracing.
@@ -391,13 +409,14 @@ async fn run_inner() -> Result<()> {
     }
 
     // Load registry.
-    let registry = Arc::new(
-        rustunifimcp_core::inventory::ControllerRegistry::load(&cli.controllers_file)?
-    );
+    let registry = Arc::new(rustunifimcp_core::inventory::ControllerRegistry::load(
+        &cli.controllers_file,
+    )?);
 
     // Build changeset store.
-    let changeset_store = rustunifimcp::changeset_store::ChangeSetStore::new(cli.state_file.clone())
-        .map_err(|e| anyhow::anyhow!("failed to initialize changeset store: {e}"))?;
+    let changeset_store =
+        rustunifimcp::changeset_store::ChangeSetStore::new(cli.state_file.clone())
+            .map_err(|e| anyhow::anyhow!("failed to initialize changeset store: {e}"))?;
 
     // Build server.
     let server = UnifiServer::new(
@@ -415,9 +434,7 @@ async fn run_inner() -> Result<()> {
             install_sighup_reload(registry, Some(server.clone()), None)?;
             serve_stdio(server).await
         }
-        mecmcp_runtime::cli::Transport::StreamableHttp => {
-            serve_http(server, &cli, registry).await
-        }
+        mecmcp_runtime::cli::Transport::StreamableHttp => serve_http(server, &cli, registry).await,
     }
 }
 
@@ -530,9 +547,7 @@ fn install_sighup_reload(
     })
 }
 
-async fn serve_stdio(
-    handler: UnifiServer,
-) -> Result<()> {
+async fn serve_stdio(handler: UnifiServer) -> Result<()> {
     tracing::info!("Starting MCP stdio service");
 
     let service = handler
@@ -548,12 +563,9 @@ async fn serve_http(
     cli: &UnifiCli,
     registry: Arc<rustunifimcp_core::inventory::ControllerRegistry>,
 ) -> Result<()> {
-
     // Load token store if provided.
     let token_store = if let Some(ref path) = cli.common.tokens_file {
-        Some(Arc::new(
-            mecmcp_auth::TokenStoreFile::load(path)?
-        ))
+        Some(Arc::new(mecmcp_auth::TokenStoreFile::load(path)?))
     } else {
         None
     };
@@ -574,12 +586,10 @@ async fn serve_http(
         shutdown.clone(),
     )?;
 
-    let bind_addr = format!("{}:{}", cli.common.host, cli.common.port)
-        .parse()?;
+    let bind_addr = format!("{}:{}", cli.common.host, cli.common.port).parse()?;
 
     // Load TLS config if provided.
-    let tls_config = load_listener_tls(&cli.common)
-        .context("TLS configuration failed")?;
+    let tls_config = load_listener_tls(&cli.common).context("TLS configuration failed")?;
 
     // Remember whether TLS is enabled before moving tls_config.
     let is_tls = tls_config.is_some();
@@ -683,7 +693,12 @@ mod tests {
 
         let result = load_listener_tls(&cli);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("--tls-cert provided without --tls-key"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("--tls-cert provided without --tls-key")
+        );
     }
 
     #[test]
@@ -695,7 +710,12 @@ mod tests {
 
         let result = load_listener_tls(&cli);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("--tls-key provided without --tls-cert"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("--tls-key provided without --tls-cert")
+        );
     }
 
     #[test]
@@ -878,7 +898,7 @@ mod tests {
 
         let registry = Arc::new(
             rustunifimcp_core::inventory::ControllerRegistry::load(controllers_file.path())
-                .unwrap()
+                .unwrap(),
         );
 
         let changeset_store = rustunifimcp::changeset_store::ChangeSetStore::new(None).unwrap();
@@ -919,24 +939,20 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mut perms = std::fs::metadata(tokens_file.path())
-                .unwrap()
-                .permissions();
+            let mut perms = std::fs::metadata(tokens_file.path()).unwrap().permissions();
             perms.set_mode(0o600);
             std::fs::set_permissions(tokens_file.path(), perms).unwrap();
         }
 
         let registry = Arc::new(
             rustunifimcp_core::inventory::ControllerRegistry::load(controllers_file.path())
-                .unwrap()
+                .unwrap(),
         );
 
         let changeset_store = rustunifimcp::changeset_store::ChangeSetStore::new(None).unwrap();
         let server = UnifiServer::new(Arc::clone(&registry), false, changeset_store, 300).unwrap();
 
-        let token_store = Arc::new(
-            mecmcp_auth::TokenStoreFile::load(tokens_file.path()).unwrap()
-        );
+        let token_store = Arc::new(mecmcp_auth::TokenStoreFile::load(tokens_file.path()).unwrap());
 
         // Should install successfully with a token store.
         let result = install_sighup_reload(registry, Some(server), Some(token_store));
@@ -965,7 +981,7 @@ mod tests {
 
         let registry = Arc::new(
             rustunifimcp_core::inventory::ControllerRegistry::load(controllers_file.path())
-                .unwrap()
+                .unwrap(),
         );
 
         // Verify initial load worked
@@ -1004,7 +1020,7 @@ mod tests {
 
         let registry = Arc::new(
             rustunifimcp_core::inventory::ControllerRegistry::load(controllers_file.path())
-                .unwrap()
+                .unwrap(),
         );
 
         let changeset_store = rustunifimcp::changeset_store::ChangeSetStore::new(None).unwrap();
@@ -1022,7 +1038,6 @@ mod tests {
         assert!(rebuild_result.is_ok());
         assert_eq!(rebuild_result.unwrap(), 0);
     }
-
 }
 
 #[cfg(test)]
@@ -1066,7 +1081,10 @@ mod audit_tests {
 
     #[test]
     fn a_missing_or_malformed_store_reads_as_unknown_not_absent() {
-        assert_eq!(token_name_present(std::path::Path::new("/nonexistent/t.json"), "a"), None);
+        assert_eq!(
+            token_name_present(std::path::Path::new("/nonexistent/t.json"), "a"),
+            None
+        );
         let mut bad = tempfile::NamedTempFile::new().expect("temp file");
         write!(bad, "not json").expect("write");
         assert_eq!(token_name_present(bad.path(), "a"), None);

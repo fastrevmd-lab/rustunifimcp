@@ -30,7 +30,10 @@ struct MockState {
 enum Behavior {
     SucceedAll,
     FailAt(usize),
-    FailAtWithRollbackFailure { fail_at: usize, rollback_fail_at: usize },
+    FailAtWithRollbackFailure {
+        fail_at: usize,
+        rollback_fail_at: usize,
+    },
     DriftBeforeApply,
     /// The staleness check itself fails, rather than reporting drift.
     PreimageCheckErrors,
@@ -154,7 +157,11 @@ impl MockController {
 }
 
 impl ControllerOps for MockController {
-    async fn apply_mutation(&self, index: usize, mutation: &StagedMutation) -> Result<Option<String>, UnifiError> {
+    async fn apply_mutation(
+        &self,
+        index: usize,
+        mutation: &StagedMutation,
+    ) -> Result<Option<String>, UnifiError> {
         let should_fail = match &self.state.behavior {
             Behavior::SucceedAll => false,
             Behavior::FailAt(n) | Behavior::FailAtWithRollbackFailure { fail_at: n, .. } => {
@@ -190,9 +197,9 @@ impl ControllerOps for MockController {
         created_id: Option<&str>,
     ) -> Result<(), UnifiError> {
         let should_fail = match &self.state.behavior {
-            Behavior::FailAtWithRollbackFailure { rollback_fail_at, .. } => {
-                index + 1 >= *rollback_fail_at
-            }
+            Behavior::FailAtWithRollbackFailure {
+                rollback_fail_at, ..
+            } => index + 1 >= *rollback_fail_at,
             _ => false,
         };
 
@@ -222,7 +229,9 @@ impl ControllerOps for MockController {
     ) -> Result<bool, UnifiError> {
         if matches!(self.state.behavior, Behavior::PreimageCheckErrors) {
             // The check could not be completed. Callers must refuse.
-            return Err(UnifiError::Malformed("mock pre-image check failed".to_owned()));
+            return Err(UnifiError::Malformed(
+                "mock pre-image check failed".to_owned(),
+            ));
         }
         Ok(self.preimage_matches_sync())
     }

@@ -66,9 +66,10 @@ pub struct FirewallPolicy {
 pub fn parse_firewall_groups(val: &serde_json::Value) -> Result<Vec<FirewallGroup>, UnifiError> {
     let data = super::unwrap_enveloped_data(val)?;
     data.iter()
-        .map(|item| serde_json::from_value(item.clone()).map_err(|e| {
-            UnifiError::Malformed(format!("firewall group parse failed: {e}"))
-        }))
+        .map(|item| {
+            serde_json::from_value(item.clone())
+                .map_err(|e| UnifiError::Malformed(format!("firewall group parse failed: {e}")))
+        })
         .collect()
 }
 
@@ -76,9 +77,10 @@ pub fn parse_firewall_groups(val: &serde_json::Value) -> Result<Vec<FirewallGrou
 pub fn parse_firewall_zones(val: &serde_json::Value) -> Result<Vec<FirewallZone>, UnifiError> {
     let data = super::unwrap_private_v2_data(val)?;
     data.iter()
-        .map(|item| serde_json::from_value(item.clone()).map_err(|e| {
-            UnifiError::Malformed(format!("firewall zone parse failed: {e}"))
-        }))
+        .map(|item| {
+            serde_json::from_value(item.clone())
+                .map_err(|e| UnifiError::Malformed(format!("firewall zone parse failed: {e}")))
+        })
         .collect()
 }
 
@@ -86,8 +88,9 @@ pub fn parse_firewall_zones(val: &serde_json::Value) -> Result<Vec<FirewallZone>
 pub fn parse_firewall_policies(val: &serde_json::Value) -> Result<Vec<FirewallPolicy>, UnifiError> {
     let data = super::unwrap_private_v2_data(val)?;
     data.iter()
-        .map(|item| serde_json::from_value(item.clone()).map_err(|e| {
-            UnifiError::Malformed(format!("firewall policy parse failed: {e}"))
-        }))
+        .map(|item| {
+            serde_json::from_value(item.clone())
+                .map_err(|e| UnifiError::Malformed(format!("firewall policy parse failed: {e}")))
+        })
         .collect()
 }

@@ -73,15 +73,16 @@ impl Default for DeviceCapability {
 pub fn parse_devices(val: &serde_json::Value) -> Result<Vec<Device>, UnifiError> {
     let data = super::unwrap_enveloped_data(val)?;
     data.iter()
-        .map(|item| serde_json::from_value(item.clone()).map_err(|e| {
-            UnifiError::Malformed(format!("device parse failed: {e}"))
-        }))
+        .map(|item| {
+            serde_json::from_value(item.clone())
+                .map_err(|e| UnifiError::Malformed(format!("device parse failed: {e}")))
+        })
         .collect()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_devices, DeviceCapability};
+    use super::{DeviceCapability, parse_devices};
 
     /// Both Integration API shapes must parse.
     ///

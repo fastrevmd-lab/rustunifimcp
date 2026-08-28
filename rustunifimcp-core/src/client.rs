@@ -98,11 +98,7 @@ impl UnifiClient {
     ) -> Result<(), UnifiError> {
         match surface {
             ApiSurface::Supported => Ok(()),
-            ApiSurface::PrivateV1 | ApiSurface::PrivateV2
-                if controller.allow_private_api =>
-            {
-                Ok(())
-            }
+            ApiSurface::PrivateV1 | ApiSurface::PrivateV2 if controller.allow_private_api => Ok(()),
             ApiSurface::Cloud if controller.allow_cloud => Err(UnifiError::Malformed(
                 "the cloud Site Manager surface is not implemented in v1".to_owned(),
             )),
@@ -237,7 +233,10 @@ impl UnifiClient {
         let expanded = mecmcp_openapi::expand_path(template, params)
             .map_err(|error| UnifiError::Malformed(error.to_string()))?;
 
-        let mut url = format!("{}{expanded}", self.controller.endpoint.trim_end_matches('/'));
+        let mut url = format!(
+            "{}{expanded}",
+            self.controller.endpoint.trim_end_matches('/')
+        );
 
         if !query.is_empty() {
             let query_string = query
@@ -256,7 +255,9 @@ impl UnifiClient {
         let response = self.http.send(request).await?;
 
         if response.status() >= 300 {
-            return self.handle_error_response(surface, &expanded, response.status(), response.body()).await;
+            return self
+                .handle_error_response(surface, &expanded, response.status(), response.body())
+                .await;
         }
 
         serde_json::from_slice(response.body())
@@ -283,7 +284,10 @@ impl UnifiClient {
         let expanded = mecmcp_openapi::expand_path(template, params)
             .map_err(|error| UnifiError::Malformed(error.to_string()))?;
 
-        let mut url = format!("{}{expanded}", self.controller.endpoint.trim_end_matches('/'));
+        let mut url = format!(
+            "{}{expanded}",
+            self.controller.endpoint.trim_end_matches('/')
+        );
 
         if !query.is_empty() {
             let query_string = query
@@ -307,7 +311,9 @@ impl UnifiClient {
         let response = self.http.send(request).await?;
 
         if response.status() >= 300 {
-            return self.handle_error_response(surface, &expanded, response.status(), response.body()).await;
+            return self
+                .handle_error_response(surface, &expanded, response.status(), response.body())
+                .await;
         }
 
         serde_json::from_slice(response.body())
@@ -334,7 +340,10 @@ impl UnifiClient {
         let expanded = mecmcp_openapi::expand_path(template, params)
             .map_err(|error| UnifiError::Malformed(error.to_string()))?;
 
-        let mut url = format!("{}{expanded}", self.controller.endpoint.trim_end_matches('/'));
+        let mut url = format!(
+            "{}{expanded}",
+            self.controller.endpoint.trim_end_matches('/')
+        );
 
         if !query.is_empty() {
             let query_string = query
@@ -358,7 +367,9 @@ impl UnifiClient {
         let response = self.http.send(request).await?;
 
         if response.status() >= 300 {
-            return self.handle_error_response(surface, &expanded, response.status(), response.body()).await;
+            return self
+                .handle_error_response(surface, &expanded, response.status(), response.body())
+                .await;
         }
 
         serde_json::from_slice(response.body())
@@ -382,7 +393,10 @@ impl UnifiClient {
         let expanded = mecmcp_openapi::expand_path(template, params)
             .map_err(|error| UnifiError::Malformed(error.to_string()))?;
 
-        let mut url = format!("{}{expanded}", self.controller.endpoint.trim_end_matches('/'));
+        let mut url = format!(
+            "{}{expanded}",
+            self.controller.endpoint.trim_end_matches('/')
+        );
 
         if !query.is_empty() {
             let query_string = query
@@ -401,7 +415,9 @@ impl UnifiClient {
         let response = self.http.send(request).await?;
 
         if response.status() >= 300 {
-            return self.handle_error_response(surface, &expanded, response.status(), response.body()).await;
+            return self
+                .handle_error_response(surface, &expanded, response.status(), response.body())
+                .await;
         }
 
         serde_json::from_slice(response.body())
@@ -454,9 +470,10 @@ impl UnifiClient {
     async fn fetch_version_if_absent(&self) -> Result<String, UnifiError> {
         // Check cache first
         {
-            let cached = self.cached_version.read().map_err(|_| {
-                UnifiError::Malformed("version cache lock poisoned".to_owned())
-            })?;
+            let cached = self
+                .cached_version
+                .read()
+                .map_err(|_| UnifiError::Malformed("version cache lock poisoned".to_owned()))?;
             if let Some(version) = cached.as_ref() {
                 return Ok(version.clone());
             }
@@ -489,14 +506,17 @@ impl UnifiClient {
         let version = info
             .get("applicationVersion")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| UnifiError::Malformed("info response lacks applicationVersion".to_owned()))?
+            .ok_or_else(|| {
+                UnifiError::Malformed("info response lacks applicationVersion".to_owned())
+            })?
             .to_owned();
 
         // Cache for future use
         {
-            let mut cached = self.cached_version.write().map_err(|_| {
-                UnifiError::Malformed("version cache lock poisoned".to_owned())
-            })?;
+            let mut cached = self
+                .cached_version
+                .write()
+                .map_err(|_| UnifiError::Malformed("version cache lock poisoned".to_owned()))?;
             *cached = Some(version.clone());
         }
 
@@ -531,47 +551,62 @@ impl crate::changeset::apply::ControllerOps for UnifiClient {
         mutation: &crate::changeset::StagedMutation,
     ) -> Result<Option<String>, crate::error::UnifiError> {
         use crate::changeset::StagedMutation;
-        use crate::model::{unwrap_enveloped_data, ResourceKind};
+        use crate::model::{ResourceKind, unwrap_enveloped_data};
         use crate::tools::read::single_resource_template;
 
         match mutation {
             StagedMutation::Create { kind, body } => {
                 let kind_value = serde_json::Value::String(kind.clone());
-                let resource_kind: ResourceKind = serde_json::from_value(kind_value)
-                    .map_err(|e| UnifiError::Malformed(format!("unknown resource kind '{kind}': {e}")))?;
+                let resource_kind: ResourceKind =
+                    serde_json::from_value(kind_value).map_err(|e| {
+                        UnifiError::Malformed(format!("unknown resource kind '{kind}': {e}"))
+                    })?;
 
                 let surface = resource_kind.surface();
                 let site = self.default_site_for(surface).await?;
                 let template = resource_kind.path_template();
 
-                let response = self.post(surface, template, &[("site", &site)], &[], body).await?;
+                let response = self
+                    .post(surface, template, &[("site", &site)], &[], body)
+                    .await?;
 
                 // Extract the created resource ID from the response
                 let items = match surface {
-                    ApiSurface::Supported | ApiSurface::PrivateV1 => unwrap_enveloped_data(&response)?,
-                    ApiSurface::PrivateV2 => response.as_array()
-                        .ok_or_else(|| UnifiError::Malformed("expected Private v2 bare array".to_owned()))?,
+                    ApiSurface::Supported | ApiSurface::PrivateV1 => {
+                        unwrap_enveloped_data(&response)?
+                    }
+                    ApiSurface::PrivateV2 => response.as_array().ok_or_else(|| {
+                        UnifiError::Malformed("expected Private v2 bare array".to_owned())
+                    })?,
                     ApiSurface::Cloud => {
-                        return Err(UnifiError::Malformed("cloud surface not supported".to_owned()));
+                        return Err(UnifiError::Malformed(
+                            "cloud surface not supported".to_owned(),
+                        ));
                     }
                 };
 
                 if items.is_empty() {
-                    return Err(UnifiError::Malformed(format!("create {kind}: response has no data")));
+                    return Err(UnifiError::Malformed(format!(
+                        "create {kind}: response has no data"
+                    )));
                 }
 
                 let id = items[0]
                     .get("_id")
                     .and_then(|v| v.as_str())
-                    .ok_or_else(|| UnifiError::Malformed(format!("create {kind}: response has no _id")))?;
+                    .ok_or_else(|| {
+                        UnifiError::Malformed(format!("create {kind}: response has no _id"))
+                    })?;
 
                 Ok(Some(id.to_owned()))
             }
 
             StagedMutation::Update { kind, id, body } => {
                 let kind_value = serde_json::Value::String(kind.clone());
-                let resource_kind: ResourceKind = serde_json::from_value(kind_value)
-                    .map_err(|e| UnifiError::Malformed(format!("unknown resource kind '{kind}': {e}")))?;
+                let resource_kind: ResourceKind =
+                    serde_json::from_value(kind_value).map_err(|e| {
+                        UnifiError::Malformed(format!("unknown resource kind '{kind}': {e}"))
+                    })?;
 
                 // Device configuration writes have no verified route on this
                 // controller family, so they are refused rather than guessed.
@@ -597,8 +632,10 @@ impl crate::changeset::apply::ControllerOps for UnifiClient {
                             .to_owned(),
                     ));
                 }
-                let (surface, template): (ApiSurface, String) =
-                    (resource_kind.surface(), single_resource_template(resource_kind));
+                let (surface, template): (ApiSurface, String) = (
+                    resource_kind.surface(),
+                    single_resource_template(resource_kind),
+                );
 
                 let site = self.default_site_for(surface).await?;
 
@@ -610,7 +647,8 @@ impl crate::changeset::apply::ControllerOps for UnifiClient {
                         Some(mut current) => {
                             // Merge staged fields over current, preserving controller-managed fields
                             if let Some(current_obj) = current.as_object_mut()
-                                && let Some(staged_obj) = body.as_object() {
+                                && let Some(staged_obj) = body.as_object()
+                            {
                                 for (key, value) in staged_obj {
                                     // Drop controller-managed fields from staged body
                                     // These fields are managed by the controller and should not be overwritten:
@@ -634,28 +672,38 @@ impl crate::changeset::apply::ControllerOps for UnifiClient {
                     body.clone()
                 };
 
-                self.put(surface, &template, &[("site", &site), ("id", id)], &[], &merged_body).await?;
+                self.put(
+                    surface,
+                    &template,
+                    &[("site", &site), ("id", id)],
+                    &[],
+                    &merged_body,
+                )
+                .await?;
 
                 Ok(None)
             }
 
             StagedMutation::Delete { kind, id } => {
                 let kind_value = serde_json::Value::String(kind.clone());
-                let resource_kind: ResourceKind = serde_json::from_value(kind_value)
-                    .map_err(|e| UnifiError::Malformed(format!("unknown resource kind '{kind}': {e}")))?;
+                let resource_kind: ResourceKind =
+                    serde_json::from_value(kind_value).map_err(|e| {
+                        UnifiError::Malformed(format!("unknown resource kind '{kind}': {e}"))
+                    })?;
 
                 let surface = resource_kind.surface();
                 let site = self.default_site_for(surface).await?;
                 let template = single_resource_template(resource_kind);
 
-                self.delete(surface, &template, &[("site", &site), ("id", id)], &[]).await?;
+                self.delete(surface, &template, &[("site", &site), ("id", id)], &[])
+                    .await?;
 
                 Ok(None)
             }
 
-            StagedMutation::Restore { .. } => {
-                Err(UnifiError::Malformed("backup restore not implemented".to_owned()))
-            }
+            StagedMutation::Restore { .. } => Err(UnifiError::Malformed(
+                "backup restore not implemented".to_owned(),
+            )),
         }
     }
 
@@ -678,14 +726,17 @@ impl crate::changeset::apply::ControllerOps for UnifiClient {
                 })?;
 
                 let kind_value = serde_json::Value::String(kind.clone());
-                let resource_kind: ResourceKind = serde_json::from_value(kind_value)
-                    .map_err(|e| UnifiError::Malformed(format!("unknown resource kind '{kind}': {e}")))?;
+                let resource_kind: ResourceKind =
+                    serde_json::from_value(kind_value).map_err(|e| {
+                        UnifiError::Malformed(format!("unknown resource kind '{kind}': {e}"))
+                    })?;
 
                 let surface = resource_kind.surface();
                 let site = self.default_site_for(surface).await?;
                 let template = single_resource_template(resource_kind);
 
-                self.delete(surface, &template, &[("site", &site), ("id", id)], &[]).await?;
+                self.delete(surface, &template, &[("site", &site), ("id", id)], &[])
+                    .await?;
 
                 Ok(())
             }
@@ -697,14 +748,23 @@ impl crate::changeset::apply::ControllerOps for UnifiClient {
                 })?;
 
                 let kind_value = serde_json::Value::String(kind.clone());
-                let resource_kind: ResourceKind = serde_json::from_value(kind_value)
-                    .map_err(|e| UnifiError::Malformed(format!("unknown resource kind '{kind}': {e}")))?;
+                let resource_kind: ResourceKind =
+                    serde_json::from_value(kind_value).map_err(|e| {
+                        UnifiError::Malformed(format!("unknown resource kind '{kind}': {e}"))
+                    })?;
 
                 let surface = resource_kind.surface();
                 let site = self.default_site_for(surface).await?;
                 let template = single_resource_template(resource_kind);
 
-                self.put(surface, &template, &[("site", &site), ("id", id)], &[], prior).await?;
+                self.put(
+                    surface,
+                    &template,
+                    &[("site", &site), ("id", id)],
+                    &[],
+                    prior,
+                )
+                .await?;
 
                 Ok(())
             }
@@ -716,21 +776,24 @@ impl crate::changeset::apply::ControllerOps for UnifiClient {
                 })?;
 
                 let kind_value = serde_json::Value::String(kind.clone());
-                let resource_kind: ResourceKind = serde_json::from_value(kind_value)
-                    .map_err(|e| UnifiError::Malformed(format!("unknown resource kind '{kind}': {e}")))?;
+                let resource_kind: ResourceKind =
+                    serde_json::from_value(kind_value).map_err(|e| {
+                        UnifiError::Malformed(format!("unknown resource kind '{kind}': {e}"))
+                    })?;
 
                 let surface = resource_kind.surface();
                 let site = self.default_site_for(surface).await?;
                 let template = resource_kind.path_template();
 
-                self.post(surface, template, &[("site", &site)], &[], prior).await?;
+                self.post(surface, template, &[("site", &site)], &[], prior)
+                    .await?;
 
                 Ok(())
             }
 
-            StagedMutation::Restore { .. } => {
-                Err(UnifiError::Malformed("restore rollback not supported".to_owned()))
-            }
+            StagedMutation::Restore { .. } => Err(UnifiError::Malformed(
+                "restore rollback not supported".to_owned(),
+            )),
         }
     }
 
@@ -776,7 +839,7 @@ impl crate::changeset::apply::ControllerOps for UnifiClient {
         kind: &str,
         id: &str,
     ) -> Result<Option<serde_json::Value>, crate::error::UnifiError> {
-        use crate::model::{unwrap_enveloped_data, ResourceKind};
+        use crate::model::{ResourceKind, unwrap_enveloped_data};
         use crate::tools::read::single_resource_template;
 
         let kind_value = serde_json::Value::String(kind.to_owned());
@@ -787,7 +850,9 @@ impl crate::changeset::apply::ControllerOps for UnifiClient {
         let site = self.default_site_for(surface).await?;
         let template = single_resource_template(resource_kind);
 
-        let response = self.get(surface, &template, &[("site", &site), ("id", id)], &[]).await;
+        let response = self
+            .get(surface, &template, &[("site", &site), ("id", id)], &[])
+            .await;
 
         match response {
             Ok(raw) => {
@@ -803,12 +868,14 @@ impl crate::changeset::apply::ControllerOps for UnifiClient {
                             &vec![raw.clone()]
                         } else {
                             return Err(UnifiError::Malformed(
-                                "expected Private v2 array or object".to_owned()
+                                "expected Private v2 array or object".to_owned(),
                             ));
                         }
                     }
                     ApiSurface::Cloud => {
-                        return Err(UnifiError::Malformed("cloud surface not supported".to_owned()));
+                        return Err(UnifiError::Malformed(
+                            "cloud surface not supported".to_owned(),
+                        ));
                     }
                 };
 
@@ -823,7 +890,8 @@ impl crate::changeset::apply::ControllerOps for UnifiClient {
             // so both error shapes map to Ok(None) here. This is only for fetch_resource;
             // PrivateEndpointAbsent keeps its "endpoint missing on this controller version"
             // meaning everywhere else.
-            Err(UnifiError::Upstream { status: 404, .. }) | Err(UnifiError::PrivateEndpointAbsent { .. }) => Ok(None),
+            Err(UnifiError::Upstream { status: 404, .. })
+            | Err(UnifiError::PrivateEndpointAbsent { .. }) => Ok(None),
             Err(e) => Err(e),
         }
     }
@@ -869,7 +937,8 @@ impl crate::changeset::apply::ControllerOps for UnifiClient {
                             // Compare key fields (simplified - full implementation would
                             // need deep comparison logic)
                             if let Some(expected_name) = body.get("name")
-                                && fetched.get("name") != Some(expected_name) {
+                                && fetched.get("name") != Some(expected_name)
+                            {
                                 failed_verifications.push(format!(
                                     "update {} {}: field mismatch after apply",
                                     kind, id
@@ -952,8 +1021,7 @@ mod tests {
     #[test]
     fn a_private_surface_is_refused_when_the_controller_has_not_opted_in() {
         let controller = supported_only();
-        let permitted =
-            UnifiClient::ensure_surface_permitted(&controller, ApiSurface::PrivateV2);
+        let permitted = UnifiClient::ensure_surface_permitted(&controller, ApiSurface::PrivateV2);
         assert!(matches!(
             permitted,
             Err(crate::error::UnifiError::SurfaceRequiresConfig { .. })
@@ -1022,8 +1090,7 @@ mod tests {
                 }
             ]
         });
-        let unwrapped = crate::model::unwrap_enveloped_data(&envelope)
-            .expect("envelope unwraps");
+        let unwrapped = crate::model::unwrap_enveloped_data(&envelope).expect("envelope unwraps");
         assert_eq!(unwrapped.len(), 1);
         assert_eq!(unwrapped[0]["id"], "test-uuid");
     }
@@ -1035,12 +1102,9 @@ mod tests {
             eprintln!("SKIPPED: no fixtures.");
             return;
         }
-        let sites_raw = crate::testing::fixture(
-            crate::testing::DEFAULT_FIXTURE_VERSION,
-            "sites"
-        );
-        let sites_array = crate::model::unwrap_enveloped_data(&sites_raw)
-            .expect("sites fixture unwraps");
+        let sites_raw = crate::testing::fixture(crate::testing::DEFAULT_FIXTURE_VERSION, "sites");
+        let sites_array =
+            crate::model::unwrap_enveloped_data(&sites_raw).expect("sites fixture unwraps");
 
         // The fixture should have at least one site
         assert!(!sites_array.is_empty(), "fixture has at least one site");
@@ -1056,7 +1120,8 @@ mod tests {
             .expect("fixture has a 'default' site");
 
         // It should have a UUID
-        let uuid = default_site.get("id")
+        let uuid = default_site
+            .get("id")
             .and_then(|id| id.as_str())
             .expect("default site has an id");
 

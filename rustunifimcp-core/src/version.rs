@@ -7,8 +7,8 @@
 //! Adding a controller version means recording its fixtures and adding a row
 //! here. A disagreement between the two is a test failure, deliberately.
 
-use crate::model::ResourceKind;
 use crate::ApiSurface;
+use crate::model::ResourceKind;
 
 /// What the recorded fixtures say about an endpoint on a controller version.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
