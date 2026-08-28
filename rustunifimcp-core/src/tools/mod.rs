@@ -5,6 +5,7 @@
 //! a small number of workflows that earn their names.
 
 pub mod admin;
+pub mod changeset;
 pub mod ops;
 pub mod read;
 pub mod workflow;

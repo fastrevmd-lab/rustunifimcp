@@ -8,6 +8,7 @@
 //! Implementation has not started; see `PLAN.md` at the workspace root for the
 //! phase sequence and the `mecmcp` crates each phase is gated on.
 
+pub mod changeset;
 pub mod client;
 pub mod error;
 pub mod inventory;
