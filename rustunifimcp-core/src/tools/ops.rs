@@ -109,6 +109,86 @@ impl ClientActionArgs {
     }
 }
 
+/// What to do with controller backups.
+///
+/// `restore` is not available here. Restoring a controller backup overwrites
+/// the entire configuration, which is a larger blast radius than any change set
+/// this server will ever carry, so it goes through the change-set lifecycle:
+/// `unifi_create_change_set` -> `unifi_stage_change` -> `unifi_approve_change_set`
+/// -> `unifi_apply_change_set`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum BackupAction {
+    /// Trigger a new backup.
+    Trigger,
+    /// List available backups.
+    List,
+    /// Download a backup file.
+    Download,
+    /// Validate a backup file's integrity.
+    Validate,
+}
+
+/// Arguments to `unifi_backup_action`.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct BackupActionArgs {
+    /// Which controller, by its name in `controllers.json`.
+    pub controller: String,
+    /// What to do.
+    pub action: BackupAction,
+    /// Site identifier; defaults to the controller's configured site.
+    #[serde(default)]
+    pub site: Option<String>,
+    /// Backup filename, required for `download` and `validate`.
+    #[serde(default)]
+    pub backup_file: Option<String>,
+}
+
+impl BackupActionArgs {
+    /// Check the cross-field invariants `serde` cannot express.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::error::UnifiError::Malformed`] if `download` or
+    /// `validate` was requested without a `backup_file`.
+    pub fn validate(&self) -> Result<(), crate::error::UnifiError> {
+        if matches!(self.action, BackupAction::Download | BackupAction::Validate)
+            && self.backup_file.is_none()
+        {
+            return Err(crate::error::UnifiError::Malformed(format!(
+                "action `{:?}` requires `backup_file`",
+                self.action
+            )));
+        }
+        Ok(())
+    }
+}
+
+/// Arguments to `unifi_run_speed_test`.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SpeedTestArgs {
+    /// Which controller, by its name in `controllers.json`.
+    pub controller: String,
+    /// Site identifier; defaults to the controller's configured site.
+    #[serde(default)]
+    pub site: Option<String>,
+}
+
+impl SpeedTestArgs {
+    /// Validate arguments. Currently a no-op as there are no cross-field
+    /// invariants, but kept for consistency with other operational args.
+    ///
+    /// # Errors
+    ///
+    /// Currently always returns `Ok`.
+    pub fn validate(&self) -> Result<(), crate::error::UnifiError> {
+        Ok(())
+    }
+}
+
 /// Execute an operational action on a device.
 ///
 /// This is a pass-through to the controller's device action endpoint.
@@ -141,8 +221,54 @@ pub async fn client_action(
     client: &crate::client::UnifiClient,
 ) -> Result<serde_json::Value, crate::error::UnifiError> {
     args.validate()?;
-    
+
     // Placeholder implementation - will be replaced with actual API calls
+    let _ = (args, client);
+    Ok(serde_json::json!({"status": "ok"}))
+}
+
+/// Execute a backup action on the controller.
+///
+/// This implements trigger, list, download, and validate. `restore` is not
+/// available here — restoring a controller backup overwrites the entire
+/// configuration, so it goes through change control in Phase 6.
+///
+/// **Task 17 must verify whether this is actually synchronous.** No backup or
+/// speed-test fixtures exist, so this implementation assumes synchronous
+/// responses pending live observation.
+///
+/// # Errors
+///
+/// Returns [`crate::error::UnifiError::Malformed`] if `download` or `validate`
+/// is requested without a `backup_file`.
+pub async fn backup_action(
+    args: BackupActionArgs,
+    client: &crate::client::UnifiClient,
+) -> Result<serde_json::Value, crate::error::UnifiError> {
+    args.validate()?;
+
+    // Placeholder implementation - will be replaced with actual API calls in Task 17
+    let _ = (args, client);
+    Ok(serde_json::json!({"status": "ok"}))
+}
+
+/// Run a speed test from the controller.
+///
+/// **Task 17 must verify whether this is actually synchronous.** No speed-test
+/// fixtures exist, so this implementation assumes a synchronous response pending
+/// live observation. If the controller returns a job handle, Task 17 will add
+/// `mecmcp-job` back and implement polling.
+///
+/// # Errors
+///
+/// Currently does not validate arguments beyond deserialization.
+pub async fn run_speed_test(
+    args: SpeedTestArgs,
+    client: &crate::client::UnifiClient,
+) -> Result<serde_json::Value, crate::error::UnifiError> {
+    args.validate()?;
+
+    // Placeholder implementation - will be replaced with actual API calls in Task 17
     let _ = (args, client);
     Ok(serde_json::json!({"status": "ok"}))
 }
@@ -191,6 +317,68 @@ mod tests {
             let json = format!(r#""{raw}""#);
             let parsed: Result<ClientAction, _> = serde_json::from_str(&json);
             assert!(parsed.is_ok(), "{raw} must parse");
+        }
+    }
+
+    #[test]
+    fn backup_actions_parse_from_their_documented_spellings() {
+        use super::BackupAction;
+        for (raw, expected) in [
+            ("trigger", BackupAction::Trigger),
+            ("list", BackupAction::List),
+            ("download", BackupAction::Download),
+            ("validate", BackupAction::Validate),
+        ] {
+            let json = format!(r#""{raw}""#);
+            let parsed: BackupAction = serde_json::from_str(&json)
+                .unwrap_or_else(|e| panic!("{raw}: {e}"));
+            assert_eq!(parsed, expected);
+        }
+    }
+
+    /// `restore` must be a parse error with a message naming the change-set path,
+    /// not a runtime refusal. Restoring a controller backup overwrites the entire
+    /// configuration, so it goes through approval in Phase 6.
+    #[test]
+    fn backup_restore_is_refused_at_parse_time() {
+        use super::BackupAction;
+        let parsed: Result<BackupAction, _> = serde_json::from_str(r#""restore""#);
+        assert!(parsed.is_err(), "restore must be a parse error, not a runtime refusal");
+    }
+
+    #[test]
+    fn download_and_validate_require_a_backup_file() {
+        use super::{BackupAction, BackupActionArgs};
+        for action in [BackupAction::Download, BackupAction::Validate] {
+            let args = BackupActionArgs {
+                controller: "home".to_owned(),
+                action,
+                site: None,
+                backup_file: None,
+            };
+            assert!(
+                args.validate().is_err(),
+                "{:?} without backup_file must be refused before dispatch",
+                action
+            );
+        }
+    }
+
+    #[test]
+    fn trigger_and_list_do_not_require_a_backup_file() {
+        use super::{BackupAction, BackupActionArgs};
+        for action in [BackupAction::Trigger, BackupAction::List] {
+            let args = BackupActionArgs {
+                controller: "home".to_owned(),
+                action,
+                site: None,
+                backup_file: None,
+            };
+            assert!(
+                args.validate().is_ok(),
+                "{:?} must not require backup_file",
+                action
+            );
         }
     }
 }
