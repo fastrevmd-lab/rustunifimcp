@@ -19,7 +19,7 @@ use rustunifimcp_core::{
     inventory::ControllerRegistry,
     client::UnifiClient,
     error::UnifiError,
-    tools::{WRITE_TOOLS, admin, read},
+    tools::{WRITE_TOOLS, admin, ops, read},
 };
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -265,6 +265,56 @@ impl UnifiServer {
         }
 
         match admin::unifi_add_controller("", "", "", None, None).await {
+            Ok(json) => tool_result(Ok::<_, String>(json), ResultFormat::PrettyJson, RESULT_LIMITS),
+            Err(error) => tool_error(error),
+        }
+    }
+
+    #[tool(
+        name = "unifi_device_action",
+        description = "Execute an operational action on a device (restart, locate, adopt, upgrade, port_action)"
+    )]
+    async fn unifi_device_action(
+        &self,
+        Parameters(args): Parameters<ops::DeviceActionArgs>,
+        context: RequestContext<RoleServer>,
+    ) -> CallToolResult {
+        let caller = Self::caller(&context);
+        if let Err(error) = authorize_call(caller.as_ref(), "unifi_device_action", Some(&args.controller), WRITE_TOOLS) {
+            return tool_error(error);
+        }
+
+        let client = match self.client_for(&args.controller) {
+            Ok(client) => client,
+            Err(result) => return *result,
+        };
+
+        match ops::device_action(args, client).await {
+            Ok(json) => tool_result(Ok::<_, String>(json), ResultFormat::PrettyJson, RESULT_LIMITS),
+            Err(error) => tool_error(error),
+        }
+    }
+
+    #[tool(
+        name = "unifi_client_action",
+        description = "Execute an operational action on a client (block, unblock, reconnect, authorize, limit_bandwidth)"
+    )]
+    async fn unifi_client_action(
+        &self,
+        Parameters(args): Parameters<ops::ClientActionArgs>,
+        context: RequestContext<RoleServer>,
+    ) -> CallToolResult {
+        let caller = Self::caller(&context);
+        if let Err(error) = authorize_call(caller.as_ref(), "unifi_client_action", Some(&args.controller), WRITE_TOOLS) {
+            return tool_error(error);
+        }
+
+        let client = match self.client_for(&args.controller) {
+            Ok(client) => client,
+            Err(result) => return *result,
+        };
+
+        match ops::client_action(args, client).await {
             Ok(json) => tool_result(Ok::<_, String>(json), ResultFormat::PrettyJson, RESULT_LIMITS),
             Err(error) => tool_error(error),
         }
