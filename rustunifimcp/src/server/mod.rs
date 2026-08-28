@@ -776,6 +776,17 @@ impl UnifiServer {
             Err(e) => return tool_error(format!("failed to retrieve change set: {e}")),
         };
 
+        // An approval is a statement about specific staged changes. A set with
+        // nothing staged has nothing to attest to, and recording an approval
+        // against it puts a signature in the audit trail for a decision nobody
+        // could have reviewed. Observed live: a change set whose staging failed
+        // was still approvable, and only apply refused it.
+        if change_set.mutations.is_empty() {
+            return tool_error(
+                "change set has nothing staged; there is nothing to approve",
+            );
+        }
+
         // Refuse if the approver is the creator (two-person control)
         if change_set.creator == approver && change_set.approval_waiver.is_none() {
             return tool_error("two-person control: the creating token cannot approve its own change set");

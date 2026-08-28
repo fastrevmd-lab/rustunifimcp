@@ -68,7 +68,7 @@ impl Preimage {
 
                     let surface = resource_kind.surface();
                     let site = client.default_site_for(surface).await?;
-                    let template = format!("{}/{{}}", resource_kind.path_template());
+                    let template = crate::tools::read::single_resource_template(resource_kind);
 
                     // Fetch the resource
                     let raw = client
