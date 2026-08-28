@@ -1,0 +1,2 @@
+d /etc/unifimcp 0750 root unifimcp -
+d /var/lib/unifimcp 0700 unifimcp unifimcp -

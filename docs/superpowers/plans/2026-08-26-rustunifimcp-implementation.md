@@ -2340,7 +2340,7 @@ Paths for this server:
 ```bash
 ssh root@pve2.mechub.org
 # 623 -- lab mode, the simpler configuration, brought up first
-pct create 623 local:vztmpl/debian-13-standard_13.0-1_amd64.tar.zst \
+pct create 623 local:vztmpl/debian-13-standard_13.1-2_amd64.tar.zst \
   --hostname test-labmode-unifi \
   --cores 1 --memory 512 --swap 512 \
   --rootfs local-lvm:4 \
@@ -2351,7 +2351,7 @@ pct create 623 local:vztmpl/debian-13-standard_13.0-1_amd64.tar.zst \
   --description 'rustunifimcp disposable rehearsal rig (lab mode). Tests release builds before LXC 981 (production). Safe to destroy.'
 
 # 622 -- two-person
-pct create 622 local:vztmpl/debian-13-standard_13.0-1_amd64.tar.zst \
+pct create 622 local:vztmpl/debian-13-standard_13.1-2_amd64.tar.zst \
   --hostname test-twoperson-unifi \
   --cores 1 --memory 512 --swap 512 \
   --rootfs local-lvm:4 \
@@ -2988,7 +2988,7 @@ Change-set-shaped gaps are expected here and close in Phase 6."
 
 ```bash
 ssh root@pve2.mechub.org
-pct create 981 local:vztmpl/debian-13-standard_13.0-1_amd64.tar.zst \
+pct create 981 local:vztmpl/debian-13-standard_13.1-2_amd64.tar.zst \
   --hostname prod-unifimcp \
   --cores 2 --memory 1024 --swap 512 \
   --rootfs local-lvm:8 \
