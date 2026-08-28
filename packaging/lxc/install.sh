@@ -179,7 +179,41 @@ fi
 # Install systemd unit
 if [ -f packaging/systemd/rustunifimcp.service ]; then
     echo "    Installing systemd unit..."
-    install -m 0644 -o root -g root packaging/systemd/rustunifimcp.service /etc/systemd/system/rustunifimcp.service
+
+    # Determine hostname and IP for substitution.
+    # The service must bind an address clients can reach and allowlist the
+    # Host/Origin headers those clients will send. Defaulting --host to 0.0.0.0
+    # without an allowed-host check would accept any Host header, which is unsafe.
+    unifimcp_hostname="${UNIFIMCP_HOSTNAME:-}"
+    if [ -z "$unifimcp_hostname" ]; then
+        unifimcp_hostname=$(hostname -f 2>/dev/null || hostname 2>/dev/null || printf '')
+    fi
+    if [ -z "$unifimcp_hostname" ]; then
+        die 'cannot determine hostname; set UNIFIMCP_HOSTNAME or fix hostname -f'
+    fi
+
+    # Determine the primary IP address.
+    unifimcp_ip=$(hostname -I 2>/dev/null | awk '{print $1}' || printf '')
+    if [ -z "$unifimcp_ip" ]; then
+        die 'cannot determine IP address; set UNIFIMCP_BIND_HOST manually'
+    fi
+
+    # Substitute placeholders in the unit file.
+    # Bind to 0.0.0.0 so clients on other hosts can reach the server, and
+    # allowlist both the FQDN and IP so clients dialing either are accepted.
+    sed -e "s|@UNIFIMCP_BIND_HOST@|0.0.0.0|g" \
+        -e "s|@UNIFIMCP_ALLOWED_HOST@|$unifimcp_hostname $unifimcp_ip|g" \
+        -e "s|@UNIFIMCP_ALLOWED_ORIGIN@|https://$unifimcp_hostname https://$unifimcp_ip|g" \
+        packaging/systemd/rustunifimcp.service > /etc/systemd/system/rustunifimcp.service
+
+    chmod 0644 /etc/systemd/system/rustunifimcp.service
+    chown root:root /etc/systemd/system/rustunifimcp.service
+
+    # Verify that no placeholders remain.
+    if grep -q '@UNIFIMCP_' /etc/systemd/system/rustunifimcp.service; then
+        die 'unit file installation failed: placeholders remain unsubstituted'
+    fi
+
     systemctl daemon-reload
     report_egress_enforcement
 else
@@ -194,7 +228,7 @@ echo "  1. Edit /etc/unifimcp/controllers.json with your UniFi controller detail
 echo "  2. Write the API key to /etc/unifimcp/api.key (mode 0600, owned by unifimcp:unifimcp)"
 echo "  3. Mint a token, e.g.:"
 echo "       rustunifimcp token add --tokens-file /var/lib/unifimcp/tokens.json \\"
-echo "           --name readonly --tools '*'"
+echo "           --name readonly --devices '*' --tools '*'"
 echo "     A wildcard token is read-only by construction (Phase 2 has no write tools yet)."
 echo "  4. (Optional) Configure TLS certificates at /etc/unifimcp/tls/{fullchain,privkey}.pem"
 echo "  5. Start the service: systemctl start rustunifimcp"

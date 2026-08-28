@@ -174,6 +174,63 @@ async fn run_inner() -> Result<()> {
         init_token_audit();
 
         let (action, grant) = token_command_to_action(token_cli.command);
+
+        // Emit audit record for token mutations before executing them.
+        // The record contains the operation and scope, never the secret.
+        match &action {
+            TokenAction::Add { name, devices, tools, .. } => {
+                tracing::info!(
+                    target: "audit",
+                    operation = "token_add",
+                    token_name = name,
+                    devices = ?devices,
+                    tools = ?tools,
+                    "token minted"
+                );
+            }
+            TokenAction::Revoke { name, .. } => {
+                tracing::info!(
+                    target: "audit",
+                    operation = "token_revoke",
+                    token_name = name,
+                    "token revoked"
+                );
+            }
+            TokenAction::Rotate { name, .. } => {
+                tracing::info!(
+                    target: "audit",
+                    operation = "token_rotate",
+                    token_name = name,
+                    "token secret rotated"
+                );
+            }
+            TokenAction::SetScopes { name, devices, tools, .. } => {
+                tracing::info!(
+                    target: "audit",
+                    operation = "token_set_scope",
+                    token_name = name,
+                    devices = ?devices,
+                    tools = ?tools,
+                    "token scope modified"
+                );
+            }
+            TokenAction::SetProvenance { name, provider, provider_tier, on_behalf_of, actor_type, .. } => {
+                tracing::info!(
+                    target: "audit",
+                    operation = "token_set_provenance",
+                    token_name = name,
+                    provider = ?provider,
+                    provider_tier = ?provider_tier,
+                    on_behalf_of = ?on_behalf_of,
+                    actor_type = ?actor_type,
+                    "token provenance modified"
+                );
+            }
+            TokenAction::List { .. } => {
+                // List is read-only and does not need audit logging.
+            }
+        }
+
         return mecmcp_runtime::token_cmd::run_with_grant::<NoGrant>(
             action,
             &[],
@@ -301,18 +358,22 @@ async fn serve_http(
         .parse()?;
 
     // Load TLS config if provided.
-    let tls_config = load_listener_tls(&cli.common)?;
+    let tls_config = load_listener_tls(&cli.common)
+        .context("TLS configuration failed")?;
 
-    // Log the serving mode for audit purposes.
-    if tls_config.is_some() {
+    // Remember whether TLS is enabled before moving tls_config.
+    let is_tls = tls_config.is_some();
+
+    // Attempt to bind and serve. Log intent first, then outcome after successful bind.
+    if is_tls {
         tracing::info!(
             target: "audit",
-            "serving HTTPS on {bind_addr}"
+            "attempting to bind HTTPS listener on {bind_addr}"
         );
     } else {
         tracing::info!(
             target: "audit",
-            "serving plain HTTP on {bind_addr}"
+            "attempting to bind plain HTTP listener on {bind_addr}"
         );
     }
 
@@ -322,7 +383,21 @@ async fn serve_http(
         tls_config,
         std::time::Duration::from_secs(30),
     )
-    .await?;
+    .await
+    .context("failed to serve HTTP router")?;
+
+    // This is reached only on graceful shutdown.
+    if is_tls {
+        tracing::info!(
+            target: "audit",
+            "HTTPS listener on {bind_addr} shut down"
+        );
+    } else {
+        tracing::info!(
+            target: "audit",
+            "plain HTTP listener on {bind_addr} shut down"
+        );
+    }
 
     Ok(())
 }
