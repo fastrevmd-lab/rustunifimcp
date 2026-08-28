@@ -8,7 +8,7 @@
 mod mock;
 
 use mock::MockController;
-use rustunifimcp_core::changeset::apply::{apply_sequentially, Outcome, State};
+use rustunifimcp_core::changeset::apply::{Outcome, State, apply_sequentially};
 use rustunifimcp_core::changeset::{Preimage, StagedMutation};
 use serde_json::json;
 
@@ -45,7 +45,11 @@ async fn a_failure_midway_reports_partial_and_names_both_sides() {
 
     assert_eq!(outcome.state, State::Partial);
     assert_eq!(outcome.succeeded.len(), 2, "the first two landed");
-    assert_eq!(outcome.failed.len(), 3, "the third failed and two never ran");
+    assert_eq!(
+        outcome.failed.len(),
+        3,
+        "the third failed and two never ran"
+    );
     // The distinction matters to whoever cleans up.
     assert_eq!(outcome.attempted_and_failed.len(), 1);
     assert_eq!(outcome.never_attempted.len(), 2);
@@ -161,16 +165,28 @@ async fn rollback_of_update_passes_preimage_value() {
     let _outcome = apply_sequentially(&controller, &preimage, &mutations).await;
 
     let history = controller.rollback_history();
-    assert_eq!(history.len(), 2, "first two mutations should be rolled back");
+    assert_eq!(
+        history.len(),
+        2,
+        "first two mutations should be rolled back"
+    );
 
     // First rollback (index 1, the update) should have the pre-image value
-    assert_eq!(history[0].0, 1, "first rollback should be for index 1 (reverse order)");
+    assert_eq!(
+        history[0].0, 1,
+        "first rollback should be for index 1 (reverse order)"
+    );
     assert!(
         history[0].1.is_some(),
         "update rollback must receive the pre-image value"
     );
     assert_eq!(
-        history[0].1.as_ref().expect("pre-image value").get("name").and_then(|v| v.as_str()),
+        history[0]
+            .1
+            .as_ref()
+            .expect("pre-image value")
+            .get("name")
+            .and_then(|v| v.as_str()),
         Some("original_name"),
         "the pre-image value should be the original"
     );

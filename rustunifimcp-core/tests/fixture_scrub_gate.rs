@@ -32,7 +32,7 @@ fn run_gate(fixture_dir: &str) -> (i32, String, String) {
 
     let output = Command::new(&script)
         .arg(dir)
-        .env("ALLOW_MISSING_DENYLIST", "1")  // Tests use synthetic data, no denylist needed
+        .env("ALLOW_MISSING_DENYLIST", "1") // Tests use synthetic data, no denylist needed
         .output()
         .expect("failed to execute gate script");
 
@@ -47,7 +47,7 @@ fn run_gate(fixture_dir: &str) -> (i32, String, String) {
 fn gate_passes_on_verified_clean_fixtures() {
     // Self-contained test: create a small known-clean fixture set
     let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
-    
+
     // Create a minimal clean fixture
     let clean_fixture = r#"{
         "_id": "507f1f77bcf86cd799439011deadbeef",
@@ -65,7 +65,10 @@ fn gate_passes_on_verified_clean_fixtures() {
         .expect("failed to write clean fixture");
 
     let (code, stdout, stderr) = run_gate(
-        temp_dir.path().to_str().expect("temp dir path is valid UTF-8")
+        temp_dir
+            .path()
+            .to_str()
+            .expect("temp dir path is valid UTF-8"),
     );
 
     assert_eq!(
@@ -86,7 +89,9 @@ fn gate_passes_on_verified_clean_fixtures() {
 fn gate_passes_on_live_fixtures_when_available() {
     // Optional test: verify against the real fixture set if present
     if !fixtures_available() {
-        eprintln!("SKIPPED: no live fixtures. Run scripts/capture-fixtures.sh against a controller.");
+        eprintln!(
+            "SKIPPED: no live fixtures. Run scripts/capture-fixtures.sh against a controller."
+        );
         return;
     }
 
@@ -112,7 +117,10 @@ fn gate_fails_on_credential_shaped_field() {
     fs::write(&fixture_path, bad_fixture).expect("failed to write fixture");
 
     let (code, _stdout, stderr) = run_gate(
-        temp_dir.path().to_str().expect("temp dir path is valid UTF-8")
+        temp_dir
+            .path()
+            .to_str()
+            .expect("temp dir path is valid UTF-8"),
     );
 
     assert_ne!(
@@ -146,7 +154,10 @@ fn gate_fails_on_high_entropy_value() {
     fs::write(&fixture_path, bad_fixture).expect("failed to write fixture");
 
     let (code, _stdout, stderr) = run_gate(
-        temp_dir.path().to_str().expect("temp dir path is valid UTF-8")
+        temp_dir
+            .path()
+            .to_str()
+            .expect("temp dir path is valid UTF-8"),
     );
 
     assert_ne!(
@@ -175,7 +186,10 @@ fn gate_fails_on_public_ipv4_in_cidr() {
     fs::write(&fixture_path, bad_fixture).expect("failed to write fixture");
 
     let (code, _stdout, stderr) = run_gate(
-        temp_dir.path().to_str().expect("temp dir path is valid UTF-8")
+        temp_dir
+            .path()
+            .to_str()
+            .expect("temp dir path is valid UTF-8"),
     );
 
     assert_ne!(
@@ -209,7 +223,10 @@ fn gate_fails_on_public_ipv6_cidr() {
     fs::write(&fixture_path, bad_fixture).expect("failed to write fixture");
 
     let (code, _stdout, stderr) = run_gate(
-        temp_dir.path().to_str().expect("temp dir path is valid UTF-8")
+        temp_dir
+            .path()
+            .to_str()
+            .expect("temp dir path is valid UTF-8"),
     );
 
     assert_ne!(
@@ -238,7 +255,10 @@ fn gate_fails_on_global_ipv6() {
     fs::write(&fixture_path, bad_fixture).expect("failed to write fixture");
 
     let (code, _stdout, stderr) = run_gate(
-        temp_dir.path().to_str().expect("temp dir path is valid UTF-8")
+        temp_dir
+            .path()
+            .to_str()
+            .expect("temp dir path is valid UTF-8"),
     );
 
     assert_ne!(
@@ -267,7 +287,10 @@ fn gate_fails_on_non_zero_latitude() {
     fs::write(&fixture_path, bad_fixture).expect("failed to write fixture");
 
     let (code, _stdout, stderr) = run_gate(
-        temp_dir.path().to_str().expect("temp dir path is valid UTF-8")
+        temp_dir
+            .path()
+            .to_str()
+            .expect("temp dir path is valid UTF-8"),
     );
 
     assert_ne!(
@@ -295,7 +318,10 @@ fn gate_fails_on_real_mac_address() {
     fs::write(&fixture_path, bad_fixture).expect("failed to write fixture");
 
     let (code, _stdout, stderr) = run_gate(
-        temp_dir.path().to_str().expect("temp dir path is valid UTF-8")
+        temp_dir
+            .path()
+            .to_str()
+            .expect("temp dir path is valid UTF-8"),
     );
 
     assert_ne!(
@@ -333,8 +359,7 @@ fn gate_fails_on_denylist_hit() {
     };
 
     // Write test denylist
-    fs::write(&denylist_path, "example-office\ntestuser\n")
-        .expect("failed to write test denylist");
+    fs::write(&denylist_path, "example-office\ntestuser\n").expect("failed to write test denylist");
 
     // Run WITHOUT ALLOW_MISSING_DENYLIST so it actually checks
     let root = workspace_root();
@@ -383,7 +408,10 @@ fn gate_allows_documentation_ips() {
     fs::write(&fixture_path, good_fixture).expect("failed to write fixture");
 
     let (code, stdout, stderr) = run_gate(
-        temp_dir.path().to_str().expect("temp dir path is valid UTF-8")
+        temp_dir
+            .path()
+            .to_str()
+            .expect("temp dir path is valid UTF-8"),
     );
 
     assert_eq!(
@@ -407,7 +435,10 @@ fn gate_allows_synthetic_mac_addresses() {
     fs::write(&fixture_path, good_fixture).expect("failed to write fixture");
 
     let (code, stdout, stderr) = run_gate(
-        temp_dir.path().to_str().expect("temp dir path is valid UTF-8")
+        temp_dir
+            .path()
+            .to_str()
+            .expect("temp dir path is valid UTF-8"),
     );
 
     assert_eq!(
@@ -432,7 +463,10 @@ fn gate_allows_structural_high_entropy_ids() {
     fs::write(&fixture_path, good_fixture).expect("failed to write fixture");
 
     let (code, stdout, stderr) = run_gate(
-        temp_dir.path().to_str().expect("temp dir path is valid UTF-8")
+        temp_dir
+            .path()
+            .to_str()
+            .expect("temp dir path is valid UTF-8"),
     );
 
     assert_eq!(
@@ -447,7 +481,10 @@ fn gate_fails_on_empty_fixture_directory() {
     let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
 
     let (code, _stdout, stderr) = run_gate(
-        temp_dir.path().to_str().expect("temp dir path is valid UTF-8")
+        temp_dir
+            .path()
+            .to_str()
+            .expect("temp dir path is valid UTF-8"),
     );
 
     assert_ne!(
@@ -475,7 +512,10 @@ fn gate_fails_on_real_mac_colon_format() {
     fs::write(&fixture_path, bad_fixture).expect("failed to write fixture");
 
     let (code, _stdout, stderr) = run_gate(
-        temp_dir.path().to_str().expect("temp dir path is valid UTF-8")
+        temp_dir
+            .path()
+            .to_str()
+            .expect("temp dir path is valid UTF-8"),
     );
 
     assert_ne!(
@@ -503,7 +543,10 @@ fn gate_fails_on_real_mac_dash_format() {
     fs::write(&fixture_path, bad_fixture).expect("failed to write fixture");
 
     let (code, _stdout, stderr) = run_gate(
-        temp_dir.path().to_str().expect("temp dir path is valid UTF-8")
+        temp_dir
+            .path()
+            .to_str()
+            .expect("temp dir path is valid UTF-8"),
     );
 
     assert_ne!(
@@ -531,7 +574,10 @@ fn gate_fails_on_real_mac_bare_format() {
     fs::write(&fixture_path, bad_fixture).expect("failed to write fixture");
 
     let (code, _stdout, stderr) = run_gate(
-        temp_dir.path().to_str().expect("temp dir path is valid UTF-8")
+        temp_dir
+            .path()
+            .to_str()
+            .expect("temp dir path is valid UTF-8"),
     );
 
     assert_ne!(
@@ -559,7 +605,10 @@ fn gate_allows_synthetic_mac_in_mac_field() {
     fs::write(&fixture_path, good_fixture).expect("failed to write fixture");
 
     let (code, stdout, stderr) = run_gate(
-        temp_dir.path().to_str().expect("temp dir path is valid UTF-8")
+        temp_dir
+            .path()
+            .to_str()
+            .expect("temp dir path is valid UTF-8"),
     );
 
     assert_eq!(

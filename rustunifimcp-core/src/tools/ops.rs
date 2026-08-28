@@ -10,7 +10,7 @@
 //! change-set operation instead. See `tools::changeset`.
 
 use schemars::JsonSchema;
-use serde::{de, Deserialize, Deserializer};
+use serde::{Deserialize, Deserializer, de};
 
 /// Explanation for why `restore` is not an operational backup action.
 ///
@@ -172,8 +172,7 @@ impl JsonSchema for BackupAction {
             "enum": ["trigger", "list", "download", "validate"]
         });
 
-        serde_json::from_value(schema_json)
-            .expect("static schema JSON must deserialize to Schema")
+        serde_json::from_value(schema_json).expect("static schema JSON must deserialize to Schema")
     }
 }
 
@@ -252,7 +251,10 @@ pub async fn device_action(
 ) -> Result<serde_json::Value, crate::error::UnifiError> {
     args.validate()?;
 
-    let site = args.site.as_deref().unwrap_or_else(|| client.default_site());
+    let site = args
+        .site
+        .as_deref()
+        .unwrap_or_else(|| client.default_site());
 
     // Map enum to controller command string. Command spellings are closed —
     // the controller returns `rc: "ok"` for garbage commands, so validation
@@ -262,17 +264,19 @@ pub async fn device_action(
         DeviceAction::Locate => "set-locate",
         DeviceAction::Adopt => {
             return Err(crate::error::UnifiError::Malformed(
-                "action `adopt` not yet wired; no command spelling verified from controller".to_owned()
+                "action `adopt` not yet wired; no command spelling verified from controller"
+                    .to_owned(),
             ));
         }
         DeviceAction::Upgrade => {
             return Err(crate::error::UnifiError::Malformed(
-                "action `upgrade` not yet wired; no command spelling verified from controller".to_owned()
+                "action `upgrade` not yet wired; no command spelling verified from controller"
+                    .to_owned(),
             ));
         }
         DeviceAction::PortAction => {
             return Err(crate::error::UnifiError::Malformed(
-                "action `port_action` not yet wired; requires port operation parameter".to_owned()
+                "action `port_action` not yet wired; requires port operation parameter".to_owned(),
             ));
         }
     };
@@ -284,7 +288,9 @@ pub async fn device_action(
 
     let path = format!("/proxy/network/api/s/{}/cmd/devmgr", site);
 
-    client.post(crate::ApiSurface::PrivateV1, &path, &[], &[], &body).await
+    client
+        .post(crate::ApiSurface::PrivateV1, &path, &[], &[], &body)
+        .await
 }
 
 /// Execute an operational action on a client/station.
@@ -301,7 +307,10 @@ pub async fn client_action(
 ) -> Result<serde_json::Value, crate::error::UnifiError> {
     args.validate()?;
 
-    let site = args.site.as_deref().unwrap_or_else(|| client.default_site());
+    let site = args
+        .site
+        .as_deref()
+        .unwrap_or_else(|| client.default_site());
 
     // Map enum to controller command string. Conservative: only wire what we
     // have evidence for.
@@ -311,12 +320,14 @@ pub async fn client_action(
         ClientAction::Reconnect => "kick-sta",
         ClientAction::Authorize => {
             return Err(crate::error::UnifiError::Malformed(
-                "action `authorize` not yet wired; requires authorization duration parameter".to_owned()
+                "action `authorize` not yet wired; requires authorization duration parameter"
+                    .to_owned(),
             ));
         }
         ClientAction::LimitBandwidth => {
             return Err(crate::error::UnifiError::Malformed(
-                "action `limit_bandwidth` not yet wired; requires bandwidth limit parameters".to_owned()
+                "action `limit_bandwidth` not yet wired; requires bandwidth limit parameters"
+                    .to_owned(),
             ));
         }
     };
@@ -328,7 +339,9 @@ pub async fn client_action(
 
     let path = format!("/proxy/network/api/s/{}/cmd/stamgr", site);
 
-    client.post(crate::ApiSurface::PrivateV1, &path, &[], &[], &body).await
+    client
+        .post(crate::ApiSurface::PrivateV1, &path, &[], &[], &body)
+        .await
 }
 
 /// Execute a backup action on the controller.
@@ -348,7 +361,7 @@ pub async fn backup_action(
     args.validate()?;
 
     Err(crate::error::UnifiError::Malformed(
-        "backup actions not yet wired; no endpoint spellings verified from controller".to_owned()
+        "backup actions not yet wired; no endpoint spellings verified from controller".to_owned(),
     ))
 }
 
@@ -364,7 +377,7 @@ pub async fn run_speed_test(
     args.validate()?;
 
     Err(crate::error::UnifiError::Malformed(
-        "speed test not yet wired; no endpoint spelling verified from controller".to_owned()
+        "speed test not yet wired; no endpoint spelling verified from controller".to_owned(),
     ))
 }
 
@@ -382,8 +395,8 @@ mod tests {
             ("port_action", DeviceAction::PortAction),
         ] {
             let json = format!(r#""{raw}""#);
-            let parsed: DeviceAction = serde_json::from_str(&json)
-                .unwrap_or_else(|e| panic!("{raw}: {e}"));
+            let parsed: DeviceAction =
+                serde_json::from_str(&json).unwrap_or_else(|e| panic!("{raw}: {e}"));
             assert_eq!(parsed, expected);
         }
     }
@@ -408,7 +421,13 @@ mod tests {
 
     #[test]
     fn client_actions_parse_from_their_documented_spellings() {
-        for raw in ["block", "unblock", "reconnect", "authorize", "limit_bandwidth"] {
+        for raw in [
+            "block",
+            "unblock",
+            "reconnect",
+            "authorize",
+            "limit_bandwidth",
+        ] {
             let json = format!(r#""{raw}""#);
             let parsed: Result<ClientAction, _> = serde_json::from_str(&json);
             assert!(parsed.is_ok(), "{raw} must parse");
@@ -425,8 +444,8 @@ mod tests {
             ("validate", BackupAction::Validate),
         ] {
             let json = format!(r#""{raw}""#);
-            let parsed: BackupAction = serde_json::from_str(&json)
-                .unwrap_or_else(|e| panic!("{raw}: {e}"));
+            let parsed: BackupAction =
+                serde_json::from_str(&json).unwrap_or_else(|e| panic!("{raw}: {e}"));
             assert_eq!(parsed, expected);
         }
     }
@@ -438,7 +457,10 @@ mod tests {
     fn backup_restore_is_refused_at_parse_time() {
         use super::BackupAction;
         let parsed: Result<BackupAction, _> = serde_json::from_str(r#""restore""#);
-        assert!(parsed.is_err(), "restore must be a parse error, not a runtime refusal");
+        assert!(
+            parsed.is_err(),
+            "restore must be a parse error, not a runtime refusal"
+        );
     }
 
     /// The restore refusal error message must explain the reason and name the
@@ -447,7 +469,9 @@ mod tests {
     fn backup_restore_error_explains_the_governed_path() {
         use super::BackupAction;
         let parsed: Result<BackupAction, _> = serde_json::from_str(r#""restore""#);
-        let err_msg = parsed.expect_err("restore must be refused at parse time").to_string();
+        let err_msg = parsed
+            .expect_err("restore must be refused at parse time")
+            .to_string();
         assert!(
             err_msg.contains("change-set lifecycle") || err_msg.contains("change_set"),
             "error must explain why restore is refused, got: {err_msg}"
@@ -502,8 +526,7 @@ mod tests {
         use schemars::JsonSchema;
 
         let schema = super::BackupAction::json_schema(&mut schemars::SchemaGenerator::default());
-        let schema_value = serde_json::to_value(schema)
-            .expect("schema must serialize to JSON");
+        let schema_value = serde_json::to_value(schema).expect("schema must serialize to JSON");
 
         let enum_values = schema_value
             .get("enum")
@@ -563,11 +586,7 @@ mod tests {
 
             // Validate alone must succeed for these — the refusal happens in
             // the dispatch, not in validation.
-            assert!(
-                args.validate().is_ok(),
-                "{:?} must pass validation",
-                action
-            );
+            assert!(args.validate().is_ok(), "{:?} must pass validation", action);
         }
     }
 
@@ -584,11 +603,7 @@ mod tests {
                 site: None,
             };
 
-            assert!(
-                args.validate().is_ok(),
-                "{:?} must pass validation",
-                action
-            );
+            assert!(args.validate().is_ok(), "{:?} must pass validation", action);
         }
     }
 }

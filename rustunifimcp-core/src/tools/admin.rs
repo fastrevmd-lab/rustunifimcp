@@ -4,7 +4,7 @@ use crate::client::UnifiClient;
 use crate::error::UnifiError;
 use crate::inventory::{Controller, ControllerRegistry};
 use crate::tools::{TOOL_NAMES, WRITE_TOOLS};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /// Build a redacted view of one controller for list_controllers.
 ///
@@ -31,9 +31,7 @@ fn redacted_controller_view(name: &str, controller: &Controller) -> Value {
 /// # Errors
 ///
 /// Returns [`UnifiError::Inventory`] if the registry cannot be accessed.
-pub async fn unifi_list_controllers(
-    registry: &ControllerRegistry,
-) -> Result<Value, UnifiError> {
+pub async fn unifi_list_controllers(registry: &ControllerRegistry) -> Result<Value, UnifiError> {
     let names = registry.names();
     let mut controllers = Vec::new();
 

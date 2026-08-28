@@ -4,10 +4,10 @@
 //! for, with the join done server-side rather than orchestrated by a model one
 //! tool call at a time.
 
+use crate::ApiSurface;
 use crate::client::UnifiClient;
 use crate::error::UnifiError;
 use crate::model::ResourceKind;
-use crate::ApiSurface;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -437,10 +437,7 @@ pub async fn traffic_flow_report(
     if let Some(end) = args.end {
         query.push(("end", end.to_string()));
     }
-    let query_refs: Vec<(&str, &str)> = query
-        .iter()
-        .map(|(k, v)| (*k, v.as_str()))
-        .collect();
+    let query_refs: Vec<(&str, &str)> = query.iter().map(|(k, v)| (*k, v.as_str())).collect();
 
     match client
         .get(
@@ -561,12 +558,11 @@ pub async fn firewall_audit(
         ));
     }
 
-    build_firewall_audit(&policies_result, &zones_result)
-        .map(|mut report| {
-            report.partial = !omitted.is_empty();
-            report.omitted = omitted;
-            report
-        })
+    build_firewall_audit(&policies_result, &zones_result).map(|mut report| {
+        report.partial = !omitted.is_empty();
+        report.omitted = omitted;
+        report
+    })
 }
 
 /// Generate a client troubleshoot report.
@@ -717,9 +713,11 @@ pub fn build_firewall_audit(
     zones: &serde_json::Value,
 ) -> Result<FirewallAuditReport, UnifiError> {
     // Policies and zones can be either bare arrays (PrivateV2) or enveloped (tests)
-    let policies_array = policies.as_array()
+    let policies_array = policies
+        .as_array()
         .or_else(|| policies.get("data").and_then(|d| d.as_array()));
-    let zones_array = zones.as_array()
+    let zones_array = zones
+        .as_array()
         .or_else(|| zones.get("data").and_then(|d| d.as_array()));
 
     let ran = policies_array.is_some() || zones_array.is_some();
@@ -756,41 +754,47 @@ pub fn build_client_troubleshoot(
     let devices_data = crate::model::unwrap_enveloped_data(devices)?;
 
     // Policies and zones can be bare arrays or enveloped
-    let policies_array = policies.as_array()
+    let policies_array = policies
+        .as_array()
         .or_else(|| policies.get("data").and_then(|d| d.as_array()));
-    let zones_array = zones.as_array()
+    let zones_array = zones
+        .as_array()
         .or_else(|| zones.get("data").and_then(|d| d.as_array()));
 
     // Find the station by MAC - if not found, this is an error
     let station = stations_data
         .iter()
         .find(|s| s.get("mac").and_then(|v| v.as_str()) == Some(mac))
-        .ok_or_else(|| {
-            UnifiError::Malformed(format!("station {mac} not found on site {site}"))
-        })?;
+        .ok_or_else(|| UnifiError::Malformed(format!("station {mac} not found on site {site}")))?;
 
     let association = Some(station.clone());
 
     // Find the uplink device by matching the station's last_uplink_mac
-    let uplink_device = if let Some(uplink_mac) = station.get("last_uplink_mac").and_then(|v| v.as_str()) {
-        devices_data
-            .iter()
-            .find(|d| d.get("macAddress").and_then(|v| v.as_str()) == Some(uplink_mac))
-            .cloned()
-    } else {
-        None
-    };
+    let uplink_device =
+        if let Some(uplink_mac) = station.get("last_uplink_mac").and_then(|v| v.as_str()) {
+            devices_data
+                .iter()
+                .find(|d| d.get("macAddress").and_then(|v| v.as_str()) == Some(uplink_mac))
+                .cloned()
+        } else {
+            None
+        };
 
     // Build the real correlation: network_id -> zone_id -> policies
     let mut omitted = Vec::new();
-    let applied_policies = if let Some(network_id) = station.get("network_id").and_then(|v| v.as_str()) {
+    let applied_policies = if let Some(network_id) =
+        station.get("network_id").and_then(|v| v.as_str())
+    {
         if let (Some(zones_arr), Some(policies_arr)) = (zones_array, policies_array) {
             // Find zones that contain this network_id
             let matching_zone_ids: Vec<&str> = zones_arr
                 .iter()
                 .filter_map(|zone| {
                     if let Some(network_ids) = zone.get("network_ids").and_then(|v| v.as_array()) {
-                        if network_ids.iter().any(|nid| nid.as_str() == Some(network_id)) {
+                        if network_ids
+                            .iter()
+                            .any(|nid| nid.as_str() == Some(network_id))
+                        {
                             zone.get("_id").and_then(|v| v.as_str())
                         } else {
                             None
@@ -814,16 +818,18 @@ pub fn build_client_troubleshoot(
                     }
 
                     // Check if policy references any of the matching zones
-                    let source_zone = p.get("source")
+                    let source_zone = p
+                        .get("source")
                         .and_then(|s| s.get("zone_id"))
                         .and_then(|v| v.as_str());
-                    let dest_zone = p.get("destination")
+                    let dest_zone = p
+                        .get("destination")
                         .and_then(|d| d.get("zone_id"))
                         .and_then(|v| v.as_str());
 
-                    matching_zone_ids.iter().any(|&zone_id| {
-                        Some(zone_id) == source_zone || Some(zone_id) == dest_zone
-                    })
+                    matching_zone_ids
+                        .iter()
+                        .any(|&zone_id| Some(zone_id) == source_zone || Some(zone_id) == dest_zone)
                 })
                 .cloned()
                 .collect();
@@ -874,9 +880,9 @@ fn join_devices_with_stats(
         .map(|device| {
             let mut enriched = device.clone();
             if let Some(mac) = device.get("macAddress").and_then(|v| v.as_str())
-                && let Some(stat) = stats.iter().find(|s| {
-                    s.get("mac").and_then(|v| v.as_str()) == Some(mac)
-                })
+                && let Some(stat) = stats
+                    .iter()
+                    .find(|s| s.get("mac").and_then(|v| v.as_str()) == Some(mac))
                 && let Some(obj) = enriched.as_object_mut()
             {
                 obj.insert("stats".to_owned(), stat.clone());
@@ -896,9 +902,9 @@ fn join_clients_with_stats(
         .map(|client| {
             let mut enriched = client.clone();
             if let Some(mac) = client.get("macAddress").and_then(|v| v.as_str())
-                && let Some(stat) = stats.iter().find(|s| {
-                    s.get("mac").and_then(|v| v.as_str()) == Some(mac)
-                })
+                && let Some(stat) = stats
+                    .iter()
+                    .find(|s| s.get("mac").and_then(|v| v.as_str()) == Some(mac))
                 && let Some(obj) = enriched.as_object_mut()
             {
                 obj.insert("flowStats".to_owned(), stat.clone());
@@ -949,7 +955,7 @@ fn extract_top_applications(stats: &[serde_json::Value]) -> Vec<serde_json::Valu
 
 #[cfg(test)]
 mod tests {
-    use crate::testing::{fixtures_available, fixture, DEFAULT_FIXTURE_VERSION};
+    use crate::testing::{DEFAULT_FIXTURE_VERSION, fixture, fixtures_available};
 
     /// Build a site health report from fixtures.
     ///
@@ -1001,7 +1007,9 @@ mod tests {
     #[test]
     fn the_health_report_accounts_for_every_device() {
         if !fixtures_available() {
-            eprintln!("SKIPPED: no fixtures. Run scripts/capture-fixtures.sh against a controller.");
+            eprintln!(
+                "SKIPPED: no fixtures. Run scripts/capture-fixtures.sh against a controller."
+            );
             return;
         }
 
@@ -1025,13 +1033,14 @@ mod tests {
     #[test]
     fn a_report_missing_a_private_surface_is_marked_partial() {
         if !fixtures_available() {
-            eprintln!("SKIPPED: no fixtures. Run scripts/capture-fixtures.sh against a controller.");
+            eprintln!(
+                "SKIPPED: no fixtures. Run scripts/capture-fixtures.sh against a controller."
+            );
             return;
         }
 
         let devices = fixture(DEFAULT_FIXTURE_VERSION, "devices");
-        let report = build_site_health_without_private(&devices)
-            .expect("builds");
+        let report = build_site_health_without_private(&devices).expect("builds");
         assert!(
             report.partial,
             "a report built without the private surfaces must declare itself partial"
@@ -1043,16 +1052,18 @@ mod tests {
     #[test]
     fn the_topology_report_includes_all_devices() {
         if !fixtures_available() {
-            eprintln!("SKIPPED: no fixtures. Run scripts/capture-fixtures.sh against a controller.");
+            eprintln!(
+                "SKIPPED: no fixtures. Run scripts/capture-fixtures.sh against a controller."
+            );
             return;
         }
 
         let devices = fixture(DEFAULT_FIXTURE_VERSION, "devices");
         let topology = fixture(DEFAULT_FIXTURE_VERSION, "topology");
 
-        let devices_data = crate::model::unwrap_enveloped_data(&devices)
-            .expect("devices unwrap");
-        let edges = topology.get("edges")
+        let devices_data = crate::model::unwrap_enveloped_data(&devices).expect("devices unwrap");
+        let edges = topology
+            .get("edges")
             .and_then(|v| v.as_array())
             .expect("topology has edges");
 
@@ -1076,17 +1087,17 @@ mod tests {
     #[test]
     fn the_traffic_flow_report_includes_clients() {
         if !fixtures_available() {
-            eprintln!("SKIPPED: no fixtures. Run scripts/capture-fixtures.sh against a controller.");
+            eprintln!(
+                "SKIPPED: no fixtures. Run scripts/capture-fixtures.sh against a controller."
+            );
             return;
         }
 
         let clients = fixture(DEFAULT_FIXTURE_VERSION, "clients");
         let stats = fixture(DEFAULT_FIXTURE_VERSION, "stat_sta");
 
-        let clients_data = crate::model::unwrap_enveloped_data(&clients)
-            .expect("clients unwrap");
-        let stats_data = crate::model::unwrap_enveloped_data(&stats)
-            .expect("stats unwrap");
+        let clients_data = crate::model::unwrap_enveloped_data(&clients).expect("clients unwrap");
+        let stats_data = crate::model::unwrap_enveloped_data(&stats).expect("stats unwrap");
 
         let joined = super::join_clients_with_stats(clients_data, stats_data);
         let top_apps = super::extract_top_applications(stats_data);
@@ -1109,7 +1120,7 @@ mod tests {
 
 #[cfg(test)]
 mod troubleshoot_tests {
-    use crate::testing::{fixtures_available, fixture, DEFAULT_FIXTURE_VERSION};
+    use crate::testing::{DEFAULT_FIXTURE_VERSION, fixture, fixtures_available};
 
     /// The whole point is the correlation. A troubleshoot result that answers
     /// only from the station record is the legacy get_client_details with more
@@ -1117,7 +1128,9 @@ mod troubleshoot_tests {
     #[test]
     fn troubleshoot_correlates_every_source_it_claims_to() {
         if !fixtures_available() {
-            eprintln!("SKIPPED: no fixtures. Run scripts/capture-fixtures.sh against a controller.");
+            eprintln!(
+                "SKIPPED: no fixtures. Run scripts/capture-fixtures.sh against a controller."
+            );
             return;
         }
 
@@ -1140,7 +1153,9 @@ mod troubleshoot_tests {
 
         // The correlation is real: policies reference zones that contain the station's network
         let station = result.association.as_ref().expect("association present");
-        let network_id = station.get("network_id").and_then(|v| v.as_str())
+        let network_id = station
+            .get("network_id")
+            .and_then(|v| v.as_str())
             .expect("station has network_id");
 
         // Find zones containing this network
@@ -1163,16 +1178,18 @@ mod troubleshoot_tests {
 
         // Verify all returned policies reference at least one of these zones
         for policy in &result.applied_policies {
-            let source_zone = policy.get("source")
+            let source_zone = policy
+                .get("source")
                 .and_then(|s| s.get("zone_id"))
                 .and_then(|v| v.as_str());
-            let dest_zone = policy.get("destination")
+            let dest_zone = policy
+                .get("destination")
                 .and_then(|d| d.get("zone_id"))
                 .and_then(|v| v.as_str());
 
-            let references_zone = zone_ids.iter().any(|&zid| {
-                Some(zid) == source_zone || Some(zid) == dest_zone
-            });
+            let references_zone = zone_ids
+                .iter()
+                .any(|&zid| Some(zid) == source_zone || Some(zid) == dest_zone);
 
             assert!(references_zone, "policy does not reference station's zones");
         }
@@ -1182,7 +1199,9 @@ mod troubleshoot_tests {
     #[test]
     fn missing_station_is_an_error() {
         if !fixtures_available() {
-            eprintln!("SKIPPED: no fixtures. Run scripts/capture-fixtures.sh against a controller.");
+            eprintln!(
+                "SKIPPED: no fixtures. Run scripts/capture-fixtures.sh against a controller."
+            );
             return;
         }
 
@@ -1192,13 +1211,24 @@ mod troubleshoot_tests {
         let zones = fixture(DEFAULT_FIXTURE_VERSION, "zones");
 
         let result = crate::tools::workflow::build_client_troubleshoot(
-            "02:00:00:00:00:ff", "default", &stations, &devices, &policies, &zones,
+            "02:00:00:00:00:ff",
+            "default",
+            &stations,
+            &devices,
+            &policies,
+            &zones,
         );
 
         assert!(result.is_err(), "missing station returned Ok");
         let err_msg = result.expect_err("result is error").to_string();
-        assert!(err_msg.contains("02:00:00:00:00:ff"), "error doesn't name the MAC");
-        assert!(err_msg.contains("not found"), "error doesn't say 'not found'");
+        assert!(
+            err_msg.contains("02:00:00:00:00:ff"),
+            "error doesn't name the MAC"
+        );
+        assert!(
+            err_msg.contains("not found"),
+            "error doesn't say 'not found'"
+        );
     }
 
     /// An audit that finds nothing must be distinguishable from an audit that
@@ -1207,8 +1237,8 @@ mod troubleshoot_tests {
     fn a_clean_firewall_audit_is_not_an_empty_one() {
         let policies = serde_json::json!({ "data": [] });
         let zones = serde_json::json!({ "data": [] });
-        let result = crate::tools::workflow::build_firewall_audit(&policies, &zones)
-            .expect("builds");
+        let result =
+            crate::tools::workflow::build_firewall_audit(&policies, &zones).expect("builds");
         assert_eq!(result.policies_examined, 0);
         assert!(result.findings.is_empty());
         assert!(result.ran, "a clean audit still ran");

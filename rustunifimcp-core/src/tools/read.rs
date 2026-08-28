@@ -5,10 +5,10 @@
 //! `get_x` pairs differing only in the resource addressed, and they are variants
 //! of `ResourceKind` here behind one documented envelope.
 
+use crate::ApiSurface;
 use crate::client::UnifiClient;
 use crate::error::UnifiError;
 use crate::model::ResourceKind;
-use crate::ApiSurface;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -115,8 +115,13 @@ fn parse_resource_list(
     raw: &serde_json::Value,
 ) -> Result<serde_json::Value, UnifiError> {
     use crate::model::device::parse_devices;
-    use crate::model::firewall::{parse_firewall_groups, parse_firewall_policies, parse_firewall_zones};
-    use crate::model::network::{parse_dhcp_reservations, parse_networks, parse_port_profiles, parse_radius_profiles, parse_wlans};
+    use crate::model::firewall::{
+        parse_firewall_groups, parse_firewall_policies, parse_firewall_zones,
+    };
+    use crate::model::network::{
+        parse_dhcp_reservations, parse_networks, parse_port_profiles, parse_radius_profiles,
+        parse_wlans,
+    };
     use crate::model::routing::parse_traffic_routes;
     use crate::model::station::parse_stations;
 
@@ -217,8 +222,13 @@ fn parse_single_resource(
     raw: &serde_json::Value,
 ) -> Result<serde_json::Value, UnifiError> {
     use crate::model::device::parse_devices;
-    use crate::model::firewall::{parse_firewall_groups, parse_firewall_policies, parse_firewall_zones};
-    use crate::model::network::{parse_dhcp_reservations, parse_networks, parse_port_profiles, parse_radius_profiles, parse_wlans};
+    use crate::model::firewall::{
+        parse_firewall_groups, parse_firewall_policies, parse_firewall_zones,
+    };
+    use crate::model::network::{
+        parse_dhcp_reservations, parse_networks, parse_port_profiles, parse_radius_profiles,
+        parse_wlans,
+    };
     use crate::model::routing::parse_traffic_routes;
     use crate::model::station::parse_stations;
 
@@ -339,12 +349,7 @@ pub async fn get_resource(
     let template = single_resource_template(args.kind);
 
     let raw = client
-        .get(
-            surface,
-            &template,
-            &[("site", site), ("id", &args.id)],
-            &[],
-        )
+        .get(surface, &template, &[("site", site), ("id", &args.id)], &[])
         .await?;
 
     parse_single_resource(args.kind, &raw)
@@ -384,13 +389,15 @@ pub async fn query_stats(
         query.push(("end", end.to_string()));
     }
 
-    let query_refs: Vec<(&str, &str)> = query
-        .iter()
-        .map(|(k, v)| (*k, v.as_str()))
-        .collect();
+    let query_refs: Vec<(&str, &str)> = query.iter().map(|(k, v)| (*k, v.as_str())).collect();
 
     client
-        .get(ApiSurface::PrivateV1, endpoint, &[("site", site)], &query_refs)
+        .get(
+            ApiSurface::PrivateV1,
+            endpoint,
+            &[("site", site)],
+            &query_refs,
+        )
         .await
 }
 
@@ -567,9 +574,15 @@ mod tests {
         let needle = format!("{}/{}{}\"", "format!(\"{}", "{", "{}}");
         for (name, source) in [
             ("tools/read.rs", include_str!("read.rs")),
-            ("changeset/preimage.rs", include_str!("../changeset/preimage.rs")),
+            (
+                "changeset/preimage.rs",
+                include_str!("../changeset/preimage.rs"),
+            ),
             ("changeset/apply.rs", include_str!("../changeset/apply.rs")),
-            ("changeset/rollback.rs", include_str!("../changeset/rollback.rs")),
+            (
+                "changeset/rollback.rs",
+                include_str!("../changeset/rollback.rs"),
+            ),
             ("client.rs", include_str!("../client.rs")),
         ] {
             assert!(
@@ -592,13 +605,11 @@ mod tests {
     fn every_kind_expands_to_a_usable_single_resource_path() {
         for &kind in crate::model::ResourceKind::ALL {
             let template = super::single_resource_template(kind);
-            let expanded = mecmcp_openapi::expand_path(
-                &template,
-                &[("site", "default"), ("id", "abc123")],
-            )
-            .unwrap_or_else(|error| {
-                panic!("{kind:?} single-resource path does not expand: {error}")
-            });
+            let expanded =
+                mecmcp_openapi::expand_path(&template, &[("site", "default"), ("id", "abc123")])
+                    .unwrap_or_else(|error| {
+                        panic!("{kind:?} single-resource path does not expand: {error}")
+                    });
             assert!(
                 expanded.ends_with("/abc123"),
                 "{kind:?} expanded to {expanded}, which does not address the id"
@@ -666,7 +677,10 @@ mod tests {
             "omitted": ["sites: controller has allow_private_api disabled"]
         });
 
-        assert_eq!(partial_result.get("partial").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(
+            partial_result.get("partial").and_then(|v| v.as_bool()),
+            Some(true)
+        );
         let omitted = partial_result.get("omitted").and_then(|v| v.as_array());
         assert!(omitted.is_some(), "omitted field must be present");
         if let Some(arr) = omitted {
@@ -677,9 +691,8 @@ mod tests {
     /// The all-legs-refused error message must be recognizable.
     #[test]
     fn search_all_legs_refused_error_is_descriptive() {
-        let error = UnifiError::Malformed(
-            "all search legs refused: nothing was searched".to_owned(),
-        );
+        let error =
+            UnifiError::Malformed("all search legs refused: nothing was searched".to_owned());
         let error_text = error.to_string();
         assert!(
             error_text.contains("all search legs refused"),
@@ -696,10 +709,12 @@ mod tests {
     #[test]
     fn every_resource_kind_has_a_parser_wired() {
         use crate::model::ResourceKind;
-        use crate::testing::{fixture, fixtures_available, DEFAULT_FIXTURE_VERSION};
+        use crate::testing::{DEFAULT_FIXTURE_VERSION, fixture, fixtures_available};
 
         if !fixtures_available() {
-            eprintln!("SKIPPED: no fixtures. Run scripts/capture-fixtures.sh against a controller.");
+            eprintln!(
+                "SKIPPED: no fixtures. Run scripts/capture-fixtures.sh against a controller."
+            );
             return;
         }
 
@@ -733,10 +748,12 @@ mod tests {
     /// so callers got all 260 user records instead of the 46 actual reservations.
     #[test]
     fn dhcp_reservation_list_is_filtered() {
-        use crate::testing::{fixture, fixtures_available, DEFAULT_FIXTURE_VERSION};
+        use crate::testing::{DEFAULT_FIXTURE_VERSION, fixture, fixtures_available};
 
         if !fixtures_available() {
-            eprintln!("SKIPPED: no fixtures. Run scripts/capture-fixtures.sh against a controller.");
+            eprintln!(
+                "SKIPPED: no fixtures. Run scripts/capture-fixtures.sh against a controller."
+            );
             return;
         }
 
@@ -747,10 +764,7 @@ mod tests {
 
         let parsed = super::parse_resource_list(ResourceKind::DhcpReservation, &raw)
             .expect("parse dhcp reservations");
-        let parsed_count = parsed
-            .as_array()
-            .expect("parsed result is an array")
-            .len();
+        let parsed_count = parsed.as_array().expect("parsed result is an array").len();
 
         assert!(
             parsed_count < total_users,

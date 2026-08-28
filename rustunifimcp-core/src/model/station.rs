@@ -33,8 +33,9 @@ pub struct Station {
 pub fn parse_stations(val: &serde_json::Value) -> Result<Vec<Station>, UnifiError> {
     let data = super::unwrap_enveloped_data(val)?;
     data.iter()
-        .map(|item| serde_json::from_value(item.clone()).map_err(|e| {
-            UnifiError::Malformed(format!("station parse failed: {e}"))
-        }))
+        .map(|item| {
+            serde_json::from_value(item.clone())
+                .map_err(|e| UnifiError::Malformed(format!("station parse failed: {e}")))
+        })
         .collect()
 }

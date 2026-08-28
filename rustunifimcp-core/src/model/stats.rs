@@ -30,9 +30,10 @@ pub struct StationStats {
 pub fn parse_device_stats(val: &serde_json::Value) -> Result<Vec<DeviceStats>, UnifiError> {
     let data = super::unwrap_enveloped_data(val)?;
     data.iter()
-        .map(|item| serde_json::from_value(item.clone()).map_err(|e| {
-            UnifiError::Malformed(format!("device stats parse failed: {e}"))
-        }))
+        .map(|item| {
+            serde_json::from_value(item.clone())
+                .map_err(|e| UnifiError::Malformed(format!("device stats parse failed: {e}")))
+        })
         .collect()
 }
 
@@ -40,8 +41,9 @@ pub fn parse_device_stats(val: &serde_json::Value) -> Result<Vec<DeviceStats>, U
 pub fn parse_station_stats(val: &serde_json::Value) -> Result<Vec<StationStats>, UnifiError> {
     let data = super::unwrap_enveloped_data(val)?;
     data.iter()
-        .map(|item| serde_json::from_value(item.clone()).map_err(|e| {
-            UnifiError::Malformed(format!("station stats parse failed: {e}"))
-        }))
+        .map(|item| {
+            serde_json::from_value(item.clone())
+                .map_err(|e| UnifiError::Malformed(format!("station stats parse failed: {e}")))
+        })
         .collect()
 }

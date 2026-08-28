@@ -61,7 +61,10 @@ where
 {
     // Refuse if the controller moved under the approval, and refuse equally
     // when the check itself could not be completed.
-    if !matches!(controller.preimage_matches(preimage, mutations).await, Ok(true)) {
+    if !matches!(
+        controller.preimage_matches(preimage, mutations).await,
+        Ok(true)
+    ) {
         return Outcome {
             state: State::RefusedStale,
             succeeded: Vec::new(),
@@ -76,7 +79,8 @@ where
     let mut succeeded = Vec::new();
     let mut attempted_and_failed = Vec::new();
     let mut never_attempted = Vec::new();
-    let mut created_ids: std::collections::HashMap<usize, String> = std::collections::HashMap::new();
+    let mut created_ids: std::collections::HashMap<usize, String> =
+        std::collections::HashMap::new();
 
     // Apply mutations sequentially
     for (index, mutation) in mutations.iter().enumerate() {
@@ -116,7 +120,8 @@ where
     }
 
     // Partial failure - attempt rollback
-    let rollback_result = rollback_to_preimage(controller, preimage, &succeeded, &created_ids).await;
+    let rollback_result =
+        rollback_to_preimage(controller, preimage, &succeeded, &created_ids).await;
 
     let mut failed = attempted_and_failed.clone();
     failed.extend(never_attempted.clone());
@@ -193,7 +198,9 @@ pub trait ControllerOps {
         &self,
         kind: &str,
         id: &str,
-    ) -> impl std::future::Future<Output = Result<Option<serde_json::Value>, crate::error::UnifiError>> + Send;
+    ) -> impl std::future::Future<
+        Output = Result<Option<serde_json::Value>, crate::error::UnifiError>,
+    > + Send;
 
     /// Verify that mutations were applied as expected.
     ///
@@ -226,7 +233,9 @@ pub async fn verify_applied<C>(
 where
     C: ControllerOps,
 {
-    controller.verify_applied(mutations, &std::collections::HashMap::new()).await
+    controller
+        .verify_applied(mutations, &std::collections::HashMap::new())
+        .await
 }
 
 /// Verify that mutations were applied as expected.

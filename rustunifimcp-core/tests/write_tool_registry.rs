@@ -64,8 +64,8 @@ fn every_write_tool_is_a_registered_tool() {
 fn every_mutating_name_is_in_the_write_registry() {
     // Tool names containing these verbs imply mutation.
     const MUTATION_VERBS: &[&str] = &[
-        "add", "create", "update", "delete", "set", "apply", "approve", "stage",
-        "action", "restart", "run", "remove", "destroy", "modify", "write",
+        "add", "create", "update", "delete", "set", "apply", "approve", "stage", "action",
+        "restart", "run", "remove", "destroy", "modify", "write",
     ];
 
     // Tools that match a verb but are genuinely read-only. Each entry must
@@ -77,9 +77,7 @@ fn every_mutating_name_is_in_the_write_registry() {
 
     for &tool in TOOL_NAMES {
         let name_lower = tool.to_lowercase();
-        let matches_verb = MUTATION_VERBS
-            .iter()
-            .any(|verb| name_lower.contains(verb));
+        let matches_verb = MUTATION_VERBS.iter().any(|verb| name_lower.contains(verb));
 
         if matches_verb && !READ_ONLY_ALLOWLIST.contains(&tool) {
             assert!(

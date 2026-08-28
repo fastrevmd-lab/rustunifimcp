@@ -20,8 +20,9 @@ pub struct Site {
 pub fn parse_sites(val: &serde_json::Value) -> Result<Vec<Site>, UnifiError> {
     let data = super::unwrap_enveloped_data(val)?;
     data.iter()
-        .map(|item| serde_json::from_value(item.clone()).map_err(|e| {
-            UnifiError::Malformed(format!("site parse failed: {e}"))
-        }))
+        .map(|item| {
+            serde_json::from_value(item.clone())
+                .map_err(|e| UnifiError::Malformed(format!("site parse failed: {e}")))
+        })
         .collect()
 }

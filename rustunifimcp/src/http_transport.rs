@@ -44,8 +44,7 @@ pub fn build_http_router(
     allow_insecure_bind: bool,
     shutdown: CancellationToken,
 ) -> Result<ServePlan, HttpTransportBuildError> {
-    let identity =
-        TransportIdentity::new("rustunifimcp", "unifi", "rustunifimcp", ["controller"]);
+    let identity = TransportIdentity::new("rustunifimcp", "unifi", "rustunifimcp", ["controller"]);
     let host_origin = HostOriginPolicy::enforced(allowed_hosts, allowed_origins);
 
     let config = if let Some(store_file) = token_store {

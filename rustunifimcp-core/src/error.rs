@@ -116,7 +116,9 @@ fn http_error_class(error: &mecmcp_http::HttpError) -> String {
         HttpError::MissingHost { .. } => "URL has no host component".to_owned(),
         HttpError::UrlHasEmbeddedCredentials { .. } => "URL embeds credentials".to_owned(),
         HttpError::InvalidHeaderName { name } => format!("invalid header name '{name}'"),
-        HttpError::FramingHeaderNotAllowed { name } => format!("header '{name}' cannot be supplied"),
+        HttpError::FramingHeaderNotAllowed { name } => {
+            format!("header '{name}' cannot be supplied")
+        }
         HttpError::InvalidHeaderValue { name } => format!("invalid header value for '{name}'"),
         HttpError::ConfigValidation { field, detail } => {
             format!("configuration field '{field}': {detail}")
@@ -178,7 +180,10 @@ mod tests {
         };
         let rendered = error.to_string();
         assert!(rendered.contains("PrivateV2"), "{rendered}");
-        assert!(rendered.contains("/v2/api/site/default/traffic-flows"), "{rendered}");
+        assert!(
+            rendered.contains("/v2/api/site/default/traffic-flows"),
+            "{rendered}"
+        );
         assert!(rendered.contains("9.1.0"), "{rendered}");
     }
 
@@ -222,18 +227,30 @@ mod tests {
         for error in test_cases {
             // Check the top-level Display
             let rendered = error.to_string();
-            assert!(!rendered.contains("://"), "variant rendered a URL: {rendered}");
-            assert!(!rendered.contains("X-API-KEY"), "variant rendered a header: {rendered}");
+            assert!(
+                !rendered.contains("://"),
+                "variant rendered a URL: {rendered}"
+            );
+            assert!(
+                !rendered.contains("X-API-KEY"),
+                "variant rendered a header: {rendered}"
+            );
 
             // Check the full source chain with {:#}
             let alternate = format!("{error:#}");
-            assert!(!alternate.contains("://"), "source chain contains URL: {alternate}");
+            assert!(
+                !alternate.contains("://"),
+                "source chain contains URL: {alternate}"
+            );
 
             // Walk the source() chain
             let mut current: &dyn Error = &error;
             while let Some(source) = current.source() {
                 let source_str = source.to_string();
-                assert!(!source_str.contains("://"), "source chain contains URL: {source_str}");
+                assert!(
+                    !source_str.contains("://"),
+                    "source chain contains URL: {source_str}"
+                );
                 current = source;
             }
         }

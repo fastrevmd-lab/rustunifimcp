@@ -39,8 +39,8 @@ impl Preimage {
         client: &crate::client::UnifiClient,
         mutations: &[StagedMutation],
     ) -> Result<Self, UnifiError> {
-        use crate::model::{unwrap_enveloped_data, ResourceKind};
         use crate::ApiSurface;
+        use crate::model::{ResourceKind, unwrap_enveloped_data};
 
         let mut data = Vec::new();
 
@@ -61,10 +61,13 @@ impl Preimage {
                 StagedMutation::Update { kind, id, .. } | StagedMutation::Delete { kind, id } => {
                     // Parse the kind string to ResourceKind
                     let kind_value = serde_json::Value::String(kind.clone());
-                    let resource_kind: ResourceKind = serde_json::from_value(kind_value)
-                        .map_err(|e| UnifiError::Malformed(format!(
-                            "invalid resource kind '{}': {}", kind, e
-                        )))?;
+                    let resource_kind: ResourceKind =
+                        serde_json::from_value(kind_value).map_err(|e| {
+                            UnifiError::Malformed(format!(
+                                "invalid resource kind '{}': {}",
+                                kind, e
+                            ))
+                        })?;
 
                     let surface = resource_kind.surface();
                     let site = client.default_site_for(surface).await?;
@@ -72,17 +75,14 @@ impl Preimage {
 
                     // Fetch the resource
                     let raw = client
-                        .get(
-                            surface,
-                            &template,
-                            &[("site", &site), ("id", id)],
-                            &[],
-                        )
+                        .get(surface, &template, &[("site", &site), ("id", id)], &[])
                         .await
-                        .map_err(|e| UnifiError::Malformed(format!(
-                            "failed to capture pre-image for {} {}: {}",
-                            kind, id, e
-                        )))?;
+                        .map_err(|e| {
+                            UnifiError::Malformed(format!(
+                                "failed to capture pre-image for {} {}: {}",
+                                kind, id, e
+                            ))
+                        })?;
 
                     // Extract the resource from the envelope based on surface
                     let resource = match surface {
@@ -91,7 +91,8 @@ impl Preimage {
                             let items = unwrap_enveloped_data(&raw)?;
                             if items.is_empty() {
                                 return Err(UnifiError::Malformed(format!(
-                                    "resource {} {} not found for pre-image capture", kind, id
+                                    "resource {} {} not found for pre-image capture",
+                                    kind, id
                                 )));
                             }
                             items[0].clone()
@@ -101,7 +102,8 @@ impl Preimage {
                             if let Some(arr) = raw.as_array() {
                                 if arr.is_empty() {
                                     return Err(UnifiError::Malformed(format!(
-                                        "resource {} {} not found for pre-image capture", kind, id
+                                        "resource {} {} not found for pre-image capture",
+                                        kind, id
                                     )));
                                 }
                                 arr[0].clone()
@@ -110,13 +112,14 @@ impl Preimage {
                                 raw
                             } else {
                                 return Err(UnifiError::Malformed(format!(
-                                    "unexpected response format for {} {}", kind, id
+                                    "unexpected response format for {} {}",
+                                    kind, id
                                 )));
                             }
                         }
                         ApiSurface::Cloud => {
                             return Err(UnifiError::Malformed(
-                                "cloud surface not supported".to_owned()
+                                "cloud surface not supported".to_owned(),
                             ));
                         }
                     };
@@ -171,7 +174,6 @@ impl Preimage {
             None
         }
     }
-
 }
 
 /// A planned mutation against live configuration.
@@ -268,22 +270,17 @@ impl StagedMutation {
 
 #[cfg(test)]
 mod tests {
-    use crate::testing::{fixture, DEFAULT_FIXTURE_VERSION};
+    use crate::testing::{DEFAULT_FIXTURE_VERSION, fixture};
 
     /// The pre-image is the only thing standing between a partial apply and an
     /// unrecoverable one. If a staged mutation touches a resource the pre-image
     /// does not cover, the change set must be refused before apply.
     #[test]
     fn a_mutation_outside_the_preimage_is_refused() {
-        let preimage = super::Preimage::from_fixture(&fixture(
-            DEFAULT_FIXTURE_VERSION,
-            "networkconf",
-        ));
-        let staged = super::StagedMutation::update(
-            "firewall_policy",
-            "abc123",
-            serde_json::json!({}),
-        );
+        let preimage =
+            super::Preimage::from_fixture(&fixture(DEFAULT_FIXTURE_VERSION, "networkconf"));
+        let staged =
+            super::StagedMutation::update("firewall_policy", "abc123", serde_json::json!({}));
         assert!(
             super::super::validate::validate_locally(&preimage, &[staged]).is_err(),
             "a mutation with no pre-image coverage must not reach apply"
@@ -300,9 +297,11 @@ mod restore_tests {
     #[test]
     fn restore_is_not_reachable_through_backup_action() {
         let raw = r#"{"controller":"home","action":"restore","backup_id":"x"}"#;
-        let parsed: Result<crate::tools::ops::BackupActionArgs, _> =
-            serde_json::from_str(raw);
-        assert!(parsed.is_err(), "restore must not parse as an operational action");
+        let parsed: Result<crate::tools::ops::BackupActionArgs, _> = serde_json::from_str(raw);
+        assert!(
+            parsed.is_err(),
+            "restore must not parse as an operational action"
+        );
     }
 
     #[test]
@@ -311,6 +310,9 @@ mod restore_tests {
         let rendered = staged.preview();
         let lowered = rendered.to_lowercase();
         assert!(lowered.contains("entire"), "{rendered}");
-        assert!(lowered.contains("cannot be undone by rollback"), "{rendered}");
+        assert!(
+            lowered.contains("cannot be undone by rollback"),
+            "{rendered}"
+        );
     }
 }

@@ -18,10 +18,16 @@ pub struct Route {
     /// Whether the route is enabled.
     pub enabled: bool,
     /// Static route network (CIDR).
-    #[serde(rename = "static-route_network", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "static-route_network",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub static_route_network: Option<String>,
     /// Static route next-hop.
-    #[serde(rename = "static-route_nexthop", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "static-route_nexthop",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub static_route_nexthop: Option<String>,
 }
 
@@ -40,9 +46,10 @@ pub struct TrafficRoute {
 pub fn parse_routes(val: &serde_json::Value) -> Result<Vec<Route>, UnifiError> {
     let data = super::unwrap_enveloped_data(val)?;
     data.iter()
-        .map(|item| serde_json::from_value(item.clone()).map_err(|e| {
-            UnifiError::Malformed(format!("route parse failed: {e}"))
-        }))
+        .map(|item| {
+            serde_json::from_value(item.clone())
+                .map_err(|e| UnifiError::Malformed(format!("route parse failed: {e}")))
+        })
         .collect()
 }
 
@@ -50,8 +57,9 @@ pub fn parse_routes(val: &serde_json::Value) -> Result<Vec<Route>, UnifiError> {
 pub fn parse_traffic_routes(val: &serde_json::Value) -> Result<Vec<TrafficRoute>, UnifiError> {
     let data = super::unwrap_private_v2_data(val)?;
     data.iter()
-        .map(|item| serde_json::from_value(item.clone()).map_err(|e| {
-            UnifiError::Malformed(format!("traffic route parse failed: {e}"))
-        }))
+        .map(|item| {
+            serde_json::from_value(item.clone())
+                .map_err(|e| UnifiError::Malformed(format!("traffic route parse failed: {e}")))
+        })
         .collect()
 }

@@ -88,8 +88,7 @@ impl Controller {
         }
         match (&self.api_key_env, &self.api_key_file) {
             (Some(_), Some(_)) => Err(UnifiError::Malformed(
-                "controller names both api_key_env and api_key_file; name exactly one"
-                    .to_owned(),
+                "controller names both api_key_env and api_key_file; name exactly one".to_owned(),
             )),
             (None, None) => Err(UnifiError::Malformed(
                 "controller names neither api_key_env nor api_key_file".to_owned(),

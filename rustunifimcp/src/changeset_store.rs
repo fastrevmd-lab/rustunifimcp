@@ -49,10 +49,11 @@ fn write_atomically(path: &std::path::Path, contents: &str) -> Result<(), String
     let directory = path.parent().unwrap_or_else(|| std::path::Path::new("."));
     let temporary = directory.join(format!(
         ".{}.tmp",
-        path.file_name().and_then(|n| n.to_str()).unwrap_or("changesets")
+        path.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("changesets")
     ));
-    std::fs::write(&temporary, contents)
-        .map_err(|e| format!("failed to write state file: {e}"))?;
+    std::fs::write(&temporary, contents).map_err(|e| format!("failed to write state file: {e}"))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -60,8 +61,7 @@ fn write_atomically(path: &std::path::Path, contents: &str) -> Result<(), String
         std::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(0o600))
             .map_err(|e| format!("failed to set state file permissions: {e}"))?;
     }
-    std::fs::rename(&temporary, path)
-        .map_err(|e| format!("failed to commit state file: {e}"))
+    std::fs::rename(&temporary, path).map_err(|e| format!("failed to commit state file: {e}"))
 }
 
 /// In-memory change-set store with optional file persistence.
@@ -114,8 +114,7 @@ impl ChangeSetStore {
     ///
     /// Returns an error if the state file cannot be written.
     pub fn insert(&self, set: ChangeSet) -> Result<(), String> {
-        let mut sets = self.sets.write()
-            .map_err(|_| "lock poisoned".to_owned())?;
+        let mut sets = self.sets.write().map_err(|_| "lock poisoned".to_owned())?;
 
         // Persist before memory, and only commit memory if persistence held.
         //
@@ -140,8 +139,7 @@ impl ChangeSetStore {
     ///
     /// Returns an error if the lock is poisoned.
     pub fn get(&self, id: &str) -> Result<Option<ChangeSet>, String> {
-        let sets = self.sets.read()
-            .map_err(|_| "lock poisoned".to_owned())?;
+        let sets = self.sets.read().map_err(|_| "lock poisoned".to_owned())?;
         Ok(sets.get(id).cloned())
     }
 
@@ -151,12 +149,13 @@ impl ChangeSetStore {
     ///
     /// Returns an error if the state file cannot be written.
     pub fn remove(&self, id: &str) -> Result<Option<ChangeSet>, String> {
-        let mut sets = self.sets.write()
-            .map_err(|_| "lock poisoned".to_owned())?;
+        let mut sets = self.sets.write().map_err(|_| "lock poisoned".to_owned())?;
 
         let removed = sets.remove(id);
 
-        if removed.is_some() && let Some(ref path) = self.state_file {
+        if removed.is_some()
+            && let Some(ref path) = self.state_file
+        {
             let contents = serde_json::to_string_pretty(&*sets)
                 .map_err(|e| format!("failed to serialize state: {e}"))?;
             std::fs::write(path, contents)
@@ -178,7 +177,8 @@ mod tests {
     #[test]
     fn a_failed_persist_leaves_no_trace_in_memory() {
         let unwritable = PathBuf::from("/nonexistent-directory-for-tests/state.json");
-        let store = ChangeSetStore::new(Some(unwritable)).expect("a missing file is an empty store");
+        let store =
+            ChangeSetStore::new(Some(unwritable)).expect("a missing file is an empty store");
         let set = ChangeSet {
             approved_at: None,
             id: "cs-1".to_owned(),
@@ -191,7 +191,10 @@ mod tests {
             mutations: Vec::new(),
             outcome: None,
         };
-        assert!(store.insert(set).is_err(), "an unwritable state file must fail the insert");
+        assert!(
+            store.insert(set).is_err(),
+            "an unwritable state file must fail the insert"
+        );
         assert!(
             store.get("cs-1").expect("lock").is_none(),
             "a change set whose persistence failed must not be readable"

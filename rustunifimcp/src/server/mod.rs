@@ -17,11 +17,14 @@ use rmcp::{
     tool, tool_handler, tool_router,
 };
 use rustunifimcp_core::{
-    inventory::ControllerRegistry,
+    changeset::{
+        Preimage, StagedMutation, State, apply_sequentially, check_references,
+        diff_against_preimage, validate_locally,
+    },
     client::UnifiClient,
     error::UnifiError,
-    tools::{WRITE_TOOLS, admin, ops, read, workflow, changeset},
-    changeset::{StagedMutation, Preimage, State, apply_sequentially, diff_against_preimage, validate_locally, check_references},
+    inventory::ControllerRegistry,
+    tools::{WRITE_TOOLS, admin, changeset, ops, read, workflow},
 };
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -88,7 +91,9 @@ impl UnifiServer {
     }
 
     /// Build HTTP clients for all controllers in the registry.
-    fn build_clients(registry: &ControllerRegistry) -> Result<BTreeMap<String, UnifiClient>, UnifiError> {
+    fn build_clients(
+        registry: &ControllerRegistry,
+    ) -> Result<BTreeMap<String, UnifiClient>, UnifiError> {
         let mut clients = BTreeMap::new();
         for name in registry.names() {
             let controller = registry.get(&name)?;
@@ -111,7 +116,8 @@ impl UnifiServer {
         let new_clients = Self::build_clients(&self.registry)?;
         let count = new_clients.len();
 
-        let mut clients = self.clients
+        let mut clients = self
+            .clients
             .write()
             .map_err(|_| UnifiError::Malformed("clients lock poisoned".to_owned()))?;
 
@@ -124,7 +130,8 @@ impl UnifiServer {
     /// Returns an owned client since we cannot return a reference that outlives
     /// the RwLock guard. UnifiClient is cheap to clone (Arc-wrapped internals).
     fn client_for(&self, controller: &str) -> Result<UnifiClient, Box<CallToolResult>> {
-        let clients = self.clients
+        let clients = self
+            .clients
             .read()
             .map_err(|_| Box::new(tool_error("clients lock poisoned".to_owned())))?;
 
@@ -152,7 +159,12 @@ impl UnifiServer {
         context: RequestContext<RoleServer>,
     ) -> CallToolResult {
         let caller = Self::caller(&context);
-        if let Err(error) = authorize_call(caller.as_ref(), "unifi_list_resources", Some(&args.controller), WRITE_TOOLS) {
+        if let Err(error) = authorize_call(
+            caller.as_ref(),
+            "unifi_list_resources",
+            Some(&args.controller),
+            WRITE_TOOLS,
+        ) {
             return tool_error(error);
         }
 
@@ -162,7 +174,11 @@ impl UnifiServer {
         };
 
         match read::list_resources(&client, &args).await {
-            Ok(json) => tool_result(Ok::<_, String>(json), ResultFormat::PrettyJson, RESULT_LIMITS),
+            Ok(json) => tool_result(
+                Ok::<_, String>(json),
+                ResultFormat::PrettyJson,
+                RESULT_LIMITS,
+            ),
             Err(error) => tool_error(error),
         }
     }
@@ -177,7 +193,12 @@ impl UnifiServer {
         context: RequestContext<RoleServer>,
     ) -> CallToolResult {
         let caller = Self::caller(&context);
-        if let Err(error) = authorize_call(caller.as_ref(), "unifi_get_resource", Some(&args.controller), WRITE_TOOLS) {
+        if let Err(error) = authorize_call(
+            caller.as_ref(),
+            "unifi_get_resource",
+            Some(&args.controller),
+            WRITE_TOOLS,
+        ) {
             return tool_error(error);
         }
 
@@ -187,7 +208,11 @@ impl UnifiServer {
         };
 
         match read::get_resource(&client, &args).await {
-            Ok(json) => tool_result(Ok::<_, String>(json), ResultFormat::PrettyJson, RESULT_LIMITS),
+            Ok(json) => tool_result(
+                Ok::<_, String>(json),
+                ResultFormat::PrettyJson,
+                RESULT_LIMITS,
+            ),
             Err(error) => tool_error(error),
         }
     }
@@ -202,7 +227,12 @@ impl UnifiServer {
         context: RequestContext<RoleServer>,
     ) -> CallToolResult {
         let caller = Self::caller(&context);
-        if let Err(error) = authorize_call(caller.as_ref(), "unifi_query_stats", Some(&args.controller), WRITE_TOOLS) {
+        if let Err(error) = authorize_call(
+            caller.as_ref(),
+            "unifi_query_stats",
+            Some(&args.controller),
+            WRITE_TOOLS,
+        ) {
             return tool_error(error);
         }
 
@@ -212,7 +242,11 @@ impl UnifiServer {
         };
 
         match read::query_stats(&client, &args).await {
-            Ok(json) => tool_result(Ok::<_, String>(json), ResultFormat::PrettyJson, RESULT_LIMITS),
+            Ok(json) => tool_result(
+                Ok::<_, String>(json),
+                ResultFormat::PrettyJson,
+                RESULT_LIMITS,
+            ),
             Err(error) => tool_error(error),
         }
     }
@@ -227,7 +261,12 @@ impl UnifiServer {
         context: RequestContext<RoleServer>,
     ) -> CallToolResult {
         let caller = Self::caller(&context);
-        if let Err(error) = authorize_call(caller.as_ref(), "unifi_search", Some(&args.controller), WRITE_TOOLS) {
+        if let Err(error) = authorize_call(
+            caller.as_ref(),
+            "unifi_search",
+            Some(&args.controller),
+            WRITE_TOOLS,
+        ) {
             return tool_error(error);
         }
 
@@ -237,7 +276,11 @@ impl UnifiServer {
         };
 
         match read::search(&client, &args).await {
-            Ok(json) => tool_result(Ok::<_, String>(json), ResultFormat::PrettyJson, RESULT_LIMITS),
+            Ok(json) => tool_result(
+                Ok::<_, String>(json),
+                ResultFormat::PrettyJson,
+                RESULT_LIMITS,
+            ),
             Err(error) => tool_error(error),
         }
     }
@@ -252,7 +295,12 @@ impl UnifiServer {
         context: RequestContext<RoleServer>,
     ) -> CallToolResult {
         let caller = Self::caller(&context);
-        if let Err(error) = authorize_call(caller.as_ref(), "unifi_list_sites", Some(&args.controller), WRITE_TOOLS) {
+        if let Err(error) = authorize_call(
+            caller.as_ref(),
+            "unifi_list_sites",
+            Some(&args.controller),
+            WRITE_TOOLS,
+        ) {
             return tool_error(error);
         }
 
@@ -262,7 +310,11 @@ impl UnifiServer {
         };
 
         match read::list_sites(&client, &args).await {
-            Ok(json) => tool_result(Ok::<_, String>(json), ResultFormat::PrettyJson, RESULT_LIMITS),
+            Ok(json) => tool_result(
+                Ok::<_, String>(json),
+                ResultFormat::PrettyJson,
+                RESULT_LIMITS,
+            ),
             Err(error) => tool_error(error),
         }
     }
@@ -277,12 +329,18 @@ impl UnifiServer {
         context: RequestContext<RoleServer>,
     ) -> CallToolResult {
         let caller = Self::caller(&context);
-        if let Err(error) = authorize_call(caller.as_ref(), "unifi_list_controllers", None, WRITE_TOOLS) {
+        if let Err(error) =
+            authorize_call(caller.as_ref(), "unifi_list_controllers", None, WRITE_TOOLS)
+        {
             return tool_error(error);
         }
 
         match admin::unifi_list_controllers(&self.registry).await {
-            Ok(json) => tool_result(Ok::<_, String>(json), ResultFormat::PrettyJson, RESULT_LIMITS),
+            Ok(json) => tool_result(
+                Ok::<_, String>(json),
+                ResultFormat::PrettyJson,
+                RESULT_LIMITS,
+            ),
             Err(error) => tool_error(error),
         }
     }
@@ -302,7 +360,11 @@ impl UnifiServer {
         }
 
         match admin::unifimcp_status(&self.registry, self.lab_mode).await {
-            Ok(json) => tool_result(Ok::<_, String>(json), ResultFormat::PrettyJson, RESULT_LIMITS),
+            Ok(json) => tool_result(
+                Ok::<_, String>(json),
+                ResultFormat::PrettyJson,
+                RESULT_LIMITS,
+            ),
             Err(error) => tool_error(error),
         }
     }
@@ -317,12 +379,18 @@ impl UnifiServer {
         context: RequestContext<RoleServer>,
     ) -> CallToolResult {
         let caller = Self::caller(&context);
-        if let Err(error) = authorize_call(caller.as_ref(), "unifi_add_controller", None, WRITE_TOOLS) {
+        if let Err(error) =
+            authorize_call(caller.as_ref(), "unifi_add_controller", None, WRITE_TOOLS)
+        {
             return tool_error(error);
         }
 
         match admin::unifi_add_controller("", "", "", None, None).await {
-            Ok(json) => tool_result(Ok::<_, String>(json), ResultFormat::PrettyJson, RESULT_LIMITS),
+            Ok(json) => tool_result(
+                Ok::<_, String>(json),
+                ResultFormat::PrettyJson,
+                RESULT_LIMITS,
+            ),
             Err(error) => tool_error(error),
         }
     }
@@ -337,7 +405,12 @@ impl UnifiServer {
         context: RequestContext<RoleServer>,
     ) -> CallToolResult {
         let caller = Self::caller(&context);
-        if let Err(error) = authorize_call(caller.as_ref(), "unifi_device_action", Some(&args.controller), WRITE_TOOLS) {
+        if let Err(error) = authorize_call(
+            caller.as_ref(),
+            "unifi_device_action",
+            Some(&args.controller),
+            WRITE_TOOLS,
+        ) {
             return tool_error(error);
         }
 
@@ -347,7 +420,11 @@ impl UnifiServer {
         };
 
         match ops::device_action(args, &client).await {
-            Ok(json) => tool_result(Ok::<_, String>(json), ResultFormat::PrettyJson, RESULT_LIMITS),
+            Ok(json) => tool_result(
+                Ok::<_, String>(json),
+                ResultFormat::PrettyJson,
+                RESULT_LIMITS,
+            ),
             Err(error) => tool_error(error),
         }
     }
@@ -362,7 +439,12 @@ impl UnifiServer {
         context: RequestContext<RoleServer>,
     ) -> CallToolResult {
         let caller = Self::caller(&context);
-        if let Err(error) = authorize_call(caller.as_ref(), "unifi_client_action", Some(&args.controller), WRITE_TOOLS) {
+        if let Err(error) = authorize_call(
+            caller.as_ref(),
+            "unifi_client_action",
+            Some(&args.controller),
+            WRITE_TOOLS,
+        ) {
             return tool_error(error);
         }
 
@@ -372,7 +454,11 @@ impl UnifiServer {
         };
 
         match ops::client_action(args, &client).await {
-            Ok(json) => tool_result(Ok::<_, String>(json), ResultFormat::PrettyJson, RESULT_LIMITS),
+            Ok(json) => tool_result(
+                Ok::<_, String>(json),
+                ResultFormat::PrettyJson,
+                RESULT_LIMITS,
+            ),
             Err(error) => tool_error(error),
         }
     }
@@ -387,7 +473,12 @@ impl UnifiServer {
         context: RequestContext<RoleServer>,
     ) -> CallToolResult {
         let caller = Self::caller(&context);
-        if let Err(error) = authorize_call(caller.as_ref(), "unifi_backup_action", Some(&args.controller), WRITE_TOOLS) {
+        if let Err(error) = authorize_call(
+            caller.as_ref(),
+            "unifi_backup_action",
+            Some(&args.controller),
+            WRITE_TOOLS,
+        ) {
             return tool_error(error);
         }
 
@@ -397,7 +488,11 @@ impl UnifiServer {
         };
 
         match ops::backup_action(args, &client).await {
-            Ok(json) => tool_result(Ok::<_, String>(json), ResultFormat::PrettyJson, RESULT_LIMITS),
+            Ok(json) => tool_result(
+                Ok::<_, String>(json),
+                ResultFormat::PrettyJson,
+                RESULT_LIMITS,
+            ),
             Err(error) => tool_error(error),
         }
     }
@@ -412,7 +507,12 @@ impl UnifiServer {
         context: RequestContext<RoleServer>,
     ) -> CallToolResult {
         let caller = Self::caller(&context);
-        if let Err(error) = authorize_call(caller.as_ref(), "unifi_run_speed_test", Some(&args.controller), WRITE_TOOLS) {
+        if let Err(error) = authorize_call(
+            caller.as_ref(),
+            "unifi_run_speed_test",
+            Some(&args.controller),
+            WRITE_TOOLS,
+        ) {
             return tool_error(error);
         }
 
@@ -422,7 +522,11 @@ impl UnifiServer {
         };
 
         match ops::run_speed_test(args, &client).await {
-            Ok(json) => tool_result(Ok::<_, String>(json), ResultFormat::PrettyJson, RESULT_LIMITS),
+            Ok(json) => tool_result(
+                Ok::<_, String>(json),
+                ResultFormat::PrettyJson,
+                RESULT_LIMITS,
+            ),
             Err(error) => tool_error(error),
         }
     }
@@ -437,7 +541,12 @@ impl UnifiServer {
         context: RequestContext<RoleServer>,
     ) -> CallToolResult {
         let caller = Self::caller(&context);
-        if let Err(error) = authorize_call(caller.as_ref(), "unifi_site_health_report", Some(&args.controller), WRITE_TOOLS) {
+        if let Err(error) = authorize_call(
+            caller.as_ref(),
+            "unifi_site_health_report",
+            Some(&args.controller),
+            WRITE_TOOLS,
+        ) {
             return tool_error(error);
         }
 
@@ -447,7 +556,11 @@ impl UnifiServer {
         };
 
         match workflow::site_health_report(&client, &args).await {
-            Ok(report) => tool_result(Ok::<_, String>(report), ResultFormat::PrettyJson, RESULT_LIMITS),
+            Ok(report) => tool_result(
+                Ok::<_, String>(report),
+                ResultFormat::PrettyJson,
+                RESULT_LIMITS,
+            ),
             Err(error) => tool_error(error),
         }
     }
@@ -462,7 +575,12 @@ impl UnifiServer {
         context: RequestContext<RoleServer>,
     ) -> CallToolResult {
         let caller = Self::caller(&context);
-        if let Err(error) = authorize_call(caller.as_ref(), "unifi_topology_report", Some(&args.controller), WRITE_TOOLS) {
+        if let Err(error) = authorize_call(
+            caller.as_ref(),
+            "unifi_topology_report",
+            Some(&args.controller),
+            WRITE_TOOLS,
+        ) {
             return tool_error(error);
         }
 
@@ -472,7 +590,11 @@ impl UnifiServer {
         };
 
         match workflow::topology_report(&client, &args).await {
-            Ok(report) => tool_result(Ok::<_, String>(report), ResultFormat::PrettyJson, RESULT_LIMITS),
+            Ok(report) => tool_result(
+                Ok::<_, String>(report),
+                ResultFormat::PrettyJson,
+                RESULT_LIMITS,
+            ),
             Err(error) => tool_error(error),
         }
     }
@@ -487,7 +609,12 @@ impl UnifiServer {
         context: RequestContext<RoleServer>,
     ) -> CallToolResult {
         let caller = Self::caller(&context);
-        if let Err(error) = authorize_call(caller.as_ref(), "unifi_traffic_flow_report", Some(&args.controller), WRITE_TOOLS) {
+        if let Err(error) = authorize_call(
+            caller.as_ref(),
+            "unifi_traffic_flow_report",
+            Some(&args.controller),
+            WRITE_TOOLS,
+        ) {
             return tool_error(error);
         }
 
@@ -497,7 +624,11 @@ impl UnifiServer {
         };
 
         match workflow::traffic_flow_report(&client, &args).await {
-            Ok(report) => tool_result(Ok::<_, String>(report), ResultFormat::PrettyJson, RESULT_LIMITS),
+            Ok(report) => tool_result(
+                Ok::<_, String>(report),
+                ResultFormat::PrettyJson,
+                RESULT_LIMITS,
+            ),
             Err(error) => tool_error(error),
         }
     }
@@ -512,7 +643,12 @@ impl UnifiServer {
         context: RequestContext<RoleServer>,
     ) -> CallToolResult {
         let caller = Self::caller(&context);
-        if let Err(error) = authorize_call(caller.as_ref(), "unifi_firewall_audit", Some(&args.controller), WRITE_TOOLS) {
+        if let Err(error) = authorize_call(
+            caller.as_ref(),
+            "unifi_firewall_audit",
+            Some(&args.controller),
+            WRITE_TOOLS,
+        ) {
             return tool_error(error);
         }
 
@@ -522,7 +658,11 @@ impl UnifiServer {
         };
 
         match workflow::firewall_audit(&client, &args).await {
-            Ok(report) => tool_result(Ok::<_, String>(report), ResultFormat::PrettyJson, RESULT_LIMITS),
+            Ok(report) => tool_result(
+                Ok::<_, String>(report),
+                ResultFormat::PrettyJson,
+                RESULT_LIMITS,
+            ),
             Err(error) => tool_error(error),
         }
     }
@@ -537,7 +677,12 @@ impl UnifiServer {
         context: RequestContext<RoleServer>,
     ) -> CallToolResult {
         let caller = Self::caller(&context);
-        if let Err(error) = authorize_call(caller.as_ref(), "unifi_client_troubleshoot", Some(&args.controller), WRITE_TOOLS) {
+        if let Err(error) = authorize_call(
+            caller.as_ref(),
+            "unifi_client_troubleshoot",
+            Some(&args.controller),
+            WRITE_TOOLS,
+        ) {
             return tool_error(error);
         }
 
@@ -547,7 +692,11 @@ impl UnifiServer {
         };
 
         match workflow::client_troubleshoot(&client, &args).await {
-            Ok(report) => tool_result(Ok::<_, String>(report), ResultFormat::PrettyJson, RESULT_LIMITS),
+            Ok(report) => tool_result(
+                Ok::<_, String>(report),
+                ResultFormat::PrettyJson,
+                RESULT_LIMITS,
+            ),
             Err(error) => tool_error(error),
         }
     }
@@ -565,11 +714,17 @@ impl UnifiServer {
         context: RequestContext<RoleServer>,
     ) -> CallToolResult {
         let caller = Self::caller(&context);
-        if let Err(error) = authorize_call(caller.as_ref(), "unifi_create_change_set", Some(&args.controller), WRITE_TOOLS) {
+        if let Err(error) = authorize_call(
+            caller.as_ref(),
+            "unifi_create_change_set",
+            Some(&args.controller),
+            WRITE_TOOLS,
+        ) {
             return tool_error(error);
         }
 
-        let creator = caller.as_ref()
+        let creator = caller
+            .as_ref()
             .map(|c| c.token_name.clone())
             .unwrap_or_else(|| "unknown".to_owned());
 
@@ -604,7 +759,11 @@ impl UnifiServer {
             "state": "pending",
         });
 
-        tool_result(Ok::<_, String>(result), ResultFormat::PrettyJson, RESULT_LIMITS)
+        tool_result(
+            Ok::<_, String>(result),
+            ResultFormat::PrettyJson,
+            RESULT_LIMITS,
+        )
     }
 
     #[tool(
@@ -617,7 +776,12 @@ impl UnifiServer {
         context: RequestContext<RoleServer>,
     ) -> CallToolResult {
         let caller = Self::caller(&context);
-        if let Err(error) = authorize_call(caller.as_ref(), "unifi_stage_change", Some(&args.controller), WRITE_TOOLS) {
+        if let Err(error) = authorize_call(
+            caller.as_ref(),
+            "unifi_stage_change",
+            Some(&args.controller),
+            WRITE_TOOLS,
+        ) {
             return tool_error(error);
         }
 
@@ -644,9 +808,7 @@ impl UnifiServer {
                 changeset::MutationSpec::Update { kind, id, body } => {
                     StagedMutation::update(kind, id, body)
                 }
-                changeset::MutationSpec::Delete { kind, id } => {
-                    StagedMutation::delete(kind, id)
-                }
+                changeset::MutationSpec::Delete { kind, id } => StagedMutation::delete(kind, id),
                 changeset::MutationSpec::Restore { backup_id } => {
                     StagedMutation::restore(backup_id)
                 }
@@ -655,7 +817,12 @@ impl UnifiServer {
         }
 
         // Capture pre-image for the new mutations
-        let all_mutations: Vec<_> = change_set.mutations.iter().chain(new_mutations.iter()).cloned().collect();
+        let all_mutations: Vec<_> = change_set
+            .mutations
+            .iter()
+            .chain(new_mutations.iter())
+            .cloned()
+            .collect();
         let preimage = match Preimage::capture_preimage(&client, &all_mutations).await {
             Ok(p) => p,
             Err(e) => return tool_error(format!("failed to capture pre-image: {e}")),
@@ -674,7 +841,11 @@ impl UnifiServer {
             "staged_count": change_set.mutations.len(),
         });
 
-        tool_result(Ok::<_, String>(result), ResultFormat::PrettyJson, RESULT_LIMITS)
+        tool_result(
+            Ok::<_, String>(result),
+            ResultFormat::PrettyJson,
+            RESULT_LIMITS,
+        )
     }
 
     #[tool(
@@ -687,7 +858,12 @@ impl UnifiServer {
         context: RequestContext<RoleServer>,
     ) -> CallToolResult {
         let caller = Self::caller(&context);
-        if let Err(error) = authorize_call(caller.as_ref(), "unifi_diff_change_set", Some(&args.controller), WRITE_TOOLS) {
+        if let Err(error) = authorize_call(
+            caller.as_ref(),
+            "unifi_diff_change_set",
+            Some(&args.controller),
+            WRITE_TOOLS,
+        ) {
             return tool_error(error);
         }
 
@@ -700,7 +876,9 @@ impl UnifiServer {
 
         let preimage = match &change_set.preimage {
             Some(p) => p,
-            None => return tool_error("change set has no pre-image; stage at least one change first"),
+            None => {
+                return tool_error("change set has no pre-image; stage at least one change first");
+            }
         };
 
         let diff = match diff_against_preimage(preimage, &change_set.mutations) {
@@ -713,7 +891,11 @@ impl UnifiServer {
             "changes": diff.changes,
         });
 
-        tool_result(Ok::<_, String>(result), ResultFormat::PrettyJson, RESULT_LIMITS)
+        tool_result(
+            Ok::<_, String>(result),
+            ResultFormat::PrettyJson,
+            RESULT_LIMITS,
+        )
     }
 
     #[tool(
@@ -726,7 +908,12 @@ impl UnifiServer {
         context: RequestContext<RoleServer>,
     ) -> CallToolResult {
         let caller = Self::caller(&context);
-        if let Err(error) = authorize_call(caller.as_ref(), "unifi_validate_change_set", Some(&args.controller), WRITE_TOOLS) {
+        if let Err(error) = authorize_call(
+            caller.as_ref(),
+            "unifi_validate_change_set",
+            Some(&args.controller),
+            WRITE_TOOLS,
+        ) {
             return tool_error(error);
         }
 
@@ -739,7 +926,9 @@ impl UnifiServer {
 
         let preimage = match &change_set.preimage {
             Some(p) => p,
-            None => return tool_error("change set has no pre-image; stage at least one change first"),
+            None => {
+                return tool_error("change set has no pre-image; stage at least one change first");
+            }
         };
 
         // Validate locally
@@ -764,7 +953,11 @@ impl UnifiServer {
             "note": "UniFi has no server-side dry-run validation; this is client-side only"
         });
 
-        tool_result(Ok::<_, String>(result), ResultFormat::PrettyJson, RESULT_LIMITS)
+        tool_result(
+            Ok::<_, String>(result),
+            ResultFormat::PrettyJson,
+            RESULT_LIMITS,
+        )
     }
 
     #[tool(
@@ -777,11 +970,17 @@ impl UnifiServer {
         context: RequestContext<RoleServer>,
     ) -> CallToolResult {
         let caller = Self::caller(&context);
-        if let Err(error) = authorize_call(caller.as_ref(), "unifi_approve_change_set", Some(&args.controller), WRITE_TOOLS) {
+        if let Err(error) = authorize_call(
+            caller.as_ref(),
+            "unifi_approve_change_set",
+            Some(&args.controller),
+            WRITE_TOOLS,
+        ) {
             return tool_error(error);
         }
 
-        let approver = caller.as_ref()
+        let approver = caller
+            .as_ref()
             .map(|c| c.token_name.clone())
             .unwrap_or_else(|| "unknown".to_owned());
 
@@ -798,14 +997,14 @@ impl UnifiServer {
         // could have reviewed. Observed live: a change set whose staging failed
         // was still approvable, and only apply refused it.
         if change_set.mutations.is_empty() {
-            return tool_error(
-                "change set has nothing staged; there is nothing to approve",
-            );
+            return tool_error("change set has nothing staged; there is nothing to approve");
         }
 
         // Refuse if the approver is the creator (two-person control)
         if change_set.creator == approver && change_set.approval_waiver.is_none() {
-            return tool_error("two-person control: the creating token cannot approve its own change set");
+            return tool_error(
+                "two-person control: the creating token cannot approve its own change set",
+            );
         }
 
         // Mark as approved, with the moment it happened.
@@ -822,7 +1021,11 @@ impl UnifiServer {
             "approval_waiver": change_set.approval_waiver,
         });
 
-        tool_result(Ok::<_, String>(result), ResultFormat::PrettyJson, RESULT_LIMITS)
+        tool_result(
+            Ok::<_, String>(result),
+            ResultFormat::PrettyJson,
+            RESULT_LIMITS,
+        )
     }
 
     #[tool(
@@ -835,7 +1038,12 @@ impl UnifiServer {
         context: RequestContext<RoleServer>,
     ) -> CallToolResult {
         let caller = Self::caller(&context);
-        if let Err(error) = authorize_call(caller.as_ref(), "unifi_apply_change_set", Some(&args.controller), WRITE_TOOLS) {
+        if let Err(error) = authorize_call(
+            caller.as_ref(),
+            "unifi_apply_change_set",
+            Some(&args.controller),
+            WRITE_TOOLS,
+        ) {
             return tool_error(error);
         }
 
@@ -917,7 +1125,11 @@ impl UnifiServer {
             "rollback_failures": outcome.rollback_failures,
         });
 
-        tool_result(Ok::<_, String>(result), ResultFormat::PrettyJson, RESULT_LIMITS)
+        tool_result(
+            Ok::<_, String>(result),
+            ResultFormat::PrettyJson,
+            RESULT_LIMITS,
+        )
     }
 
     #[tool(
@@ -930,7 +1142,12 @@ impl UnifiServer {
         context: RequestContext<RoleServer>,
     ) -> CallToolResult {
         let caller = Self::caller(&context);
-        if let Err(error) = authorize_call(caller.as_ref(), "unifi_get_change_set", Some(&args.controller), WRITE_TOOLS) {
+        if let Err(error) = authorize_call(
+            caller.as_ref(),
+            "unifi_get_change_set",
+            Some(&args.controller),
+            WRITE_TOOLS,
+        ) {
             return tool_error(error);
         }
 
@@ -974,7 +1191,11 @@ impl UnifiServer {
             })),
         });
 
-        tool_result(Ok::<_, String>(result), ResultFormat::PrettyJson, RESULT_LIMITS)
+        tool_result(
+            Ok::<_, String>(result),
+            ResultFormat::PrettyJson,
+            RESULT_LIMITS,
+        )
     }
 }
 
@@ -1056,11 +1277,10 @@ mod tests {
 
         let router = UnifiServer::unifi_tool_router();
         let all_tools = router.list_all();
-        let served_names: BTreeSet<String> = all_tools
-            .iter()
-            .map(|tool| tool.name.to_string())
-            .collect();
-        let registered_names: BTreeSet<String> = TOOL_NAMES.iter().map(|s| (*s).to_owned()).collect();
+        let served_names: BTreeSet<String> =
+            all_tools.iter().map(|tool| tool.name.to_string()).collect();
+        let registered_names: BTreeSet<String> =
+            TOOL_NAMES.iter().map(|s| (*s).to_owned()).collect();
 
         // Check for tools in TOOL_NAMES but not served.
         let missing_from_router: Vec<String> = registered_names
