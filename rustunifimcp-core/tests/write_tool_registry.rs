@@ -41,12 +41,11 @@ fn the_write_tool_registry_holds_exactly_the_mutating_tools() {
 #[test]
 fn every_write_tool_is_a_registered_tool() {
     for name in WRITE_TOOLS {
-        if !TOOL_NAMES.contains(name) {
-            // Phase 3 registers these; until then, the registry names them so
-            // no wildcard token can reach them the moment they appear.
-            eprintln!("note: {name} is reserved in WRITE_TOOLS, not yet registered");
-            continue;
-        }
+        assert!(
+            TOOL_NAMES.contains(name),
+            "{name} is in WRITE_TOOLS but is not a registered tool; \
+             a name with no tool behind it guards nothing"
+        );
     }
 }
 

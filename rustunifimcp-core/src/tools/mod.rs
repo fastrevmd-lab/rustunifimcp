@@ -5,6 +5,7 @@
 //! a small number of workflows that earn their names.
 
 pub mod admin;
+pub mod ops;
 pub mod read;
 
 /// Every tool this server registers.
@@ -22,6 +23,11 @@ pub const TOOL_NAMES: &[&str] = &[
     "unifi_list_controllers",
     "unifi_add_controller",
     "unifimcp_status",
+    // Operations (4)
+    "unifi_device_action",
+    "unifi_client_action",
+    "unifi_backup_action",
+    "unifi_run_speed_test",
 ];
 
 /// The mutating tools, passed to `mecmcp_server::authorize_call`.

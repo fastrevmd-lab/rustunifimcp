@@ -28,12 +28,13 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 
 /// A client bound to one controller.
+#[derive(Clone)]
 pub struct UnifiClient {
     controller: Controller,
-    http: HttpClient,
+    http: std::sync::Arc<HttpClient>,
     api_key: OutboundSecret,
-    cached_version: RwLock<Option<String>>,
-    cached_site_uuid: RwLock<Option<String>>,
+    cached_version: std::sync::Arc<RwLock<Option<String>>>,
+    cached_site_uuid: std::sync::Arc<RwLock<Option<String>>>,
 }
 
 impl UnifiClient {
@@ -72,10 +73,10 @@ impl UnifiClient {
         let http = HttpClient::new(config)?;
         Ok(Self {
             controller,
-            http,
+            http: std::sync::Arc::new(http),
             api_key,
-            cached_version: RwLock::new(None),
-            cached_site_uuid: RwLock::new(None),
+            cached_version: std::sync::Arc::new(RwLock::new(None)),
+            cached_site_uuid: std::sync::Arc::new(RwLock::new(None)),
         })
     }
 

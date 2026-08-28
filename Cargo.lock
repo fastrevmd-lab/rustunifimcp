@@ -1478,22 +1478,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mecmcp-device"
-version = "0.20.0"
-source = "git+https://github.com/fastrevmd-lab/mecmcp?tag=v0.20.0#d212016b48edbc53c45ab07a941055a7168745a6"
-dependencies = [
- "async-trait",
- "rustix 1.1.4",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "thiserror",
- "tokio",
- "tokio-util",
- "tracing",
-]
-
-[[package]]
 name = "mecmcp-http"
 version = "0.20.0"
 source = "git+https://github.com/fastrevmd-lab/mecmcp?tag=v0.20.0#d212016b48edbc53c45ab07a941055a7168745a6"
@@ -1520,17 +1504,6 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
-]
-
-[[package]]
-name = "mecmcp-job"
-version = "0.20.0"
-source = "git+https://github.com/fastrevmd-lab/mecmcp?tag=v0.20.0#d212016b48edbc53c45ab07a941055a7168745a6"
-dependencies = [
- "mecmcp-device",
- "thiserror",
- "tokio",
- "tokio-util",
 ]
 
 [[package]]
@@ -2283,7 +2256,6 @@ dependencies = [
  "mecmcp-changeset",
  "mecmcp-http",
  "mecmcp-inventory",
- "mecmcp-job",
  "mecmcp-openapi",
  "mecmcp-secret",
  "mecmcp-server",

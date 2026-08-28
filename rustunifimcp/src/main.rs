@@ -275,15 +275,18 @@ async fn run_inner() -> Result<()> {
     );
 
     // Build server.
-    let server = UnifiServer::new(registry, cli.lab_mode())?;
+    let server = UnifiServer::new(Arc::clone(&registry), cli.lab_mode())?;
 
     // Determine transport.
     match cli.common.transport {
         mecmcp_runtime::cli::Transport::Stdio => {
+            // SIGHUP reloads the inventory and rebuilds clients.
+            // Clone the server for the reload handler; serve_stdio consumes the original.
+            install_sighup_reload(registry, Some(server.clone()), None)?;
             serve_stdio(server).await
         }
         mecmcp_runtime::cli::Transport::StreamableHttp => {
-            serve_http(server, &cli).await
+            serve_http(server, &cli, registry).await
         }
     }
 }
@@ -315,6 +318,88 @@ fn load_listener_tls(args: &mecmcp_runtime::cli::Cli) -> Result<Option<Arc<rustl
     }
 }
 
+/// Install a SIGHUP handler that reloads configuration.
+///
+/// On SIGHUP:
+/// - Controller inventory is reloaded from disk
+/// - HTTP clients are rebuilt from the new inventory
+/// - Token store is reloaded (HTTP mode only)
+///
+/// A reload failure logs at `warn` and retains the previous configuration rather
+/// than terminating the running server.
+///
+/// # Errors
+///
+/// Returns error if the signal handler could not be registered.
+fn install_sighup_reload(
+    registry: Arc<rustunifimcp_core::inventory::ControllerRegistry>,
+    server: Option<UnifiServer>,
+    token_store: Option<Arc<mecmcp_auth::TokenStoreFile<mecmcp_auth::NoGrant>>>,
+) -> std::io::Result<()> {
+    mecmcp_runtime::signals::install_hup_handler(move || {
+        // Reload controller inventory.
+        let registry_reloaded = match registry.reload() {
+            Ok(count) => {
+                tracing::info!(
+                    target: "audit",
+                    controllers = count,
+                    "controller inventory reloaded"
+                );
+                true
+            }
+            Err(error) => {
+                tracing::warn!(
+                    target: "audit",
+                    %error,
+                    "controller inventory reload failed; retaining previous snapshot"
+                );
+                false
+            }
+        };
+
+        // Rebuild clients if inventory reload succeeded.
+        if registry_reloaded && let Some(ref srv) = server {
+            match srv.rebuild_clients() {
+                Ok(count) => {
+                    tracing::info!(
+                        target: "audit",
+                        clients = count,
+                        "HTTP clients rebuilt from reloaded inventory"
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        target: "audit",
+                        %error,
+                        "client rebuild failed; retaining previous clients"
+                    );
+                }
+            }
+        }
+
+        // Reload token store if present (HTTP mode only).
+        if let Some(ref store) = token_store {
+            match store.reload() {
+                Ok(()) => {
+                    let count = store.store().len();
+                    tracing::info!(
+                        target: "audit",
+                        tokens = count,
+                        "token store reloaded"
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        target: "audit",
+                        %error,
+                        "token store reload failed; retaining previous snapshot"
+                    );
+                }
+            }
+        }
+    })
+}
+
 async fn serve_stdio(
     handler: UnifiServer,
 ) -> Result<()> {
@@ -331,6 +416,7 @@ async fn serve_stdio(
 async fn serve_http(
     handler: UnifiServer,
     cli: &UnifiCli,
+    registry: Arc<rustunifimcp_core::inventory::ControllerRegistry>,
 ) -> Result<()> {
 
     // Load token store if provided.
@@ -341,6 +427,10 @@ async fn serve_http(
     } else {
         None
     };
+
+    // Install SIGHUP handler that reloads inventory, rebuilds clients, and reloads token store.
+    // Clone the handler for the reload callback; build_http_router consumes the original.
+    install_sighup_reload(registry, Some(handler.clone()), token_store.clone())?;
 
     let shutdown = CancellationToken::new();
     let router = build_http_router(
@@ -635,4 +725,165 @@ mod tests {
             _ => panic!("expected TokenAction::SetScopes"),
         }
     }
+
+    #[tokio::test]
+    async fn sighup_handler_installs_without_token_store() {
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        // Create a minimal valid controllers.json
+        let mut controllers_file = NamedTempFile::new().unwrap();
+        writeln!(controllers_file, "{{}}").unwrap();
+        controllers_file.flush().unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(controllers_file.path())
+                .unwrap()
+                .permissions();
+            perms.set_mode(0o600);
+            std::fs::set_permissions(controllers_file.path(), perms).unwrap();
+        }
+
+        let registry = Arc::new(
+            rustunifimcp_core::inventory::ControllerRegistry::load(controllers_file.path())
+                .unwrap()
+        );
+
+        // Build a server for the reload handler.
+        let server = UnifiServer::new(Arc::clone(&registry), false).unwrap();
+
+        // Should install successfully without a token store.
+        let result = install_sighup_reload(registry, Some(server), None);
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn sighup_handler_installs_with_token_store() {
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        // Create a minimal valid controllers.json
+        let mut controllers_file = NamedTempFile::new().unwrap();
+        writeln!(controllers_file, "{{}}").unwrap();
+        controllers_file.flush().unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(controllers_file.path())
+                .unwrap()
+                .permissions();
+            perms.set_mode(0o600);
+            std::fs::set_permissions(controllers_file.path(), perms).unwrap();
+        }
+
+        // Create a minimal valid tokens.json
+        let mut tokens_file = NamedTempFile::new().unwrap();
+        writeln!(tokens_file, r#"{{"version": 1, "tokens": []}}"#).unwrap();
+        tokens_file.flush().unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(tokens_file.path())
+                .unwrap()
+                .permissions();
+            perms.set_mode(0o600);
+            std::fs::set_permissions(tokens_file.path(), perms).unwrap();
+        }
+
+        let registry = Arc::new(
+            rustunifimcp_core::inventory::ControllerRegistry::load(controllers_file.path())
+                .unwrap()
+        );
+        let server = UnifiServer::new(Arc::clone(&registry), false).unwrap();
+        let token_store = Arc::new(
+            mecmcp_auth::TokenStoreFile::load(tokens_file.path()).unwrap()
+        );
+
+        // Should install successfully with a token store.
+        let result = install_sighup_reload(registry, Some(server), Some(token_store));
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn malformed_inventory_reload_retains_previous_config() {
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        // Create initial valid controllers.json
+        let mut controllers_file = NamedTempFile::new().unwrap();
+        writeln!(controllers_file, "{{}}").unwrap();
+        controllers_file.flush().unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(controllers_file.path())
+                .unwrap()
+                .permissions();
+            perms.set_mode(0o600);
+            std::fs::set_permissions(controllers_file.path(), perms).unwrap();
+        }
+
+        let registry = Arc::new(
+            rustunifimcp_core::inventory::ControllerRegistry::load(controllers_file.path())
+                .unwrap()
+        );
+
+        // Verify initial load worked
+        assert_eq!(registry.names().len(), 0);
+
+        // Now corrupt the file
+        std::fs::write(controllers_file.path(), "not valid json").unwrap();
+
+        // Reload should fail but not panic
+        let result = registry.reload();
+        assert!(result.is_err());
+
+        // The registry should still be usable with the previous config
+        assert_eq!(registry.names().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn client_rebuild_after_reload() {
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        // Create initial valid controllers.json with no controllers
+        let mut controllers_file = NamedTempFile::new().unwrap();
+        writeln!(controllers_file, "{{}}").unwrap();
+        controllers_file.flush().unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(controllers_file.path())
+                .unwrap()
+                .permissions();
+            perms.set_mode(0o600);
+            std::fs::set_permissions(controllers_file.path(), perms).unwrap();
+        }
+
+        let registry = Arc::new(
+            rustunifimcp_core::inventory::ControllerRegistry::load(controllers_file.path())
+                .unwrap()
+        );
+        let server = UnifiServer::new(Arc::clone(&registry), false).unwrap();
+
+        // Initial state: no controllers, no clients
+        assert_eq!(registry.names().len(), 0);
+
+        // Reload should succeed with empty config
+        let result = registry.reload();
+        assert!(result.is_ok());
+
+        // Rebuild clients should succeed
+        let rebuild_result = server.rebuild_clients();
+        assert!(rebuild_result.is_ok());
+        assert_eq!(rebuild_result.unwrap(), 0);
+    }
+
 }
