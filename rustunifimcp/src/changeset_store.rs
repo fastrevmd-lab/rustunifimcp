@@ -24,12 +24,44 @@ pub struct ChangeSet {
     pub approver: Option<String>,
     /// Approval waiver reason, if in lab mode.
     pub approval_waiver: Option<String>,
+    /// When the approval was granted, as seconds since the Unix epoch.
+    ///
+    /// An approval is a statement about a controller state at a moment. Without
+    /// a time it cannot expire, and a persisted approval would stay usable for
+    /// as long as the file survives -- which is what `--approval-timeout-secs`
+    /// exists to prevent.
+    #[serde(default)]
+    pub approved_at: Option<u64>,
     /// The pre-image snapshot.
     pub preimage: Option<Preimage>,
     /// Staged mutations.
     pub mutations: Vec<StagedMutation>,
     /// Apply outcome, if applied.
     pub outcome: Option<Outcome>,
+}
+
+/// Write `contents` to `path` so a reader sees the old file or the new one.
+///
+/// A direct write can be interrupted midway and leave truncated JSON, which on
+/// the next start is a store that will not parse -- every persisted approval
+/// lost to a partial write.
+fn write_atomically(path: &std::path::Path, contents: &str) -> Result<(), String> {
+    let directory = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    let temporary = directory.join(format!(
+        ".{}.tmp",
+        path.file_name().and_then(|n| n.to_str()).unwrap_or("changesets")
+    ));
+    std::fs::write(&temporary, contents)
+        .map_err(|e| format!("failed to write state file: {e}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        // The store holds pre-images of controller configuration.
+        std::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| format!("failed to set state file permissions: {e}"))?;
+    }
+    std::fs::rename(&temporary, path)
+        .map_err(|e| format!("failed to commit state file: {e}"))
 }
 
 /// In-memory change-set store with optional file persistence.
@@ -85,15 +117,20 @@ impl ChangeSetStore {
         let mut sets = self.sets.write()
             .map_err(|_| "lock poisoned".to_owned())?;
 
-        sets.insert(set.id.clone(), set);
-
+        // Persist before memory, and only commit memory if persistence held.
+        //
+        // Writing memory first meant a failed write left the process believing
+        // an approval it had reported as failed: the caller saw an error, the
+        // next call saw the approval. Restart then disagreed with both.
         if let Some(ref path) = self.state_file {
-            let contents = serde_json::to_string_pretty(&*sets)
+            let mut candidate = sets.clone();
+            candidate.insert(set.id.clone(), set.clone());
+            let contents = serde_json::to_string_pretty(&candidate)
                 .map_err(|e| format!("failed to serialize state: {e}"))?;
-            std::fs::write(path, contents)
-                .map_err(|e| format!("failed to write state file: {e}"))?;
+            write_atomically(path, &contents)?;
         }
 
+        sets.insert(set.id.clone(), set);
         Ok(())
     }
 
@@ -133,6 +170,34 @@ impl ChangeSetStore {
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
+
+    /// A failed persist must not leave the change set live in memory.
+    ///
+    /// Writing memory first meant a caller could be told the approval failed
+    /// while the next call saw it succeed, and a restart agreed with neither.
+    #[test]
+    fn a_failed_persist_leaves_no_trace_in_memory() {
+        let unwritable = PathBuf::from("/nonexistent-directory-for-tests/state.json");
+        let store = ChangeSetStore::new(Some(unwritable)).expect("a missing file is an empty store");
+        let set = ChangeSet {
+            approved_at: None,
+            id: "cs-1".to_owned(),
+            controller: "home".to_owned(),
+            description: "probe".to_owned(),
+            creator: "alice".to_owned(),
+            approver: None,
+            approval_waiver: None,
+            preimage: None,
+            mutations: Vec::new(),
+            outcome: None,
+        };
+        assert!(store.insert(set).is_err(), "an unwritable state file must fail the insert");
+        assert!(
+            store.get("cs-1").expect("lock").is_none(),
+            "a change set whose persistence failed must not be readable"
+        );
+    }
+
     use super::*;
     use tempfile::NamedTempFile;
 
@@ -141,6 +206,7 @@ mod tests {
         let store = ChangeSetStore::new(None).unwrap();
 
         let set = ChangeSet {
+            approved_at: None,
             id: "test-1".to_owned(),
             controller: "home".to_owned(),
             description: "test".to_owned(),
@@ -165,6 +231,7 @@ mod tests {
         let path = temp.path().to_path_buf();
 
         let set = ChangeSet {
+            approved_at: None,
             id: "test-2".to_owned(),
             controller: "home".to_owned(),
             description: "test".to_owned(),
@@ -194,6 +261,7 @@ mod tests {
         let path = temp.path().to_path_buf();
 
         let set = ChangeSet {
+            approved_at: None,
             id: "test-3".to_owned(),
             controller: "home".to_owned(),
             description: "test".to_owned(),

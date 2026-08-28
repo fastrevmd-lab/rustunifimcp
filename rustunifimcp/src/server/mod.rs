@@ -36,6 +36,17 @@ const RESULT_LIMITS: ResultLimits = ResultLimits {
     max_json_bytes: 512 * 1024,
 };
 
+/// Seconds since the Unix epoch.
+///
+/// A clock before the epoch is not a case worth branching on; it reports 0,
+/// which makes every approval look old and therefore expired -- the safe
+/// direction for a gate.
+fn unix_seconds_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
 /// The UniFi MCP server.
 #[derive(Clone)]
 pub struct UnifiServer {
@@ -47,6 +58,8 @@ pub struct UnifiServer {
     lab_mode: bool,
     /// Change-set storage.
     changeset_store: ChangeSetStore,
+    /// How long an approval stays usable, in seconds.
+    approval_timeout_secs: u64,
     /// Tool router.
     tool_router: ToolRouter<Self>,
 }
@@ -61,6 +74,7 @@ impl UnifiServer {
         registry: Arc<ControllerRegistry>,
         lab_mode: bool,
         changeset_store: ChangeSetStore,
+        approval_timeout_secs: u64,
     ) -> Result<Self, UnifiError> {
         let clients = Self::build_clients(&registry)?;
         Ok(Self {
@@ -68,6 +82,7 @@ impl UnifiServer {
             clients: Arc::new(std::sync::RwLock::new(clients)),
             lab_mode,
             changeset_store,
+            approval_timeout_secs,
             tool_router: Self::unifi_tool_router(),
         })
     }
@@ -567,6 +582,7 @@ impl UnifiServer {
         };
 
         let change_set = ChangeSet {
+            approved_at: None,
             id: id.clone(),
             controller: args.controller.clone(),
             description: args.description,
@@ -792,8 +808,9 @@ impl UnifiServer {
             return tool_error("two-person control: the creating token cannot approve its own change set");
         }
 
-        // Mark as approved
+        // Mark as approved, with the moment it happened.
         change_set.approver = Some(approver);
+        change_set.approved_at = Some(unix_seconds_now());
 
         if let Err(e) = self.changeset_store.insert(change_set.clone()) {
             return tool_error(format!("failed to update change set: {e}"));
@@ -830,8 +847,35 @@ impl UnifiServer {
         };
 
         // Check approval
+        // A change set that already ran is not a template. Re-applying one
+        // whose mutations include creates issues them again -- `preimage_matches`
+        // skips creates, so nothing downstream would catch the duplicate.
+        if let Some(ref outcome) = change_set.outcome {
+            return tool_error(format!(
+                "change set has already been applied (state: {:?}); \
+                 create a new change set rather than re-applying this one",
+                outcome.state
+            ));
+        }
+
         if change_set.approver.is_none() && change_set.approval_waiver.is_none() {
             return tool_error("change set has not been approved");
+        }
+
+        // An approval is a statement about a controller state at a moment.
+        // Without this the packaged deployment advertised a 300-second window
+        // via --approval-timeout-secs and honoured no window at all: a
+        // persisted approval stayed usable for as long as the state file did.
+        if change_set.approval_waiver.is_none() {
+            let approved_at = change_set.approved_at.unwrap_or(0);
+            let age = unix_seconds_now().saturating_sub(approved_at);
+            if age > self.approval_timeout_secs {
+                return tool_error(format!(
+                    "approval expired {}s ago (timeout {}s); re-approve before applying",
+                    age - self.approval_timeout_secs,
+                    self.approval_timeout_secs
+                ));
+            }
         }
 
         let preimage = match &change_set.preimage {
@@ -1051,6 +1095,7 @@ mod tests {
         let path = temp.path().to_path_buf();
 
         let set = ChangeSet {
+            approved_at: None,
             id: "test-round-trip".to_owned(),
             controller: "home".to_owned(),
             description: "test".to_owned(),
@@ -1083,6 +1128,7 @@ mod tests {
         let store = ChangeSetStore::new(Some(path)).unwrap();
 
         let set = ChangeSet {
+            approved_at: None,
             id: "test-waiver".to_owned(),
             controller: "home".to_owned(),
             description: "test".to_owned(),
