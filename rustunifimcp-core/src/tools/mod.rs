@@ -29,10 +29,12 @@ pub const TOOL_NAMES: &[&str] = &[
     "unifi_client_action",
     "unifi_backup_action",
     "unifi_run_speed_test",
-    // Workflows (3)
+    // Workflows (5)
     "unifi_site_health_report",
     "unifi_topology_report",
     "unifi_traffic_flow_report",
+    "unifi_firewall_audit",
+    "unifi_client_troubleshoot",
 ];
 
 /// The mutating tools, passed to `mecmcp_server::authorize_call`.

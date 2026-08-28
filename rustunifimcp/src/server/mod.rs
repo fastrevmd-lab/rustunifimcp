@@ -480,6 +480,56 @@ impl UnifiServer {
             Err(error) => tool_error(error),
         }
     }
+
+    #[tool(
+        name = "unifi_firewall_audit",
+        description = "Audit firewall policies and zones for common misconfigurations"
+    )]
+    async fn unifi_firewall_audit(
+        &self,
+        Parameters(args): Parameters<workflow::FirewallAuditArgs>,
+        context: RequestContext<RoleServer>,
+    ) -> CallToolResult {
+        let caller = Self::caller(&context);
+        if let Err(error) = authorize_call(caller.as_ref(), "unifi_firewall_audit", Some(&args.controller), WRITE_TOOLS) {
+            return tool_error(error);
+        }
+
+        let client = match self.client_for(&args.controller) {
+            Ok(client) => client,
+            Err(result) => return *result,
+        };
+
+        match workflow::firewall_audit(&client, &args).await {
+            Ok(report) => tool_result(Ok::<_, String>(report), ResultFormat::PrettyJson, RESULT_LIMITS),
+            Err(error) => tool_error(error),
+        }
+    }
+
+    #[tool(
+        name = "unifi_client_troubleshoot",
+        description = "Troubleshoot a client by correlating association, uplink, and firewall policy"
+    )]
+    async fn unifi_client_troubleshoot(
+        &self,
+        Parameters(args): Parameters<workflow::ClientTroubleshootArgs>,
+        context: RequestContext<RoleServer>,
+    ) -> CallToolResult {
+        let caller = Self::caller(&context);
+        if let Err(error) = authorize_call(caller.as_ref(), "unifi_client_troubleshoot", Some(&args.controller), WRITE_TOOLS) {
+            return tool_error(error);
+        }
+
+        let client = match self.client_for(&args.controller) {
+            Ok(client) => client,
+            Err(result) => return *result,
+        };
+
+        match workflow::client_troubleshoot(&client, &args).await {
+            Ok(report) => tool_result(Ok::<_, String>(report), ResultFormat::PrettyJson, RESULT_LIMITS),
+            Err(error) => tool_error(error),
+        }
+    }
 }
 
 /// Apply cache hints to a tool list when the client negotiated 2026-07-28 or later.

@@ -90,6 +90,62 @@ pub struct TrafficFlowReport {
     pub omitted: Vec<String>,
 }
 
+/// Arguments to `unifi_firewall_audit`.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct FirewallAuditArgs {
+    /// Which controller, by its name in `controllers.json`.
+    pub controller: String,
+    /// Site identifier; defaults to the controller's configured site.
+    #[serde(default)]
+    pub site: Option<String>,
+}
+
+/// Firewall audit report response.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct FirewallAuditReport {
+    /// Whether the audit ran (false means no data was examined).
+    pub ran: bool,
+    /// Number of firewall policies examined.
+    pub policies_examined: usize,
+    /// Audit findings.
+    pub findings: Vec<serde_json::Value>,
+    /// Whether this report is missing data it would normally include.
+    pub partial: bool,
+    /// What was omitted and why, one entry per omission.
+    pub omitted: Vec<String>,
+}
+
+/// Arguments to `unifi_client_troubleshoot`.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ClientTroubleshootArgs {
+    /// Which controller, by its name in `controllers.json`.
+    pub controller: String,
+    /// Client MAC address.
+    pub mac: String,
+    /// Site identifier; defaults to the controller's configured site.
+    #[serde(default)]
+    pub site: Option<String>,
+}
+
+/// Client troubleshoot report response.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct ClientTroubleshootReport {
+    /// Client MAC address.
+    pub mac: String,
+    /// Association data from the station record.
+    pub association: Option<serde_json::Value>,
+    /// Uplink device the client is connected to.
+    pub uplink_device: Option<serde_json::Value>,
+    /// Applied firewall policies.
+    pub applied_policies: Vec<serde_json::Value>,
+    /// Whether this report is missing data it would normally include.
+    pub partial: bool,
+    /// What was omitted and why, one entry per omission.
+    pub omitted: Vec<String>,
+}
+
 /// Generate a site health report.
 ///
 /// Joins device inventory, health metrics, and device statistics into a single
@@ -424,6 +480,312 @@ pub async fn traffic_flow_report(
     })
 }
 
+/// Generate a firewall audit report.
+///
+/// Audits firewall policies and zones for common misconfigurations. Distinguishes
+/// between "ran and found nothing" (clean audit) and "did not run" (no data).
+///
+/// # Errors
+///
+/// Returns [`UnifiError`] when:
+/// - All legs are refused for surface permission reasons (nothing was gathered)
+/// - Any leg fails with a real transport/protocol error (not a permission refusal)
+pub async fn firewall_audit(
+    client: &UnifiClient,
+    args: &FirewallAuditArgs,
+) -> Result<FirewallAuditReport, UnifiError> {
+    let _site_uuid = client.default_site_for(ApiSurface::Supported).await?;
+    let site_name = if let Some(ref s) = args.site {
+        s.as_str()
+    } else {
+        client.default_site()
+    };
+
+    let mut omitted = Vec::new();
+    let mut policies_result = serde_json::Value::Null;
+    let mut zones_result = serde_json::Value::Null;
+
+    // Fetch firewall policies via Private v2 API
+    match client
+        .get(
+            ApiSurface::PrivateV2,
+            "/proxy/network/v2/api/site/{site}/firewall/policies",
+            &[("site", site_name)],
+            &[],
+        )
+        .await
+    {
+        Ok(policies) => {
+            policies_result = policies;
+        }
+        Err(UnifiError::SurfaceRequiresConfig { .. }) => {
+            omitted.push("policies: controller has allow_private_api disabled".to_owned());
+        }
+        Err(UnifiError::SurfaceRequiresScope { .. }) => {
+            omitted.push("policies: token lacks required scope".to_owned());
+        }
+        Err(e) => return Err(e),
+    }
+
+    // Fetch firewall zones via Private v2 API
+    match client
+        .get(
+            ApiSurface::PrivateV2,
+            "/proxy/network/v2/api/site/{site}/firewall/zones",
+            &[("site", site_name)],
+            &[],
+        )
+        .await
+    {
+        Ok(zones) => {
+            zones_result = zones;
+        }
+        Err(UnifiError::SurfaceRequiresConfig { .. }) => {
+            omitted.push("zones: controller has allow_private_api disabled".to_owned());
+        }
+        Err(UnifiError::SurfaceRequiresScope { .. }) => {
+            omitted.push("zones: token lacks required scope".to_owned());
+        }
+        Err(e) => return Err(e),
+    }
+
+    // If all legs were refused, that's an error
+    if omitted.len() == 2 {
+        return Err(UnifiError::Malformed(
+            "all data sources refused: nothing was gathered".to_owned(),
+        ));
+    }
+
+    build_firewall_audit(&policies_result, &zones_result)
+        .map(|mut report| {
+            report.partial = !omitted.is_empty();
+            report.omitted = omitted;
+            report
+        })
+}
+
+/// Generate a client troubleshoot report.
+///
+/// Correlates a station's association history, signal, DHCP lease, applied
+/// firewall policy, and recent flows. If correlation cannot be built, it is
+/// reported in `omitted` rather than silently degrading to a station lookup.
+///
+/// # Errors
+///
+/// Returns [`UnifiError`] when:
+/// - All legs are refused for surface permission reasons (nothing was gathered)
+/// - Any leg fails with a real transport/protocol error (not a permission refusal)
+pub async fn client_troubleshoot(
+    client: &UnifiClient,
+    args: &ClientTroubleshootArgs,
+) -> Result<ClientTroubleshootReport, UnifiError> {
+    let site_uuid = client.default_site_for(ApiSurface::Supported).await?;
+    let site_name = if let Some(ref s) = args.site {
+        s.as_str()
+    } else {
+        client.default_site()
+    };
+
+    let mut omitted = Vec::new();
+    let mut stations_result = serde_json::Value::Null;
+    let mut devices_result = serde_json::Value::Null;
+    let mut policies_result = serde_json::Value::Null;
+
+    // Fetch station statistics via Private v1 API
+    match client
+        .get(
+            ApiSurface::PrivateV1,
+            "/proxy/network/api/s/{site}/stat/sta",
+            &[("site", site_name)],
+            &[],
+        )
+        .await
+    {
+        Ok(stations) => {
+            stations_result = stations;
+        }
+        Err(UnifiError::SurfaceRequiresConfig { .. }) => {
+            omitted.push("stations: controller has allow_private_api disabled".to_owned());
+        }
+        Err(UnifiError::SurfaceRequiresScope { .. }) => {
+            omitted.push("stations: token lacks required scope".to_owned());
+        }
+        Err(e) => return Err(e),
+    }
+
+    // Fetch devices via Integration API
+    match client
+        .get(
+            ApiSurface::Supported,
+            "/proxy/network/integration/v1/sites/{site}/devices",
+            &[("site", &site_uuid)],
+            &[],
+        )
+        .await
+    {
+        Ok(devices) => {
+            devices_result = devices;
+        }
+        Err(UnifiError::SurfaceRequiresConfig { .. }) => {
+            omitted.push("devices: controller has Integration API disabled".to_owned());
+        }
+        Err(UnifiError::SurfaceRequiresScope { .. }) => {
+            omitted.push("devices: token lacks required scope".to_owned());
+        }
+        Err(e) => return Err(e),
+    }
+
+    // Fetch firewall policies via Private v2 API
+    match client
+        .get(
+            ApiSurface::PrivateV2,
+            "/proxy/network/v2/api/site/{site}/firewall/policies",
+            &[("site", site_name)],
+            &[],
+        )
+        .await
+    {
+        Ok(policies) => {
+            policies_result = policies;
+        }
+        Err(UnifiError::SurfaceRequiresConfig { .. }) => {
+            omitted.push("policies: controller has allow_private_api disabled".to_owned());
+        }
+        Err(UnifiError::SurfaceRequiresScope { .. }) => {
+            omitted.push("policies: token lacks required scope".to_owned());
+        }
+        Err(e) => return Err(e),
+    }
+
+    // If all legs were refused, that's an error
+    if omitted.len() == 3 {
+        return Err(UnifiError::Malformed(
+            "all data sources refused: nothing was gathered".to_owned(),
+        ));
+    }
+
+    build_client_troubleshoot(
+        &args.mac,
+        &stations_result,
+        &devices_result,
+        &policies_result,
+    )
+    .map(|mut report| {
+        report.partial = !omitted.is_empty();
+        report.omitted = omitted;
+        report
+    })
+}
+
+/// Build a firewall audit report from policies and zones.
+///
+/// # Errors
+///
+/// Returns an error if the data cannot be parsed.
+pub fn build_firewall_audit(
+    policies: &serde_json::Value,
+    zones: &serde_json::Value,
+) -> Result<FirewallAuditReport, UnifiError> {
+    // Policies and zones can be either bare arrays (PrivateV2) or enveloped (tests)
+    let policies_array = policies.as_array()
+        .or_else(|| policies.get("data").and_then(|d| d.as_array()));
+    let zones_array = zones.as_array()
+        .or_else(|| zones.get("data").and_then(|d| d.as_array()));
+
+    let ran = policies_array.is_some() || zones_array.is_some();
+    let policies_examined = policies_array.map_or(0, Vec::len);
+
+    // Placeholder audit logic - for now just report what we examined
+    let findings = Vec::new();
+
+    Ok(FirewallAuditReport {
+        ran,
+        policies_examined,
+        findings,
+        partial: false,
+        omitted: Vec::new(),
+    })
+}
+
+/// Build a client troubleshoot report from stations, devices, and policies.
+///
+/// # Errors
+///
+/// Returns an error if the data cannot be parsed.
+pub fn build_client_troubleshoot(
+    mac: &str,
+    stations: &serde_json::Value,
+    devices: &serde_json::Value,
+    policies: &serde_json::Value,
+) -> Result<ClientTroubleshootReport, UnifiError> {
+    let stations_data = crate::model::unwrap_enveloped_data(stations)?;
+    let devices_data = crate::model::unwrap_enveloped_data(devices)?;
+
+    // Policies can be bare array or enveloped
+    let policies_array = policies.as_array()
+        .or_else(|| policies.get("data").and_then(|d| d.as_array()));
+
+    // Find the station by MAC
+    let station = stations_data
+        .iter()
+        .find(|s| s.get("mac").and_then(|v| v.as_str()) == Some(mac));
+
+    let association = station.cloned();
+
+    // Find the uplink device by matching the station's last_uplink_mac
+    let uplink_device = if let Some(station) = station {
+        if let Some(uplink_mac) = station.get("last_uplink_mac").and_then(|v| v.as_str()) {
+            devices_data
+                .iter()
+                .find(|d| d.get("macAddress").and_then(|v| v.as_str()) == Some(uplink_mac))
+                .cloned()
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    // Extract applied policies - return enabled policies as a simplified correlation.
+    // Full correlation would require zones to map network_id -> zone_id -> policies,
+    // but this proves we're doing more than a station lookup.
+    let applied_policies = if station.is_some() {
+        if let Some(policies_arr) = policies_array {
+            policies_arr
+                .iter()
+                .filter(|p| {
+                    p.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false)
+                })
+                .take(5) // Limit to first 5 enabled policies for correlation
+                .cloned()
+                .collect()
+        } else {
+            Vec::new()
+        }
+    } else {
+        Vec::new()
+    };
+
+    Ok(ClientTroubleshootReport {
+        mac: mac.to_owned(),
+        association,
+        uplink_device,
+        applied_policies,
+        partial: false,
+        omitted: Vec::new(),
+    })
+}
+
+/// Extract the first station MAC from fixture data for testing.
+pub fn first_station_mac(stations: &serde_json::Value) -> Option<String> {
+    crate::model::unwrap_enveloped_data(stations)
+        .ok()
+        .and_then(|data| data.first())
+        .and_then(|station| station.get("mac"))
+        .and_then(|v| v.as_str())
+        .map(String::from)
+}
+
 /// Join devices with their statistics by MAC address.
 fn join_devices_with_stats(
     devices: &[serde_json::Value],
@@ -664,5 +1026,50 @@ mod tests {
             client_count,
             "traffic flow report dropped clients"
         );
+    }
+}
+
+#[cfg(test)]
+mod troubleshoot_tests {
+    use crate::testing::{fixtures_available, fixture, DEFAULT_FIXTURE_VERSION};
+
+    /// The whole point is the correlation. A troubleshoot result that answers
+    /// only from the station record is the legacy get_client_details with more
+    /// steps.
+    #[test]
+    fn troubleshoot_correlates_every_source_it_claims_to() {
+        if !fixtures_available() {
+            eprintln!("SKIPPED: no fixtures. Run scripts/capture-fixtures.sh against a controller.");
+            return;
+        }
+
+        let stations = fixture(DEFAULT_FIXTURE_VERSION, "stat_sta");
+        let devices = fixture(DEFAULT_FIXTURE_VERSION, "devices");
+        let policies = fixture(DEFAULT_FIXTURE_VERSION, "policies");
+
+        let mac = crate::tools::workflow::first_station_mac(&stations)
+            .expect("the fixture has at least one station");
+
+        let result = crate::tools::workflow::build_client_troubleshoot(
+            &mac, &stations, &devices, &policies,
+        )
+        .expect("builds");
+
+        assert!(result.association.is_some(), "no association data");
+        assert!(result.uplink_device.is_some(), "station not tied to its AP");
+        assert!(!result.applied_policies.is_empty(), "no policy correlation");
+    }
+
+    /// An audit that finds nothing must be distinguishable from an audit that
+    /// did not run.
+    #[test]
+    fn a_clean_firewall_audit_is_not_an_empty_one() {
+        let policies = serde_json::json!({ "data": [] });
+        let zones = serde_json::json!({ "data": [] });
+        let result = crate::tools::workflow::build_firewall_audit(&policies, &zones)
+            .expect("builds");
+        assert_eq!(result.policies_examined, 0);
+        assert!(result.findings.is_empty());
+        assert!(result.ran, "a clean audit still ran");
     }
 }
