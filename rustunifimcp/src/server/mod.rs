@@ -19,7 +19,7 @@ use rustunifimcp_core::{
     inventory::ControllerRegistry,
     client::UnifiClient,
     error::UnifiError,
-    tools::{WRITE_TOOLS, admin, ops, read},
+    tools::{WRITE_TOOLS, admin, ops, read, workflow},
 };
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -402,6 +402,131 @@ impl UnifiServer {
 
         match ops::run_speed_test(args, &client).await {
             Ok(json) => tool_result(Ok::<_, String>(json), ResultFormat::PrettyJson, RESULT_LIMITS),
+            Err(error) => tool_error(error),
+        }
+    }
+
+    #[tool(
+        name = "unifi_site_health_report",
+        description = "Generate a site health report joining devices, health metrics, and statistics"
+    )]
+    async fn unifi_site_health_report(
+        &self,
+        Parameters(args): Parameters<workflow::SiteHealthReportArgs>,
+        context: RequestContext<RoleServer>,
+    ) -> CallToolResult {
+        let caller = Self::caller(&context);
+        if let Err(error) = authorize_call(caller.as_ref(), "unifi_site_health_report", Some(&args.controller), WRITE_TOOLS) {
+            return tool_error(error);
+        }
+
+        let client = match self.client_for(&args.controller) {
+            Ok(client) => client,
+            Err(result) => return *result,
+        };
+
+        match workflow::site_health_report(&client, &args).await {
+            Ok(report) => tool_result(Ok::<_, String>(report), ResultFormat::PrettyJson, RESULT_LIMITS),
+            Err(error) => tool_error(error),
+        }
+    }
+
+    #[tool(
+        name = "unifi_topology_report",
+        description = "Generate a network topology report joining edges, devices, and networks"
+    )]
+    async fn unifi_topology_report(
+        &self,
+        Parameters(args): Parameters<workflow::TopologyReportArgs>,
+        context: RequestContext<RoleServer>,
+    ) -> CallToolResult {
+        let caller = Self::caller(&context);
+        if let Err(error) = authorize_call(caller.as_ref(), "unifi_topology_report", Some(&args.controller), WRITE_TOOLS) {
+            return tool_error(error);
+        }
+
+        let client = match self.client_for(&args.controller) {
+            Ok(client) => client,
+            Err(result) => return *result,
+        };
+
+        match workflow::topology_report(&client, &args).await {
+            Ok(report) => tool_result(Ok::<_, String>(report), ResultFormat::PrettyJson, RESULT_LIMITS),
+            Err(error) => tool_error(error),
+        }
+    }
+
+    #[tool(
+        name = "unifi_traffic_flow_report",
+        description = "Generate a traffic flow report joining clients, statistics, and top applications"
+    )]
+    async fn unifi_traffic_flow_report(
+        &self,
+        Parameters(args): Parameters<workflow::TrafficFlowReportArgs>,
+        context: RequestContext<RoleServer>,
+    ) -> CallToolResult {
+        let caller = Self::caller(&context);
+        if let Err(error) = authorize_call(caller.as_ref(), "unifi_traffic_flow_report", Some(&args.controller), WRITE_TOOLS) {
+            return tool_error(error);
+        }
+
+        let client = match self.client_for(&args.controller) {
+            Ok(client) => client,
+            Err(result) => return *result,
+        };
+
+        match workflow::traffic_flow_report(&client, &args).await {
+            Ok(report) => tool_result(Ok::<_, String>(report), ResultFormat::PrettyJson, RESULT_LIMITS),
+            Err(error) => tool_error(error),
+        }
+    }
+
+    #[tool(
+        name = "unifi_firewall_audit",
+        description = "Audit firewall policies and zones for common misconfigurations"
+    )]
+    async fn unifi_firewall_audit(
+        &self,
+        Parameters(args): Parameters<workflow::FirewallAuditArgs>,
+        context: RequestContext<RoleServer>,
+    ) -> CallToolResult {
+        let caller = Self::caller(&context);
+        if let Err(error) = authorize_call(caller.as_ref(), "unifi_firewall_audit", Some(&args.controller), WRITE_TOOLS) {
+            return tool_error(error);
+        }
+
+        let client = match self.client_for(&args.controller) {
+            Ok(client) => client,
+            Err(result) => return *result,
+        };
+
+        match workflow::firewall_audit(&client, &args).await {
+            Ok(report) => tool_result(Ok::<_, String>(report), ResultFormat::PrettyJson, RESULT_LIMITS),
+            Err(error) => tool_error(error),
+        }
+    }
+
+    #[tool(
+        name = "unifi_client_troubleshoot",
+        description = "Troubleshoot a client by correlating association, uplink, and firewall policy"
+    )]
+    async fn unifi_client_troubleshoot(
+        &self,
+        Parameters(args): Parameters<workflow::ClientTroubleshootArgs>,
+        context: RequestContext<RoleServer>,
+    ) -> CallToolResult {
+        let caller = Self::caller(&context);
+        if let Err(error) = authorize_call(caller.as_ref(), "unifi_client_troubleshoot", Some(&args.controller), WRITE_TOOLS) {
+            return tool_error(error);
+        }
+
+        let client = match self.client_for(&args.controller) {
+            Ok(client) => client,
+            Err(result) => return *result,
+        };
+
+        match workflow::client_troubleshoot(&client, &args).await {
+            Ok(report) => tool_result(Ok::<_, String>(report), ResultFormat::PrettyJson, RESULT_LIMITS),
             Err(error) => tool_error(error),
         }
     }
