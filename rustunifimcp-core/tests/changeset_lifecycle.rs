@@ -86,6 +86,36 @@ async fn apply_refuses_when_the_preimage_no_longer_matches() {
     assert_eq!(controller.write_calls(), 0, "nothing was written");
 }
 
+/// A staleness check that could not run must refuse exactly like one that
+/// found drift.
+///
+/// The distinction matters because the failure modes look nothing alike from
+/// inside the server: drift is an answer, an error is the absence of one. The
+/// production implementation previously returned a bare `bool` from a method
+/// with no access to the pre-image, so the only value it could return was
+/// `true` -- every apply passed a staleness gate that had never examined
+/// anything. Refusing on error is what makes the gate load-bearing.
+#[tokio::test]
+async fn apply_refuses_when_the_staleness_check_itself_fails() {
+    let controller = MockController::with_failing_preimage_check();
+    let outcome = run_change_set(&controller, five_mutations()).await;
+    assert_eq!(
+        outcome.state,
+        State::RefusedStale,
+        "an unanswerable staleness check must refuse, not proceed"
+    );
+    assert_eq!(
+        controller.write_calls(),
+        0,
+        "nothing may be written when the gate could not be evaluated"
+    );
+    assert_eq!(
+        outcome.never_attempted.len(),
+        5,
+        "every mutation must be reported as never attempted, not as failed"
+    );
+}
+
 /// Rollback must pass the pre-image value for updates and deletes.
 #[tokio::test]
 async fn rollback_of_update_passes_preimage_value() {

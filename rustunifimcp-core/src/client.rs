@@ -677,9 +677,41 @@ impl crate::changeset::apply::ControllerOps for UnifiClient {
         }
     }
 
-    async fn preimage_matches(&self) -> bool {
-        // No drift detection implemented yet - always report match
-        true
+    async fn preimage_matches(
+        &self,
+        preimage: &crate::changeset::Preimage,
+        mutations: &[crate::changeset::StagedMutation],
+    ) -> Result<bool, crate::error::UnifiError> {
+        use crate::changeset::StagedMutation;
+
+        for mutation in mutations {
+            // Creates have no prior state to drift, and a restore's pre-image
+            // is the whole controller, which is not captured.
+            let (kind, id) = match mutation {
+                StagedMutation::Update { kind, id, .. } | StagedMutation::Delete { kind, id } => {
+                    (kind, id)
+                }
+                StagedMutation::Create { .. } | StagedMutation::Restore { .. } => continue,
+            };
+
+            let Some(recorded) = preimage.get_resource(id) else {
+                // The pre-image does not cover a resource this change set
+                // edits, so the approval was granted against a state that was
+                // never captured. Refuse rather than assume it is unchanged.
+                return Ok(false);
+            };
+
+            // A fetch failure propagates: apply_sequentially treats anything
+            // other than Ok(true) as stale, so an unreachable controller
+            // refuses the apply instead of proceeding blind.
+            let current = self.fetch_resource(kind, id).await?;
+            match current {
+                Some(live) if live == recorded => {}
+                _ => return Ok(false),
+            }
+        }
+
+        Ok(true)
     }
 
     async fn fetch_resource(

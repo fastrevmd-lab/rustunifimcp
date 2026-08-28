@@ -3,7 +3,7 @@
 //! A plain in-memory struct that simulates UniFi controller behavior without
 //! needing an HTTP server.
 
-use rustunifimcp_core::changeset::{ControllerOps, StagedMutation};
+use rustunifimcp_core::changeset::{ControllerOps, Preimage, StagedMutation};
 use rustunifimcp_core::error::UnifiError;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -31,6 +31,8 @@ enum Behavior {
     FailAt(usize),
     FailAtWithRollbackFailure { fail_at: usize, rollback_fail_at: usize },
     DriftBeforeApply,
+    /// The staleness check itself fails, rather than reporting drift.
+    PreimageCheckErrors,
 }
 
 impl MockController {
@@ -40,6 +42,22 @@ impl MockController {
         Self {
             state: Arc::new(MockState {
                 behavior: Behavior::SucceedAll,
+                write_calls: AtomicUsize::new(0),
+                rollback_calls: AtomicUsize::new(0),
+                rollback_history: Mutex::new(Vec::new()),
+            }),
+        }
+    }
+
+    /// Configure the mock so the staleness check itself fails.
+    ///
+    /// Distinct from drift: the controller state may be fine, but the check
+    /// could not be completed. The caller must refuse either way.
+    #[must_use]
+    pub fn with_failing_preimage_check() -> Self {
+        Self {
+            state: Arc::new(MockState {
+                behavior: Behavior::PreimageCheckErrors,
                 write_calls: AtomicUsize::new(0),
                 rollback_calls: AtomicUsize::new(0),
                 rollback_history: Mutex::new(Vec::new()),
@@ -126,7 +144,7 @@ impl ControllerOps for MockController {
             Behavior::FailAt(n) | Behavior::FailAtWithRollbackFailure { fail_at: n, .. } => {
                 index + 1 >= *n
             }
-            Behavior::DriftBeforeApply => false,
+            Behavior::DriftBeforeApply | Behavior::PreimageCheckErrors => false,
         };
 
         self.state.write_calls.fetch_add(1, Ordering::SeqCst);
@@ -179,8 +197,16 @@ impl ControllerOps for MockController {
         }
     }
 
-    async fn preimage_matches(&self) -> bool {
-        self.preimage_matches_sync()
+    async fn preimage_matches(
+        &self,
+        _preimage: &Preimage,
+        _mutations: &[StagedMutation],
+    ) -> Result<bool, UnifiError> {
+        if matches!(self.state.behavior, Behavior::PreimageCheckErrors) {
+            // The check could not be completed. Callers must refuse.
+            return Err(UnifiError::Malformed("mock pre-image check failed".to_owned()));
+        }
+        Ok(self.preimage_matches_sync())
     }
 
     async fn fetch_resource(

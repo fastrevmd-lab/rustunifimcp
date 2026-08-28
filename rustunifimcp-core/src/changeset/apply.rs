@@ -50,8 +50,9 @@ pub async fn apply_sequentially<C>(
 where
     C: ControllerOps,
 {
-    // Check if the pre-image still matches
-    if !controller.preimage_matches().await {
+    // Refuse if the controller moved under the approval, and refuse equally
+    // when the check itself could not be completed.
+    if !matches!(controller.preimage_matches(preimage, mutations).await, Ok(true)) {
         return Outcome {
             state: State::RefusedStale,
             succeeded: Vec::new(),
@@ -151,8 +152,21 @@ pub trait ControllerOps {
         created_id: Option<&str>,
     ) -> impl std::future::Future<Output = Result<(), crate::error::UnifiError>> + Send;
 
-    /// Check if the pre-image still matches the controller state.
-    fn preimage_matches(&self) -> impl std::future::Future<Output = bool> + Send;
+    /// Whether the resources the change set touches still look as they did
+    /// when the pre-image was captured.
+    ///
+    /// Takes the pre-image and the mutations because the question cannot be
+    /// answered without them: an implementation given only `&self` has nothing
+    /// to compare against, and the only thing it can return is a constant.
+    ///
+    /// `Err` means the check could not be completed. Callers must treat that
+    /// as stale and refuse -- an approval is a statement about a specific
+    /// controller state, and a check that did not run cannot renew it.
+    fn preimage_matches(
+        &self,
+        preimage: &Preimage,
+        mutations: &[StagedMutation],
+    ) -> impl std::future::Future<Output = Result<bool, crate::error::UnifiError>> + Send;
 
     /// Fetch a resource for verification.
     ///
