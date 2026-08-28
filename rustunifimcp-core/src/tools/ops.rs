@@ -10,7 +10,17 @@
 //! change-set operation instead. See `tools::changeset`.
 
 use schemars::JsonSchema;
-use serde::Deserialize;
+use serde::{de, Deserialize, Deserializer};
+
+/// Explanation for why `restore` is not an operational backup action.
+///
+/// This text appears both in the tool description and in the runtime error when
+/// a caller attempts `action: "restore"`, so it cannot drift.
+pub const RESTORE_NOT_OPERATIONAL: &str = "\
+`restore` is not an operational action. Restoring a controller backup overwrites \
+the entire configuration, so it is governed by the change-set lifecycle: \
+`unifi_create_change_set` -> `unifi_stage_change` -> `unifi_approve_change_set` -> \
+`unifi_apply_change_set`. Valid actions here are: trigger, list, download, validate.";
 
 /// What to do to an adopted device.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, JsonSchema)]
@@ -116,8 +126,7 @@ impl ClientActionArgs {
 /// this server will ever carry, so it goes through the change-set lifecycle:
 /// `unifi_create_change_set` -> `unifi_stage_change` -> `unifi_approve_change_set`
 /// -> `unifi_apply_change_set`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, JsonSchema)]
 #[non_exhaustive]
 pub enum BackupAction {
     /// Trigger a new backup.
@@ -128,6 +137,26 @@ pub enum BackupAction {
     Download,
     /// Validate a backup file's integrity.
     Validate,
+}
+
+impl<'de> Deserialize<'de> for BackupAction {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        match s.as_str() {
+            "restore" => Err(de::Error::custom(RESTORE_NOT_OPERATIONAL)),
+            "trigger" => Ok(Self::Trigger),
+            "list" => Ok(Self::List),
+            "download" => Ok(Self::Download),
+            "validate" => Ok(Self::Validate),
+            other => Err(de::Error::unknown_variant(
+                other,
+                &["trigger", "list", "download", "validate"],
+            )),
+        }
+    }
 }
 
 /// Arguments to `unifi_backup_action`.
@@ -344,6 +373,23 @@ mod tests {
         use super::BackupAction;
         let parsed: Result<BackupAction, _> = serde_json::from_str(r#""restore""#);
         assert!(parsed.is_err(), "restore must be a parse error, not a runtime refusal");
+    }
+
+    /// The restore refusal error message must explain the reason and name the
+    /// change-set path, so it cannot regress to a bare serde message.
+    #[test]
+    fn backup_restore_error_explains_the_governed_path() {
+        use super::BackupAction;
+        let parsed: Result<BackupAction, _> = serde_json::from_str(r#""restore""#);
+        let err_msg = parsed.expect_err("restore must be refused at parse time").to_string();
+        assert!(
+            err_msg.contains("change-set lifecycle") || err_msg.contains("change_set"),
+            "error must explain why restore is refused, got: {err_msg}"
+        );
+        assert!(
+            err_msg.contains("unifi_create_change_set"),
+            "error must name at least one change-set tool, got: {err_msg}"
+        );
     }
 
     #[test]

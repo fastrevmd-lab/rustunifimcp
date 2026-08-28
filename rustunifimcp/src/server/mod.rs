@@ -322,7 +322,7 @@ impl UnifiServer {
 
     #[tool(
         name = "unifi_backup_action",
-        description = "Execute a backup action (trigger, list, download, validate). Restore is not available - it goes through change control."
+        description = "Execute a backup action (trigger, list, download, validate). `restore` is not an operational action — it is governed by the change-set lifecycle (Phase 6): `unifi_create_change_set` -> `unifi_stage_change` -> `unifi_approve_change_set` -> `unifi_apply_change_set`."
     )]
     async fn unifi_backup_action(
         &self,
