@@ -4,9 +4,9 @@
 
 **Goal:** Build the UniFi Network MCP server and retire the homelab's dependency on LXC 980, replacing ~270 unauthenticated tools with ~24 curated, scoped, audited ones.
 
-**Architecture:** Two crates. `rustunifimcp-core` holds everything vendor-specific — the UniFi resource model, the four-surface tag enum, the tool surface, the workflows, and the change-set adaptation. `rustunifimcp` is a thin binary: CLI, TLS bootstrap, serve. Authentication, transport hardening, the outbound HTTP client, audit, policy, inventory, secrets, and change-set machinery all come from `mecmcp` v0.20.0 and are deliberately absent from this repo.
+**Architecture:** Two crates. `rustunifimcp-core` holds everything vendor-specific — the UniFi resource model, the four-surface tag enum, the tool surface, the workflows, and the change-set adaptation. `rustunifimcp` is a thin binary: CLI, TLS bootstrap, serve. Authentication, transport hardening, the outbound HTTP client, audit, policy, inventory, secrets, and change-set machinery all come from `mecmcp` v0.23.0 and are deliberately absent from this repo.
 
-**Tech Stack:** Rust edition 2024 (MSRV 1.88), `mecmcp` v0.20.0 (git, tag-pinned), `rmcp` 3, `axum` 0.8, `tokio` 1, `serde`/`serde_json`, `schemars` 1, `rustls` 0.23.
+**Tech Stack:** Rust edition 2024 (MSRV 1.88), `mecmcp` v0.23.0 (git, tag-pinned), `rmcp` 3, `axum` 0.8, `tokio` 1, `serde`/`serde_json`, `schemars` 1, `rustls` 0.23.
 
 **Spec:** [`docs/superpowers/specs/2026-08-26-rustunifimcp-cutover-design.md`](../specs/2026-08-26-rustunifimcp-cutover-design.md), which supersedes the sequencing in the [2026-07-24 design](../specs/2026-07-24-rustunifimcp-design.md). That earlier document remains authoritative for the tool surface, the API tagging scheme, and the change-control adaptation; read both.
 
@@ -16,7 +16,7 @@ Every task's requirements implicitly include this section.
 
 - **Edition 2024, MSRV 1.88.** `rust-version = "1.88"` in `[workspace.package]`.
 - **Workspace lints, already present in `Cargo.toml`:** `missing_docs = "warn"`, `unsafe_code = "forbid"`, `clippy::all = "warn"` (priority −1), `dbg_macro = "deny"`, `todo = "deny"`, `unwrap_used = "warn"`. Do not add `#[allow]` to silence these; fix the code.
-- **`mecmcp` is pinned to an exact tag: `v0.20.0`.** Never relax the tag to a branch or a version range. Bumping it is a coordinated seven-repo change.
+- **`mecmcp` is pinned to an exact tag: `v0.23.0`.** Never relax the tag to a branch or a version range. Bumping it is a coordinated seven-repo change.
 - **TLS verification is always on.** `mecmcp-http` exposes no way to disable certificate verification and no `danger_accept_invalid_certs` exists anywhere in `mecmcp`. Private CAs are reached through `extra_root_certificates` (additive trust) only. Do not add an insecure flag; if you believe you need one, the deployment is wrong.
 - **Secrets never live in the inventory file.** The UniFi API key is named by `controllers.json` and loaded through `mecmcp-secret` from a 0600 file or an environment variable. Modes are enforced at startup — wrong mode is a startup failure, deliberately.
 - **The word "atomic" must not appear in any change-set tool description.** UniFi cannot promise it.
@@ -722,18 +722,18 @@ rcgen        = "0.14"
 tokio-rustls = "0.26"
 
 # mecmcp is consumed read-only at an exact pinned version. Do not relax the tag.
-mecmcp-audit     = { version = "0.20.0", git = "https://github.com/fastrevmd-lab/mecmcp", tag = "v0.20.0" }
-mecmcp-auth      = { version = "0.20.0", git = "https://github.com/fastrevmd-lab/mecmcp", tag = "v0.20.0" }
-mecmcp-changeset = { version = "0.20.0", git = "https://github.com/fastrevmd-lab/mecmcp", tag = "v0.20.0" }
-mecmcp-http      = { version = "0.20.0", git = "https://github.com/fastrevmd-lab/mecmcp", tag = "v0.20.0" }
-mecmcp-inventory = { version = "0.20.0", git = "https://github.com/fastrevmd-lab/mecmcp", tag = "v0.20.0" }
-mecmcp-job       = { version = "0.20.0", git = "https://github.com/fastrevmd-lab/mecmcp", tag = "v0.20.0" }
-mecmcp-openapi   = { version = "0.20.0", git = "https://github.com/fastrevmd-lab/mecmcp", tag = "v0.20.0" }
-mecmcp-policy    = { version = "0.20.0", git = "https://github.com/fastrevmd-lab/mecmcp", tag = "v0.20.0" }
-mecmcp-runtime   = { version = "0.20.0", git = "https://github.com/fastrevmd-lab/mecmcp", tag = "v0.20.0" }
-mecmcp-secret    = { version = "0.20.0", git = "https://github.com/fastrevmd-lab/mecmcp", tag = "v0.20.0" }
-mecmcp-server    = { version = "0.20.0", git = "https://github.com/fastrevmd-lab/mecmcp", tag = "v0.20.0" }
-mecmcp-transport = { version = "0.20.0", git = "https://github.com/fastrevmd-lab/mecmcp", tag = "v0.20.0" }
+mecmcp-audit     = { version = "0.23.0", git = "https://github.com/fastrevmd-lab/mecmcp", tag = "v0.23.0" }
+mecmcp-auth      = { version = "0.23.0", git = "https://github.com/fastrevmd-lab/mecmcp", tag = "v0.23.0" }
+mecmcp-changeset = { version = "0.23.0", git = "https://github.com/fastrevmd-lab/mecmcp", tag = "v0.23.0" }
+mecmcp-http      = { version = "0.23.0", git = "https://github.com/fastrevmd-lab/mecmcp", tag = "v0.23.0" }
+mecmcp-inventory = { version = "0.23.0", git = "https://github.com/fastrevmd-lab/mecmcp", tag = "v0.23.0" }
+mecmcp-job       = { version = "0.23.0", git = "https://github.com/fastrevmd-lab/mecmcp", tag = "v0.23.0" }
+mecmcp-openapi   = { version = "0.23.0", git = "https://github.com/fastrevmd-lab/mecmcp", tag = "v0.23.0" }
+mecmcp-policy    = { version = "0.23.0", git = "https://github.com/fastrevmd-lab/mecmcp", tag = "v0.23.0" }
+mecmcp-runtime   = { version = "0.23.0", git = "https://github.com/fastrevmd-lab/mecmcp", tag = "v0.23.0" }
+mecmcp-secret    = { version = "0.23.0", git = "https://github.com/fastrevmd-lab/mecmcp", tag = "v0.23.0" }
+mecmcp-server    = { version = "0.23.0", git = "https://github.com/fastrevmd-lab/mecmcp", tag = "v0.23.0" }
+mecmcp-transport = { version = "0.23.0", git = "https://github.com/fastrevmd-lab/mecmcp", tag = "v0.23.0" }
 ```
 
 And complete `[profile.release]`, which currently has only `codegen-units`:
@@ -774,7 +774,7 @@ cargo fetch
 grep -A2 'name = "mecmcp-http"' Cargo.lock
 ```
 
-Expected: the lock names `mecmcp-http 0.20.0` from the git source at tag `v0.20.0`. If cargo resolves a different version, the tag is wrong — fix it, do not proceed.
+Expected: the lock names `mecmcp-http 0.23.0` from the git source at tag `v0.23.0`. If cargo resolves a different version, the tag is wrong — fix it, do not proceed.
 
 - [ ] **Step 4: Write the failing test for the error type**
 
@@ -913,7 +913,7 @@ Expected: PASS, and clippy clean.
 
 ```bash
 git add Cargo.toml Cargo.lock rustunifimcp-core/Cargo.toml rustunifimcp-core/src/error.rs rustunifimcp-core/src/lib.rs
-git commit -m "feat: pin mecmcp v0.20.0 and add the core error type
+git commit -m "feat: pin mecmcp v0.23.0 and add the core error type
 
 Two properties are tested rather than assumed: a vanished private endpoint
 renders as attributable drift naming surface, path and controller version, and
@@ -921,7 +921,7 @@ no variant carries a URL, because the API key travels in a header on every
 request."
 ```
 
-**Verification:** `cargo test -p rustunifimcp-core` passes; `Cargo.lock` pins every mecmcp crate at `v0.20.0`.
+**Verification:** `cargo test -p rustunifimcp-core` passes; `Cargo.lock` pins every mecmcp crate at `v0.23.0`.
 
 ### Task 6: Controller inventory
 

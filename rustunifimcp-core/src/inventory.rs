@@ -182,12 +182,12 @@ mod tests {
     /// not only inside a controller entry. A top-level key would be silently
     /// ignored without deny_unknown_fields on the envelope as well.
     ///
-    /// BLOCKED: mecmcp-inventory v0.20.0's `CanonicalEnvelope` does not enforce
+    /// BLOCKED: mecmcp-inventory v0.23.0's `CanonicalEnvelope` does not enforce
     /// `deny_unknown_fields`, so unknown top-level fields are silently accepted
     /// instead of being rejected as a parse error. This test documents the
     /// expected behavior once the upstream crate is fixed.
     #[test]
-    #[ignore = "mecmcp-inventory v0.20.0 does not enforce deny_unknown_fields on the envelope"]
+    #[ignore = "mecmcp-inventory v0.23.0 does not enforce deny_unknown_fields on the envelope"]
     fn a_top_level_api_key_is_rejected_at_load_time() {
         use std::io::Write;
         use tempfile::NamedTempFile;

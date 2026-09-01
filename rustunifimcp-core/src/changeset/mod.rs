@@ -18,7 +18,7 @@ pub use preimage::{Preimage, StagedMutation};
 pub use rollback::rollback_to_preimage;
 pub use validate::{check_references, validate_locally};
 
-// Atomicity type is not yet in mecmcp-changeset v0.20.0.
+// Atomicity type is not yet in mecmcp-changeset v0.23.0.
 // Tracked: https://github.com/fastrevmd-lab/mecmcp/issues/335
 /// What a vendor's transaction implementation can actually guarantee.
 ///

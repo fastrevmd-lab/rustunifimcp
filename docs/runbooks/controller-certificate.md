@@ -1,7 +1,7 @@
 # Runbook — UniFi controller certificate
 
 Why this exists: `mecmcp-http` provides **no way to disable TLS verification**
-(verified at the pinned tag `v0.20.0` — `danger_accept_invalid` appears nowhere
+(verified at the pinned tag `v0.23.0` — `danger_accept_invalid` appears nowhere
 in the crate family, and `HttpClientConfig` documents "There is **no** API to
 disable certificate verification"). The legacy server on LXC 980 runs with
 `UNIFI_LOCAL_VERIFY_SSL=false`; `rustunifimcp` has no equivalent and will not be

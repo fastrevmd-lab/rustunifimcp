@@ -16,7 +16,7 @@ Rewritten 2026-08-26.
 
 The previous version of this file deferred all implementation on the grounds
 that `mecmcp` had tagged exactly one crate. That is no longer true. `mecmcp` is
-at **v0.20.0 with 14 crates**, and every phase gate this file used to carry has
+at **v0.23.0 with 14 crates**, and every phase gate this file used to carry has
 opened.
 
 Waiting was the right call and it paid: `mecmcp-http` now supplies the outbound

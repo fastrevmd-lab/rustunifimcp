@@ -14,7 +14,7 @@ The goal is one sentence: **stop depending on LXC 980.**
 
 The 2026-07-24 design was written when `mecmcp` had tagged exactly one crate.
 It deferred implementation on that basis and said so plainly. A month later the
-premise is gone — `mecmcp` is at **v0.20.0 with 14 crates**, and every phase
+premise is gone — `mecmcp` is at **v0.23.0 with 14 crates**, and every phase
 gate in `PLAN.md` is open. Rather than amend a plan whose organising idea was
 "wait", this document replaces the sequence and records what else moved.
 
@@ -23,7 +23,7 @@ gate in `PLAN.md` is open. Rather than amend a plan whose organising idea was
 ### 1. The gate is open
 
 `PLAN.md` states that `mecmcp` "has shipped exactly one crate, `mecmcp-auth`
-(tag `auth-v0.1.1`)". As of v0.20.0 the workspace ships:
+(tag `auth-v0.1.1`)". As of v0.23.0 the workspace ships:
 
 ```
 mecmcp-audit   mecmcp-auth    mecmcp-changeset  mecmcp-device
