@@ -51,3 +51,28 @@ a capability gap.
 Packaging and the installer live in `packaging/`. TLS is terminated by the server
 itself (`--tls-cert` / `--tls-key` from `/etc/unifimcp/tls/`), not by a proxy, so a
 certbot renewal has to land inside the container.
+
+## `--tools "*"` means READ-ONLY, not "all tools"
+
+This is the single most misleading thing about deploying this server, and it cost a
+session on 2026-08-30.
+
+`rustunifimcp token add --tools` documents `*` as *"or '*' for read-only tools only"*.
+A token minted with `--tools "*"` is granted the 12 read tools and **none of the 12
+writes**, even though `token list` displays its TOOLS column as `*`, which reads as
+fully permissive. The server then advertises 12 tools over `tools/list` and a caller
+sees a read-only server with no error explaining the gap.
+
+**To grant write tools, name every one explicitly** in a comma-separated list. There is
+no wildcard that includes them.
+
+Do not mistake this for a lab-mode problem. `--lab-mode` does **not** gate tool
+exposure: in `server/mod.rs` it only decides the `approver` / `approval_waiver` fields
+recorded on a change set, and the `write_tool_count` in `unifimcp_status` is a static
+`WRITE_TOOLS.len()`, not a count of what is exposed. Both flags are needed on a
+single-operator deployment, for different reasons — the token scope decides what is
+*advertised*, lab mode decides whether an approval can proceed without a second person.
+
+Diagnosing it: probe `tools/list` directly rather than trusting the client. A client
+caches its tool list at connect time, so a `/mcp` reconnect that still shows 12 tools is
+ambiguous between a stale client and a real server-side gate; the wire answer is not.
