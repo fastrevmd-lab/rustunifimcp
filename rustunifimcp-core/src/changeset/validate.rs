@@ -68,11 +68,18 @@ pub fn check_references(data: &Value, mutations: &[StagedMutation]) -> Result<()
 
 #[cfg(test)]
 mod tests {
-    use crate::testing::{DEFAULT_FIXTURE_VERSION, fixture};
+    use crate::testing::{DEFAULT_FIXTURE_VERSION, fixture, fixtures_available};
 
     /// Referential checks are local because no controller-side dry run exists.
     #[test]
     fn a_policy_referencing_an_absent_zone_is_refused() {
+        if !fixtures_available() {
+            eprintln!(
+                "SKIPPED: no fixtures. Run scripts/capture-fixtures.sh against a controller."
+            );
+            return;
+        }
+
         let zones = fixture(DEFAULT_FIXTURE_VERSION, "zones");
         let staged = super::StagedMutation::create(
             "firewall_policy",

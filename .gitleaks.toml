@@ -1,0 +1,23 @@
+# Gitleaks configuration extending the default rules.
+#
+# The fixture-scrub gate's negative tests must contain credential-shaped values:
+# their whole purpose is to prove `scripts/verify-fixtures-scrubbed.sh` rejects
+# such values before a fixture can be committed. Two of them trip gitleaks'
+# generic-api-key rule.
+#
+# Both are synthetic and verifiably so — they are base64 of ASCII filler:
+#   wg_private_key -> "password1234567890abcdefghijklmnopqrstuvwxyz"
+#   guest_token    -> "helloworldhelloworldhelloworldhelloworld"
+#
+# They are allowlisted by their exact literal value rather than by file path, so
+# a genuine credential added to the same test file would still be caught.
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Synthetic credential-shaped values in the fixture-scrub gate's negative tests"
+regexes = [
+  '''cGFzc3dvcmQxMjM0NTY3ODkwYWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXo=''',
+  '''aGVsbG93b3JsZGhlbGxvd29ybGRoZWxsb3dvcmxkaGVsbG93b3JsZA==''',
+]
