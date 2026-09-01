@@ -57,11 +57,16 @@ jobs:
           # counts if its own commit's Cargo version matches it.
           LATEST_STABLE=""
           for t in $(git tag -l 'v[0-9]*.[0-9]*.[0-9]*' | awk '!/-/' | sort -V); do
+            # `|| true` matters: this step runs under `set -euo pipefail`, so a tag
+            # pointing at a tree, a blob, or a commit with no Cargo.toml would make
+            # git show fail, fail the pipeline, and abort the whole release step —
+            # one malformed tag would then block every future release until deleted.
+            # An unreadable manifest just means "not a valid release tag": skip it.
             tag_cargo=$(git show "$t:Cargo.toml" 2>/dev/null | awk '
               /^\[workspace\.package\]$/ { in_wp = 1; next }
               /^\[/ { in_wp = 0 }
               in_wp && /^version = / { gsub(/"/, "", $3); print $3; exit }
-            ')
+            ' || true)
             [ "${t#v}" = "$tag_cargo" ] && LATEST_STABLE="$t"
           done
           if [ "v$VERSION" = "$LATEST_STABLE" ]; then
