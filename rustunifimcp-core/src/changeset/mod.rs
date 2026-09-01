@@ -18,21 +18,11 @@ pub use preimage::{Preimage, StagedMutation};
 pub use rollback::rollback_to_preimage;
 pub use validate::{check_references, validate_locally};
 
-// Atomicity type is not yet in mecmcp-changeset v0.23.0.
-// Tracked: https://github.com/fastrevmd-lab/mecmcp/issues/335
-/// What a vendor's transaction implementation can actually guarantee.
-///
-/// Junos and PAN-OS answer `true` to all three. UniFi answers `false` to all
-/// three, and shared code that renders approval prompts can then say so.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Atomicity {
-    /// All staged mutations land, or none do.
-    pub atomic_apply: bool,
-    /// The device can validate the change before it is applied.
-    pub dry_run_validation: bool,
-    /// A failed apply can be reverted to the pre-change state reliably.
-    pub guaranteed_rollback: bool,
-}
+// mecmcp#335 landed in mecmcp-changeset v0.22.0: `Atomicity` and
+// `DeviceTransaction::atomicity()` are exported upstream, so this crate
+// re-exports the shared type rather than defining an incompatible twin.
+// A local copy would not be accepted by shared approval renderers.
+pub use mecmcp_changeset::Atomicity;
 
 /// UniFi Network transaction.
 ///
@@ -50,11 +40,7 @@ impl UnifiTransaction {
     /// make the server claim otherwise.
     #[must_use]
     pub const fn atomicity() -> Atomicity {
-        Atomicity {
-            atomic_apply: false,
-            dry_run_validation: false,
-            guaranteed_rollback: false,
-        }
+        Atomicity::live_writes()
     }
 }
 
