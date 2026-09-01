@@ -1,0 +1,33 @@
+# The build context must contain only what the Dockerfile copies.
+#
+# Without this file the context includes everything git ignores: the recorded
+# live-controller fixtures under rustunifimcp-core/tests/fixtures/, the real
+# fixture denylist, any *.unifikey, and the whole target/ tree. A remote or
+# cached BuildKit builder can retain that, and `COPY rustunifimcp-core/` would
+# put fixture directories into an intermediate layer.
+#
+# A CI build checks out from git and so never had them; a build from a
+# developer's working tree does.
+
+# Secrets and credentials
+*.unifikey
+.env
+.env.*
+scripts/fixture-denylist.txt
+
+# Recorded controller fixtures — captured from a live controller, gitignored
+# on purpose, and not needed to build.
+rustunifimcp-core/tests/fixtures/
+
+# Build output
+target/
+
+# VCS and tooling
+.git/
+.github/
+.gitignore
+.dockerignore
+
+# Docs and local notes
+*.md
+docs/
