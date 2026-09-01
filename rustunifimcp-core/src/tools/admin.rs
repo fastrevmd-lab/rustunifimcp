@@ -111,7 +111,7 @@ pub async fn unifimcp_status(
 
     Ok(json!({
         "server_version": env!("CARGO_PKG_VERSION"),
-        "mecmcp_version": "0.20.0",
+        "mecmcp_version": "0.23.0",
         "lab_mode": lab_mode,
         "tool_count": TOOL_NAMES.len(),
         "write_tool_count": WRITE_TOOLS.len(),
