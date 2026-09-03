@@ -70,9 +70,44 @@ pub struct UnifiServer {
     /// policy, the claim-before-apply and the preview-bound approval, and the
     /// approval TTL that `--approval-timeout-secs` configures.
     coordinator: Arc<ChangesetCoordinator>,
+    /// Change sets created but not yet staged into.
+    ///
+    /// The coordinator cannot hold one. Its persistence layer refuses to load
+    /// a state file containing a change set with no actions, so persisting an
+    /// empty plan makes the *whole* store unloadable at the next start -- a
+    /// fault that CI cannot see, because nothing in a test run restarts. And
+    /// an empty change set has nothing to protect: no plan, no pre-image, no
+    /// approval. So it is held here until the first mutation is staged, and a
+    /// restart loses exactly nothing.
+    drafts: Arc<std::sync::RwLock<BTreeMap<String, Draft>>>,
+    /// SSDF evidence, when the pipeline is configured.
+    ///
+    /// The coordinator emits the approval records itself. The proposal and the
+    /// two apply records belong to paths this server drives, so it needs the
+    /// recorder too.
+    evidence: Option<Arc<mecmcp_audit::recorder::EvidenceRecorder>>,
     /// Tool router.
     tool_router: ToolRouter<Self>,
 }
+
+/// A change set that exists but has nothing staged into it.
+#[derive(Debug, Clone)]
+pub struct Draft {
+    /// The controller it was created against.
+    controller: String,
+    /// The principal who created it.
+    owner: String,
+    /// What it is for, which becomes the preview's description.
+    description: String,
+    /// When it was created, so a forgotten draft does not live forever.
+    created_at_unix: u64,
+}
+
+/// How many unstaged change sets may be held at once.
+///
+/// Bounded because a draft is reachable without touching a controller, so an
+/// unbounded map is a way to grow the process with no write ever happening.
+const MAX_DRAFTS: usize = 32;
 
 impl UnifiServer {
     /// Create a new server with the given registry, lab mode, and coordinator.
@@ -84,6 +119,7 @@ impl UnifiServer {
         registry: Arc<ControllerRegistry>,
         lab_mode: bool,
         coordinator: Arc<ChangesetCoordinator>,
+        evidence: Option<Arc<mecmcp_audit::recorder::EvidenceRecorder>>,
     ) -> Result<Self, UnifiError> {
         let clients = Self::build_clients(&registry)?;
         Ok(Self {
@@ -91,6 +127,8 @@ impl UnifiServer {
             clients: Arc::new(std::sync::RwLock::new(clients)),
             lab_mode,
             coordinator,
+            drafts: Arc::new(std::sync::RwLock::new(BTreeMap::new())),
+            evidence,
             tool_router: Self::unifi_tool_router(),
         })
     }
@@ -244,6 +282,97 @@ impl UnifiServer {
             .and_then(|value| value.as_str())
             .unwrap_or_default()
             .to_owned())
+    }
+
+    /// Record a change set that has nothing staged yet.
+    ///
+    /// Mirrors the coordinator's own rule -- one pending change set per
+    /// principal per controller -- so a draft cannot be used to sidestep it,
+    /// and sweeps drafts older than the approval window on the way in.
+    fn hold_draft(&self, id: String, draft: Draft) -> Result<(), Box<CallToolResult>> {
+        let deadline = self.coordinator.approval_ttl().as_secs();
+        let now = unix_seconds_now();
+
+        let mut drafts = self
+            .drafts
+            .write()
+            .map_err(|_| Box::new(tool_error("drafts lock poisoned".to_owned())))?;
+
+        drafts.retain(|_, held| now.saturating_sub(held.created_at_unix) <= deadline);
+
+        if let Some((existing, _)) = drafts
+            .iter()
+            .find(|(_, held)| held.owner == draft.owner && held.controller == draft.controller)
+        {
+            return Err(Box::new(tool_error(format!(
+                "change set {existing} on '{}' has nothing staged yet; stage into it or \
+                 let it lapse before creating another",
+                draft.controller
+            ))));
+        }
+
+        if drafts.len() >= MAX_DRAFTS {
+            return Err(Box::new(tool_error(format!(
+                "{MAX_DRAFTS} change sets are open with nothing staged; stage into one or \
+                 let them lapse"
+            ))));
+        }
+
+        drafts.insert(id, draft);
+        Ok(())
+    }
+
+    /// The draft for this id, if it is one and the caller named its controller.
+    fn draft(&self, change_set_id: &str, controller: &str) -> Option<Draft> {
+        self.drafts
+            .read()
+            .ok()?
+            .get(change_set_id)
+            .filter(|draft| draft.controller == controller)
+            .cloned()
+    }
+
+    /// Forget a draft that has become a real change set.
+    fn release_draft(&self, change_set_id: &str) {
+        if let Ok(mut drafts) = self.drafts.write() {
+            drafts.remove(change_set_id);
+        }
+    }
+
+    /// Refuse a plan the state file could not be reloaded with.
+    ///
+    /// Neither `insert_change_set` nor `update_change_set` checks the
+    /// configured ceilings against a record's actions -- only
+    /// `create_change_set` does, and this server cannot use it because a change
+    /// set is created before anything is staged into it. Without this a caller
+    /// can stage past the limits, have the record persist, and find the server
+    /// refusing to start afterwards because the load path enforces a structural
+    /// cap the write path did not.
+    fn check_plan_limits(record: &ChangeSetRecord) -> Result<(), Box<CallToolResult>> {
+        let limits = crate::changeset_state::limits();
+
+        mecmcp_changeset::validate_change_set_actions(&record.actions, &limits).map_err(
+            |error| {
+                Box::new(tool_error(format!(
+                    "staged plan refused ({}): {}",
+                    error.field(),
+                    error.message()
+                )))
+            },
+        )?;
+
+        if let Some(preview) = record.preview.as_ref()
+            && preview.artifact.len() > limits.max_preview_bytes
+        {
+            return Err(Box::new(tool_error(format!(
+                "the preview for this change set is {} bytes, over the {} the store \
+                 accepts; stage fewer changes at once",
+                preview.artifact.len(),
+                limits.max_preview_bytes
+            ))));
+        }
+
+        Ok(())
     }
 
     /// Rewrite a record's plan, its fingerprint, its digest and its preview.
@@ -870,53 +999,30 @@ impl UnifiServer {
             return *result;
         }
 
-        // Empty, `Planned`, and already carrying a preview. Nothing is staged
-        // yet, so the preview says so -- and approve refuses an empty plan
-        // separately, which is what stops an approval over a preview with no
-        // changes in it.
-        let empty = Preimage::from_resources(Vec::new());
-        let record = ChangeSetRecord {
-            id: crate::changeset_state::new_change_set_id(),
+        // Held as a draft, not written to the store. The coordinator's
+        // persistence layer refuses to load a state file containing a change
+        // set with no actions, so writing an empty plan here would make the
+        // whole store unloadable at the next restart -- and nothing in a test
+        // run restarts, so CI would never see it. The record is created on the
+        // first stage, which is also when there is a plan to propose.
+        let id = crate::changeset_state::new_change_set_id();
+        let draft = Draft {
+            controller: args.controller.clone(),
             owner,
-            device: args.controller.clone(),
-            expected_candidate_fingerprint: String::new(),
-            actions: Vec::new(),
-            digest: String::new(),
-            state: ChangeSetState::Planned,
-            approver: None,
-            approval: None,
-            expires_at_unix: unix_seconds_now()
-                .saturating_add(self.coordinator.approval_ttl().as_secs()),
-            operation_id: None,
-            policy_signature: String::new(),
-            targets: Vec::new(),
-            preview: None,
-            task_id: None,
-            apply_without_handle: false,
+            description: args.description,
+            created_at_unix: unix_seconds_now(),
         };
 
-        let record = match Self::with_plan(record, &[], &empty, &args.description) {
-            Ok(record) => record,
-            Err(result) => return *result,
-        };
-        let id = record.id.clone();
-
-        // One pending change set per principal per controller, which the
-        // coordinator enforces. Worth knowing rather than discovering: a second
-        // create on the same controller by the same token is refused until the
-        // first reaches an outcome or is cancelled.
-        if let Err(error) = self.coordinator.insert_change_set(record).await {
-            return tool_error(format!(
-                "failed to store change set ({}): {}",
-                error.field(),
-                error.message()
-            ));
+        if let Err(result) = self.hold_draft(id.clone(), draft) {
+            return *result;
         }
 
         let result = serde_json::json!({
             "change_set_id": id,
             "controller": args.controller,
-            "state": ChangeSetState::Planned.as_str(),
+            "state": "draft",
+            "note": "nothing is staged yet; a draft is held in memory and is lost on \
+                     restart. It becomes a change set on the first unifi_stage_change.",
         });
 
         tool_result(
@@ -945,25 +1051,36 @@ impl UnifiServer {
             return tool_error(error);
         }
 
-        let record = match self.record_for(&args.change_set_id, &args.controller).await {
-            Ok(record) => record,
-            Err(result) => return *result,
+        // A draft on its first stage, or a change set already in the store.
+        let draft = self.draft(&args.change_set_id, &args.controller);
+        let existing = match draft {
+            Some(_) => None,
+            None => match self.record_for(&args.change_set_id, &args.controller).await {
+                Ok(record) => Some(record),
+                Err(result) => return *result,
+            },
         };
 
         // Staging rewrites the plan, and with it the digest an approval binds
         // to. Allowing it after approval would let a reviewed plan be swapped
         // for an unreviewed one while the approval stayed attached, which is
         // the whole reason the digest exists.
-        if record.state != ChangeSetState::Planned {
+        if let Some(ref record) = existing
+            && record.state != ChangeSetState::Planned
+        {
             return tool_error(format!(
                 "change set is {} and can no longer be staged into; create a new one",
                 record.state.as_str()
             ));
         }
 
-        let description = match Self::description_of(&record) {
-            Ok(description) => description,
-            Err(result) => return *result,
+        let (description, owner) = match (&draft, &existing) {
+            (Some(draft), _) => (draft.description.clone(), draft.owner.clone()),
+            (None, Some(record)) => match Self::description_of(record) {
+                Ok(description) => (description, record.owner.clone()),
+                Err(result) => return *result,
+            },
+            (None, None) => unreachable!("one of the two is always present"),
         };
 
         let client = match self.client_for(&args.controller) {
@@ -971,9 +1088,12 @@ impl UnifiServer {
             Err(result) => return *result,
         };
 
-        let (mut mutations, _) = match Self::plan_of(&record) {
-            Ok(plan) => plan,
-            Err(result) => return *result,
+        let mut mutations = match &existing {
+            Some(record) => match Self::plan_of(record) {
+                Ok(plan) => plan.0,
+                Err(result) => return *result,
+            },
+            None => Vec::new(),
         };
 
         for spec in args.mutations {
@@ -1000,15 +1120,69 @@ impl UnifiServer {
         };
 
         let staged_count = mutations.len();
-        let staged = match Self::with_plan(record, &mutations, &preimage, &description) {
+        let base = existing.unwrap_or_else(|| ChangeSetRecord {
+            id: args.change_set_id.clone(),
+            owner,
+            device: args.controller.clone(),
+            expected_candidate_fingerprint: String::new(),
+            actions: Vec::new(),
+            digest: String::new(),
+            state: ChangeSetState::Planned,
+            approver: None,
+            approval: None,
+            expires_at_unix: unix_seconds_now()
+                .saturating_add(self.coordinator.approval_ttl().as_secs()),
+            operation_id: None,
+            policy_signature: String::new(),
+            targets: Vec::new(),
+            preview: None,
+            task_id: None,
+            apply_without_handle: false,
+        });
+
+        let staged = match Self::with_plan(base, &mutations, &preimage, &description) {
             Ok(record) => record,
             Err(result) => return *result,
         };
 
-        // Conditional on the state still being `Planned`. An unconditional
-        // write would let a concurrent approval be overwritten by a staging
-        // call that read the record before it.
-        if let Err(error) = self
+        if let Err(result) = Self::check_plan_limits(&staged) {
+            return *result;
+        }
+
+        if draft.is_some() {
+            // The plan exists now, so the change set does too -- and so does
+            // something to propose. `insert_change_set` is what enforces one
+            // pending set per principal per controller.
+            let (digest, device, owner) = (
+                staged.digest.clone(),
+                staged.device.clone(),
+                staged.owner.clone(),
+            );
+            if let Err(error) = self.coordinator.insert_change_set(staged).await {
+                return tool_error(format!(
+                    "failed to store change set ({}): {}",
+                    error.field(),
+                    error.message()
+                ));
+            }
+            self.release_draft(&args.change_set_id);
+
+            // The coordinator emits this itself from `create_change_set`, which
+            // this server cannot use: that call requires the actions up front,
+            // and a change set here is created before anything is staged.
+            if let Some(recorder) = self.evidence.as_ref() {
+                recorder.proposal(
+                    &args.change_set_id,
+                    &args.change_set_id,
+                    &device,
+                    &owner,
+                    &digest,
+                );
+            }
+        } else if let Err(error) = self
+            // Conditional on the state still being `Planned`. An unconditional
+            // write would let a concurrent approval be overwritten by a staging
+            // call that read the record before it.
             .coordinator
             .update_change_set_from(ChangeSetState::Planned, staged)
             .await
@@ -1341,6 +1515,35 @@ impl UnifiServer {
         // controller knows which of them landed. Detectable, not recoverable,
         // and a human has to look -- which is the honest state, and keeps the
         // approval from being spent twice.
+        // The deadline is checked here because the claim does not check it. It
+        // refuses anything that is not `Approved`, and approve refuses an
+        // expired set -- but a set approved inside the window and applied long
+        // after it still claims cleanly, which is exactly the case
+        // `--approval-timeout-secs` exists to stop. `change_set_status` is the
+        // path that transitions and persists `Approved -> Expired`, so the
+        // record is left Expired rather than merely reported as stale.
+        match self
+            .coordinator
+            .change_set_status(args.change_set_id.clone(), args.controller.clone())
+            .await
+        {
+            Ok(status) if status.state == ChangeSetState::Expired => {
+                return tool_error(format!(
+                    "apply refused: the approval window closed at {}; re-plan and \
+                     re-approve before applying",
+                    status.expires_at_unix
+                ));
+            }
+            Ok(_) => {}
+            Err(error) => {
+                return tool_error(format!(
+                    "apply refused ({}): {}",
+                    error.field(),
+                    error.message()
+                ));
+            }
+        }
+
         let claimed = match self
             .coordinator
             .claim_change_set_for_apply(&args.change_set_id, &args.controller, ApplyHandle::None)
@@ -1378,6 +1581,29 @@ impl UnifiServer {
             }
         };
 
+        let principal = Self::principal(caller.as_ref());
+
+        // Recorded before the controller is touched, and the apply is refused
+        // if it cannot be made durable. An intent that survives only in memory
+        // proves nothing about a crash, and the point of the record is to
+        // establish that this write was going to happen before it did.
+        if let Some(recorder) = self.evidence.as_ref()
+            && let Err(error) = recorder.apply_intent(
+                &args.change_set_id,
+                &args.change_set_id,
+                &args.controller,
+                &principal,
+            )
+        {
+            let mut abandoned = claimed;
+            abandoned.state = ChangeSetState::Failed;
+            let _ = self.coordinator.update_change_set(abandoned).await;
+            return tool_error(format!(
+                "apply refused: the SSDF apply-intent record could not be made durable, \
+                 so the write was not attempted: {error}"
+            ));
+        }
+
         let outcome = apply_sequentially(&client, &preimage, &mutations).await;
 
         let state_str = match outcome.state {
@@ -1404,7 +1630,7 @@ impl UnifiServer {
             event = "unifi_change_set_applied",
             change_set_id = %args.change_set_id,
             controller = %args.controller,
-            principal = %Self::principal(caller.as_ref()),
+            principal = %principal,
             outcome = state_str,
             succeeded = outcome.succeeded.len(),
             failed = outcome.failed.len(),
@@ -1427,6 +1653,25 @@ impl UnifiServer {
         } else {
             ChangeSetState::Failed
         };
+
+        // The device has acted, so this cannot fail closed -- refusing now
+        // would not un-act it. Reported instead.
+        if let Some(recorder) = self.evidence.as_ref()
+            && let Err(error) = recorder.result_receipt(
+                &args.change_set_id,
+                &args.change_set_id,
+                &args.controller,
+                &principal,
+                matches!(outcome.state, State::Applied | State::AppliedUnverified),
+                state_str,
+            )
+        {
+            tracing::error!(
+                change_set_id = %args.change_set_id,
+                %error,
+                "the SSDF result receipt could not be made durable"
+            );
+        }
 
         if let Err(error) = self.coordinator.update_change_set(settled).await {
             // The writes have already happened, so this is reported rather than
@@ -1474,6 +1719,42 @@ impl UnifiServer {
             WRITE_TOOLS,
         ) {
             return tool_error(error);
+        }
+
+        // A draft has no record yet, and reporting "not found" for a change set
+        // this server just handed out an id for would read as a fault.
+        if let Some(draft) = self.draft(&args.change_set_id, &args.controller) {
+            return tool_result(
+                Ok::<_, String>(serde_json::json!({
+                    "change_set_id": args.change_set_id,
+                    "controller": draft.controller,
+                    "description": draft.description,
+                    "creator": draft.owner,
+                    "state": "draft",
+                    "mutation_count": 0,
+                    "note": "nothing is staged yet; this draft is held in memory and is \
+                             lost on restart",
+                })),
+                ResultFormat::PrettyJson,
+                RESULT_LIMITS,
+            );
+        }
+
+        // Through `change_set_status`, because it is the path that transitions
+        // and persists a set whose deadline has passed. Reading the record raw
+        // reports `planned` beside an `expires_at_unix` already in the past.
+        if let Err(error) = self
+            .coordinator
+            .change_set_status(args.change_set_id.clone(), args.controller.clone())
+            .await
+        {
+            return tool_error(format!(
+                "change set {} on {} ({}): {}",
+                args.change_set_id,
+                args.controller,
+                error.field(),
+                error.message()
+            ));
         }
 
         let record = match self.record_for(&args.change_set_id, &args.controller).await {
@@ -1820,10 +2101,45 @@ mod tests {
         );
     }
 
-    /// The window runs from creation, so approving does not restart it. That
-    /// is what makes `--approval-timeout-secs` bound the age of the pre-image
-    /// the plan was built against, and it is a shorter window than the code
-    /// this replaces enforced -- worth pinning rather than rediscovering.
+    /// The write path does not enforce the configured ceilings -- only
+    /// `create_change_set` does, and this server cannot use it -- while the
+    /// load path enforces a structural cap. Staging past the limit would
+    /// persist and then refuse to reload, so it is refused at stage.
+    #[test]
+    fn an_oversized_plan_is_refused_before_it_is_stored() {
+        let limit = crate::changeset_state::limits().max_actions_per_set;
+        let staged: Vec<StagedMutation> = (0..=limit)
+            .map(|n| StagedMutation::create("firewall_policy", serde_json::json!({ "name": n })))
+            .collect();
+
+        let record = UnifiServer::with_plan(
+            planned_record("alice", "home", 300),
+            &staged,
+            &Preimage::from_resources(Vec::new()),
+            "too much at once",
+        )
+        .map_err(|_| "with_plan")
+        .expect("planning is not where it is refused");
+
+        assert!(
+            UnifiServer::check_plan_limits(&record).is_err(),
+            "{} actions is over the {limit} the store accepts",
+            staged.len()
+        );
+    }
+
+    /// And a plan inside the ceiling is not.
+    #[test]
+    fn a_plan_within_the_limits_is_accepted() {
+        let record = planned_record("alice", "home", 300);
+        assert!(UnifiServer::check_plan_limits(&record).is_ok());
+    }
+
+    /// The window runs from when the plan was written, so approving does not
+    /// restart it. That is what makes `--approval-timeout-secs` bound the age
+    /// of the pre-image the plan was built against, and it is a shorter window
+    /// than the code this replaces enforced -- worth pinning rather than
+    /// rediscovering.
     #[tokio::test]
     async fn approval_does_not_restart_the_window() {
         let coordinator = coordinator_at(None);

@@ -30,6 +30,31 @@ use mecmcp_changeset::{ChangesetCoordinator, OperationLimits};
 /// Bounded so a large file is never slurped just to check for whitespace.
 const MAX_BLANK_STATE_BYTES: u64 = 4096;
 
+/// Read the state file the way the coordinator will.
+///
+/// Through `mecmcp_secret::read_hardened_file`, at the same ceiling
+/// `OperationLimits::max_state_bytes` sets, so the symlink, ownership, mode and
+/// size checks all happen before anything here reads the contents. Inspecting
+/// the file with a plain `read_to_string` first would have read an oversized or
+/// permissively readable file through an unhardened path, and an unbounded old
+/// state file could exhaust memory during startup -- ahead of the very checks
+/// that exist to stop it.
+fn read_state_file(path: &Path) -> Result<Option<Vec<u8>>, String> {
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    let limits = mecmcp_secret::FileLimits {
+        max_bytes: usize::try_from(limits().max_state_bytes).unwrap_or(usize::MAX),
+    };
+
+    match mecmcp_secret::read_hardened_file(path, limits) {
+        Ok(bytes) => Ok(Some(bytes.expose().to_vec())),
+        // Let the coordinator report it, with its own wording and path.
+        Err(_) => Ok(None),
+    }
+}
+
 /// Ceilings for the change-set store.
 ///
 /// Deliberately small. A single-operator homelab controller does not have a
@@ -81,8 +106,9 @@ pub fn build_coordinator(
     };
 
     if let Some(ref path) = absolute {
-        discard_blank_state_file(path)?;
-        refuse_legacy_state_file(path)?;
+        let contents = read_state_file(path)?;
+        discard_blank_state_file(path, contents.as_deref())?;
+        refuse_legacy_state_file(path, contents.as_deref())?;
     }
 
     let mut coordinator =
@@ -97,42 +123,55 @@ pub fn build_coordinator(
     Ok(Arc::new(coordinator))
 }
 
-/// Remove a state file that holds nothing.
+/// Remove a state file that holds no change-set state.
 ///
-/// The coordinator refuses to parse an empty file -- "EOF while parsing a
-/// value" -- and the store this replaces tolerated one deliberately. A blank
-/// file is reachable: an interrupted first write, or a packaging step that
-/// pre-creates the path under a `StateDirectory`. Refusing to start on it
-/// would be a regression, and it carries no state to lose, so it goes and
-/// `load` creates a real one on the first write.
+/// Two shapes reach here. A **blank** file: the coordinator refuses to parse
+/// one -- "EOF while parsing a value" -- and the store this replaces tolerated
+/// it deliberately, because an interrupted first write or a packaging step that
+/// pre-creates the path under a `StateDirectory` produces one. And an **empty
+/// legacy map**, `{}`, which is what the old store wrote when it held nothing:
+/// it has no `version` key, so the coordinator rejects it with an opaque
+/// missing-field error, and it names no change sets, so the migration refusal
+/// has nothing to tell the operator.
+///
+/// Neither carries state to lose, so both go and `load` creates a real file on
+/// the first write.
 ///
 /// # Errors
 ///
-/// Returns a message if the file exists, is blank, and cannot be removed.
-fn discard_blank_state_file(path: &Path) -> Result<(), String> {
-    let Ok(metadata) = std::fs::metadata(path) else {
+/// Returns a message if the file cannot be removed.
+fn discard_blank_state_file(path: &Path, contents: Option<&[u8]>) -> Result<(), String> {
+    let Some(contents) = contents else {
         return Ok(());
     };
-    if !metadata.is_file() || metadata.len() > MAX_BLANK_STATE_BYTES {
+    if contents.len() as u64 > MAX_BLANK_STATE_BYTES {
         return Ok(());
     }
-    match std::fs::read_to_string(path) {
-        Ok(contents) if contents.trim().is_empty() => {
-            std::fs::remove_file(path).map_err(|error| {
-                format!(
-                    "{} holds no change-set state and could not be removed: {error}",
-                    path.display()
-                )
-            })?;
-            tracing::info!(
-                path = %path.display(),
-                "change-set state file was empty; starting with an empty store"
-            );
-            Ok(())
-        }
-        // Non-empty, or unreadable. `load` reports both, with the path.
-        _ => Ok(()),
+
+    let Ok(text) = std::str::from_utf8(contents) else {
+        return Ok(());
+    };
+
+    let empty_legacy_map = serde_json::from_str::<serde_json::Value>(text)
+        .ok()
+        .and_then(|parsed| parsed.as_object().cloned())
+        .is_some_and(|object| object.is_empty());
+
+    if !text.trim().is_empty() && !empty_legacy_map {
+        return Ok(());
     }
+
+    std::fs::remove_file(path).map_err(|error| {
+        format!(
+            "{} holds no change-set state and could not be removed: {error}",
+            path.display()
+        )
+    })?;
+    tracing::info!(
+        path = %path.display(),
+        "change-set state file held nothing; starting with an empty store"
+    );
+    Ok(())
 }
 
 /// The coordinator requires an absolute path; `--state-file` may be relative.
@@ -162,16 +201,14 @@ fn absolute_path(path: &Path) -> Result<PathBuf, String> {
 /// rather than trusting a pre-image of unknown age.
 ///
 /// So: name the file, say what is in it, and stop.
-fn refuse_legacy_state_file(path: &Path) -> Result<(), String> {
-    let Ok(contents) = std::fs::read_to_string(path) else {
-        // Unreadable or absent. `load` reports both, with the path.
+fn refuse_legacy_state_file(path: &Path, contents: Option<&[u8]>) -> Result<(), String> {
+    // Absent, unreadable, or refused by the hardened reader. `load` reports
+    // each of those itself, with the path and the remedy.
+    let Some(contents) = contents else {
         return Ok(());
     };
-    if contents.trim().is_empty() {
-        return Ok(());
-    }
 
-    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&contents) else {
+    let Ok(parsed) = serde_json::from_slice::<serde_json::Value>(contents) else {
         // Not JSON at all. `load` is the right place to complain.
         return Ok(());
     };
@@ -257,6 +294,50 @@ mod tests {
         assert_eq!(limits().max_targets_per_set, 1);
     }
 
+    /// The invariant the draft map exists for, asserted where it bites: a
+    /// change set with no actions can be *written* -- `insert_change_set` does
+    /// not check -- and then makes the whole state file unloadable at the next
+    /// start. Nothing in a test run restarts, so without this the fault is
+    /// invisible until a service does.
+    #[tokio::test]
+    async fn a_change_set_with_no_actions_makes_the_state_file_unloadable() {
+        use mecmcp_changeset::{ChangeSetRecord, ChangeSetState};
+
+        let temp = tempfile::NamedTempFile::new().expect("temp file");
+        let path = temp.path().to_path_buf();
+
+        {
+            let coordinator = build_coordinator(Some(&path), Duration::from_secs(300), true, None)
+                .expect("coordinator");
+            let record = ChangeSetRecord {
+                id: new_change_set_id(),
+                owner: "alice".to_owned(),
+                device: "home".to_owned(),
+                expected_candidate_fingerprint: format!("sha256:{}", "0".repeat(64)),
+                actions: Vec::new(),
+                digest: format!("sha256:{}", "0".repeat(64)),
+                state: ChangeSetState::Planned,
+                approver: None,
+                approval: None,
+                expires_at_unix: u64::MAX,
+                operation_id: None,
+                policy_signature: String::new(),
+                targets: Vec::new(),
+                preview: None,
+                task_id: None,
+                apply_without_handle: false,
+            };
+            coordinator
+                .insert_change_set(record)
+                .await
+                .expect("an empty plan is accepted on the way in, which is the trap");
+        }
+
+        let error = build_coordinator(Some(&path), Duration::from_secs(300), true, None)
+            .expect_err("and rejected on the way back, taking the whole store with it");
+        assert!(error.contains("action"), "{error}");
+    }
+
     /// The old state file must stop the server with an explanation, not with a
     /// deserialization error, and not by silently starting empty -- which would
     /// leave two stored change sets looking as though they had never existed.
@@ -306,15 +387,43 @@ mod tests {
         coordinator_from("   \n").expect("whitespace is not state either");
     }
 
-    /// Only a blank file is discarded. Anything with content in it is the
-    /// coordinator's to accept or refuse.
+    /// Only a file holding nothing is discarded. Anything with state in it is
+    /// the coordinator's to accept or refuse.
     #[test]
     fn a_populated_state_file_is_never_discarded() {
         let directory = tempfile::tempdir().expect("temp dir");
         let path = directory.path().join("changesets.json");
-        std::fs::write(&path, "{\"version\": 6, \"state\": {}}").expect("write");
-        super::discard_blank_state_file(&path).expect("not blank, so nothing to do");
+        let contents = b"{\"version\": 6, \"state\": {}}";
+        std::fs::write(&path, contents).expect("write");
+        super::discard_blank_state_file(&path, Some(contents)).expect("nothing to do");
         assert!(path.exists(), "a populated state file must not be removed");
+    }
+
+    /// The old store wrote `{}` when it held nothing. It has no `version` key,
+    /// so the coordinator rejects it with an opaque missing-field error, and it
+    /// names no change sets, so the migration refusal has nothing to say. It
+    /// carries no state, so it goes.
+    #[test]
+    fn an_empty_legacy_map_is_a_fresh_store() {
+        coordinator_from("{}").expect("an empty legacy map holds nothing");
+    }
+
+    /// And the hardened reader runs first: a group-readable file is refused
+    /// before anything here parses it.
+    #[cfg(unix)]
+    #[test]
+    fn a_world_readable_state_file_is_refused_before_it_is_parsed() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let directory = tempfile::tempdir().expect("temp dir");
+        let path = directory.path().join("changesets.json");
+        std::fs::write(&path, "{\"version\": 6, \"state\": {}}").expect("write");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
+            .expect("loosen the mode");
+
+        let error = build_coordinator(Some(&path), Duration::from_secs(300), true, None)
+            .expect_err("a 0644 state file must not load");
+        assert!(error.contains("chmod"), "{error}");
     }
 
     /// A relative `--state-file` is accepted here and made absolute, because

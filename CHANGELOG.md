@@ -88,6 +88,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   read and adapted into a new one. `FirewallPolicy` now carries the remaining fields
   verbatim and round-trips losslessly.
 
+### Added
+
+- **SSDF evidence is wired** (#16). `mecmcp-audit` was a declared dependency imported
+  nowhere and the `--ssdf-audit-*` flags were already on the CLI via
+  `mecmcp_runtime::cli::Cli`, so they parsed and did nothing — this server emitted none
+  of the fleet's change records. With `--ssdf-audit-endpoint` configured all four now
+  land: the coordinator emits the approval records itself, and the server emits the
+  proposal on first stage and the apply-intent and result-receipt around the writes.
+  The apply is **refused** if the intent cannot be made durable, because an intent that
+  survives only in memory proves nothing about a crash; the receipt cannot fail closed,
+  since the controller has already acted. The pipeline is flushed with `shutdown()` at
+  exit — dropping it stops the worker but deliberately does not spool, so a proposal or
+  approval not followed by an apply would otherwise be lost. Off by default.
 ### Removed
 
 - `mecmcp-job` and `mecmcp-policy` from `[workspace.dependencies]`. Declared, imported
@@ -135,14 +148,28 @@ unknown age.
 
 Two behaviour changes that are easier to read here than to discover:
 
-- **`--approval-timeout-secs` now runs from creation, not from approval.** It configures
-  the coordinator's approval TTL, and the coordinator stamps the deadline when the
-  change set is created. The packaged default of 300 seconds therefore bounds the whole
+- **`--approval-timeout-secs` now runs from staging, not from approval.** It configures
+  the coordinator's approval TTL, and the deadline is stamped when the change set is
+  written — the first `unifi_stage_change`. Apply checks it through `change_set_status`,
+  which is also what transitions a lapsed set to `Expired`: `claim_change_set_for_apply`
+  checks only that the state is `Approved`, so a set approved inside the window and
+  applied long after it would otherwise still reach the controller. The packaged default of 300 seconds therefore bounds the whole
   plan-review-apply round. That also bounds the age of the pre-image the plan was built
   against, which is the point, but it is a shorter window than the old code enforced.
 - **One pending change set per principal per controller.** A second
   `unifi_create_change_set` on the same controller by the same token is refused until
   the first reaches an outcome or is cancelled.
+- **`unifi_create_change_set` returns a draft, not a stored change set.** The
+  coordinator's persistence layer refuses to load a state file containing a change set
+  with no actions, so writing an empty plan would make the whole store unloadable at the
+  next restart — a fault no test run can see, because nothing in one restarts. The
+  change set is created on the first `unifi_stage_change`. A draft is held in memory,
+  reports `state: "draft"` from `unifi_get_change_set`, lapses with the approval window,
+  and is lost on restart along with nothing.
+- **A plan is checked against the configured ceilings at stage.** Neither
+  `insert_change_set` nor `update_change_set` consults them — only `create_change_set`
+  does, which this server cannot use — while the load path enforces a structural cap of
+  64 actions. Staging past the limit would persist and then refuse to reload.
 
 Two smaller things about the state file. The coordinator reads it through the workspace's
 hardened reader, so a group- or world-readable file is a startup failure with a `chmod`

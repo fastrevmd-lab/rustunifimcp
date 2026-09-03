@@ -58,11 +58,12 @@ pub struct UnifiCli {
     /// actually expires an approval, rather than a window this server measured
     /// itself.
     ///
-    /// The window runs from **creation**, not from approval. So the default 300
-    /// seconds bounds the whole plan-review-apply round, and it bounds the age
-    /// of the pre-image the plan was built against, which is the point: a
-    /// pre-image captured half an hour ago is not evidence about the controller
-    /// now. Raise it if a review takes longer than the round it gates.
+    /// The window runs from the moment something is **staged**, not from
+    /// approval. So the default 300 seconds bounds the review-and-apply round,
+    /// and it bounds the age of the pre-image the plan was built against, which
+    /// is the point: a pre-image captured half an hour ago is not evidence
+    /// about the controller now. Raise it if a review takes longer than the
+    /// round it gates.
     #[arg(long = "approval-timeout-secs", default_value = "300")]
     pub approval_timeout_secs: u64,
 }
