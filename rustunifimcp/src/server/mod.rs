@@ -300,14 +300,24 @@ impl UnifiServer {
             .await
             .into_iter()
             .find(|record| {
-                record.owner == draft.owner
-                    && record.device == draft.controller
-                    && matches!(
-                        record.state,
-                        ChangeSetState::Planned
-                            | ChangeSetState::Approved
-                            | ChangeSetState::Applying
-                    )
+                if record.owner != draft.owner || record.device != draft.controller {
+                    return false;
+                }
+                match record.state {
+                    // In flight. Blocks regardless of the clock: the deadline
+                    // does not retire a claimed record, and nor should it.
+                    ChangeSetState::Applying => true,
+                    // Pending, but only while its window is open. The
+                    // coordinator's own guard sweeps a lapsed record to
+                    // `Expired` before it looks, so reading the raw state here
+                    // would block a principal for having let a TTL elapse --
+                    // where the coordinator would have let them straight
+                    // through.
+                    ChangeSetState::Planned | ChangeSetState::Approved => {
+                        unix_seconds_now() < record.expires_at_unix
+                    }
+                    _ => false,
+                }
             })
         {
             return Err(Box::new(tool_error(format!(
@@ -327,7 +337,11 @@ impl UnifiServer {
             .write()
             .map_err(|_| Box::new(tool_error("drafts lock poisoned".to_owned())))?;
 
-        drafts.retain(|_, held| now.saturating_sub(held.created_at_unix) <= deadline);
+        // `<`, not `<=`: a stored change set expires at `now >= expires_at_unix`,
+        // and a draft that outlived its window by exactly nothing is still
+        // outlived. The two boundaries have to agree or a draft can be staged
+        // at the instant an equivalent change set would have lapsed.
+        drafts.retain(|_, held| now.saturating_sub(held.created_at_unix) < deadline);
 
         if let Some((existing, _)) = drafts
             .iter()
@@ -370,7 +384,7 @@ impl UnifiServer {
             .filter(|draft| draft.controller == controller)
             .cloned()?;
 
-        if now.saturating_sub(held.created_at_unix) > deadline {
+        if now.saturating_sub(held.created_at_unix) >= deadline {
             self.release_draft(change_set_id);
             return None;
         }
@@ -1055,13 +1069,27 @@ impl UnifiServer {
         // there produces an id that can never become a change set: every first
         // stage would rebuild the preview around it and be refused, after the
         // controller reads. Refused here instead, where it costs nothing.
+        //
+        // Measured on the *rendered* preview rather than on the raw
+        // description, because the artifact is JSON: escaping, the pretty
+        // printing, the controller name and the atomicity block all add to it.
+        // Comparing the raw length against the whole budget passes a
+        // description that the smallest possible preview around it would not.
         let preview_budget = crate::changeset_state::limits().max_preview_bytes;
-        if args.description.len() >= preview_budget {
+        let smallest_preview = match Self::render_preview(
+            &args.controller,
+            &args.description,
+            &[],
+            &Preimage::from_resources(Vec::new()),
+        ) {
+            Ok(rendered) => rendered.len(),
+            Err(result) => return *result,
+        };
+        if smallest_preview >= preview_budget {
             return tool_error(format!(
-                "the description is {} bytes; a change set's preview is capped at {}, and \
-                 the description is stored inside it",
-                args.description.len(),
-                preview_budget
+                "the description does not leave room for a preview: an empty change set \
+                 carrying it already renders to {smallest_preview} bytes, against a cap \
+                 of {preview_budget}"
             ));
         }
 
@@ -1215,6 +1243,29 @@ impl UnifiServer {
             staged.owner.clone(),
         );
 
+        // Published before the coordinator write, not after. The recorder keys
+        // the diff hash by change-set id and the later approval and apply
+        // records copy it, so a plan that becomes visible before its proposal
+        // lands leaves a window in which an approval binds to the *previous*
+        // plan's digest -- the precise thing digest binding exists to stop.
+        // Emitting first inverts the failure: a coordinator write that fails
+        // leaves a proposal for a plan that never landed, which is a spurious
+        // record rather than a false attestation, and nothing follows it.
+        //
+        // On every stage, not only the first: the coordinator emits this from
+        // `create_change_set`, which this server cannot use because that call
+        // wants the actions up front and a change set here exists before
+        // anything is staged into it.
+        if let Some(recorder) = self.evidence.as_ref() {
+            recorder.proposal(
+                &args.change_set_id,
+                &args.change_set_id,
+                &device,
+                &owner,
+                &digest,
+            );
+        }
+
         if draft.is_some() {
             // The plan exists now, so the change set does too.
             // `insert_change_set` is what enforces one pending set per
@@ -1240,23 +1291,6 @@ impl UnifiServer {
                 error.field(),
                 error.message()
             ));
-        }
-
-        // On every stage, not only the first. The coordinator emits this from
-        // `create_change_set`, which this server cannot use: that call wants
-        // the actions up front, and a change set here exists before anything is
-        // staged into it. The recorder keys the diff hash by change-set id and
-        // the later approval and apply records copy it, so a second stage
-        // without a fresh proposal would have those records attesting to the
-        // first stage's plan rather than the one approved and applied.
-        if let Some(recorder) = self.evidence.as_ref() {
-            recorder.proposal(
-                &args.change_set_id,
-                &args.change_set_id,
-                &device,
-                &owner,
-                &digest,
-            );
         }
 
         let result = serde_json::json!({
@@ -2186,6 +2220,24 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    /// A lapsed pending set must not block a new one. The coordinator sweeps
+    /// an expired record before its own guard looks, so reading the raw state
+    /// would block a principal for having let a TTL elapse -- where the
+    /// coordinator would have let them straight through.
+    #[tokio::test]
+    async fn a_lapsed_pending_set_does_not_block_a_new_change_set() {
+        let coordinator = coordinator_at(None);
+        let mut lapsed = planned_record("alice", "home", 300);
+        lapsed.expires_at_unix = unix_seconds_now().saturating_sub(1);
+        coordinator.insert_change_set(lapsed).await.expect("insert");
+
+        // The coordinator itself accepts a second plan, having swept the first.
+        coordinator
+            .insert_change_set(planned_record("alice", "home", 300))
+            .await
+            .expect("the lapsed record must not block a new plan");
     }
 
     /// The gate the claim does not provide. `claim_change_set_for_apply`
