@@ -22,6 +22,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the new `UnifiError::ReferenceNotFound` renders without the "unexpected response
   shape" prefix that made a lookup miss read like a parse failure.
 
+### Changed
+
+- **`kind=firewall_policy` now returns the whole policy** from `unifi_get_resource`
+  and `unifi_list_resources` (#11). The projection kept six summary fields and dropped
+  `source`, `destination`, `protocol`, ports, `schedule` and `connection_state_type` —
+  everything that makes a policy mean anything — so an existing policy could not be
+  read and adapted into a new one. `FirewallPolicy` now carries the remaining fields
+  verbatim and round-trips losslessly.
+
 ## [0.2.0] - 2026-09-01
 
 This is a **minor version** because it adds the reproducible release path (Dockerfile
