@@ -9,12 +9,16 @@
 pub mod apply;
 pub mod diff;
 pub mod preimage;
+pub mod record;
 pub mod rollback;
 pub mod validate;
 
 pub use apply::{ControllerOps, Outcome, State, apply_sequentially};
 pub use diff::{Change, Diff, diff_against_preimage};
 pub use preimage::{Preimage, StagedMutation};
+pub use record::{
+    StagedAction, actions_for, actions_of, fingerprint_of, mutations_of, preimage_of,
+};
 pub use rollback::rollback_to_preimage;
 pub use validate::{
     ZoneIndex, check_zone_deletions, check_zone_references, referenced_zone_ids, validate_locally,
