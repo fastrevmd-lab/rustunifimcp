@@ -1,0 +1,10 @@
+{
+  "data": [
+    {
+      "_id": "000000000000000000000501",
+      "name": "Test WLAN",
+      "enabled": true,
+      "security": "wpapsk"
+    }
+  ]
+}

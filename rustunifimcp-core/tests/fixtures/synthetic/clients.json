@@ -1,0 +1,12 @@
+{
+  "data": [
+    {
+      "id": "cccccccc-dddd-eeee-ffff-111111111111",
+      "type": "WIRED",
+      "macAddress": "02:00:00:02:01:01",
+      "ipAddress": "192.0.2.50",
+      "name": "Test Client",
+      "hostname": "test-client"
+    }
+  ]
+}

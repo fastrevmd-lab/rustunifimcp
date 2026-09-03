@@ -1098,10 +1098,6 @@ mod tests {
     /// The recorded sites fixture must parse and resolve to the expected UUID.
     #[test]
     fn sites_fixture_resolves_site_uuid() {
-        if !crate::testing::fixtures_available() {
-            eprintln!("SKIPPED: no fixtures.");
-            return;
-        }
         let sites_raw = crate::testing::fixture(crate::testing::DEFAULT_FIXTURE_VERSION, "sites");
         let sites_array =
             crate::model::unwrap_enveloped_data(&sites_raw).expect("sites fixture unwraps");

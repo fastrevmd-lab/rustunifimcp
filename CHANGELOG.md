@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **A committed synthetic fixture set** at `rustunifimcp-core/tests/fixtures/synthetic/`
+  (#13). Seventeen of 143 tests needed fixtures captured from a live controller, which
+  are deliberately gitignored, so on a fresh clone they printed "SKIPPED: no fixtures"
+  and returned early — and CI reported `ok`. Among them were the change-set `diff`,
+  `preimage` and `validate` tests, so every green run overstated what had been checked
+  on the write path specifically. The synthetic set is hand-written with
+  documentation-range addresses, locally administered MACs and zeroed coordinates, and
+  is held to the same `scripts/verify-fixtures-scrubbed.sh` gate the recorded sets must
+  pass — `gate_passes_on_the_committed_synthetic_fixtures` runs it on every test run.
+
+### Changed
+
+- **`DEFAULT_FIXTURE_VERSION` is now the synthetic set**, and the fixture-gated tests
+  no longer skip: the guards are gone, so a missing fixture is a failure rather than a
+  silent pass. `fixtures_available()` is replaced by `recorded_fixtures_available()`,
+  which only the version matrix and the scrub gate's live check consult — a hand-written
+  fixture is evidence about the parsers and nothing at all about controller drift, so
+  `tests/version_matrix.rs` excludes it from the recorded versions.
+- **`every_resource_kind_has_a_parser_wired` now runs over every fixture set present**,
+  so a developer holding a live capture still exercises the parsers against real data
+  while CI exercises them against the synthetic set. A recorded version with an
+  `.absent` marker for a kind is skipped for that kind — recording a 404 is how the
+  matrix asserts drift, and it must not break the parser test — while the synthetic
+  set is required to carry every kind.
+- Two assertions pinned to the 10.5.67 capture's exact DHCP-reservation count are now
+  stated as relationships — strictly fewer than the total, and not zero. The count made
+  the committed set carry 46 reservations to satisfy a test that is about the filter
+  being active.
+
+- **`kind=firewall_policy` now returns the whole policy** from `unifi_get_resource`
+  and `unifi_list_resources` (#11). The projection kept six summary fields and dropped
+  `source`, `destination`, `protocol`, ports, `schedule` and `connection_state_type` —
+  everything that makes a policy mean anything — so an existing policy could not be
+  read and adapted into a new one. `FirewallPolicy` now carries the remaining fields
+  verbatim and round-trips losslessly.
+
 ### Fixed
 
 - **`unifi_validate_change_set` no longer refuses every zone-based firewall policy**
@@ -33,15 +71,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   one of the seven took a `controller` argument and used it to pick the client without
   ever comparing it to the controller the set was created against, so a set planned
   against one controller could be validated — and applied — against another.
-
-### Changed
-
-- **`kind=firewall_policy` now returns the whole policy** from `unifi_get_resource`
-  and `unifi_list_resources` (#11). The projection kept six summary fields and dropped
-  `source`, `destination`, `protocol`, ports, `schedule` and `connection_state_type` —
-  everything that makes a policy mean anything — so an existing policy could not be
-  read and adapted into a new one. `FirewallPolicy` now carries the remaining fields
-  verbatim and round-trips losslessly.
 
 ## [0.2.0] - 2026-09-01
 

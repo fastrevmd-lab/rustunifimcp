@@ -1,0 +1,19 @@
+{
+  "meta": {
+    "rc": "ok"
+  },
+  "data": [
+    {
+      "subsystem": "wlan",
+      "num_user": 1,
+      "num_guest": 0,
+      "num_iot": 0,
+      "status": "ok",
+      "num_ap": 1,
+      "num_adopted": 1,
+      "num_disabled": 0,
+      "num_disconnected": 0,
+      "num_pending": 0
+    }
+  ]
+}

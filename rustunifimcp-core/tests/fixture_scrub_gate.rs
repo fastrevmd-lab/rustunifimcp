@@ -7,13 +7,17 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
-use rustunifimcp_core::testing::fixtures_available;
+use rustunifimcp_core::testing::{
+    SYNTHETIC_FIXTURE_VERSION, recorded_fixtures_available, recorded_versions,
+};
 
 /// Path to the verification script relative to workspace root.
 const GATE_SCRIPT: &str = "scripts/verify-fixtures-scrubbed.sh";
 
-/// Path to existing verified-clean fixtures (when available).
-const CLEAN_FIXTURE_DIR: &str = "rustunifimcp-core/tests/fixtures/10.5.67";
+/// The fixture directory for one recorded or synthetic version.
+fn fixture_dir(version: &str) -> String {
+    format!("rustunifimcp-core/tests/fixtures/{version}")
+}
 
 /// Get workspace root by walking up from the test binary location.
 fn workspace_root() -> PathBuf {
@@ -87,20 +91,36 @@ fn gate_passes_on_verified_clean_fixtures() {
 
 #[test]
 fn gate_passes_on_live_fixtures_when_available() {
-    // Optional test: verify against the real fixture set if present
-    if !fixtures_available() {
+    // Optional test: verify against the real fixture sets if present.
+    if !recorded_fixtures_available() {
         eprintln!(
             "SKIPPED: no live fixtures. Run scripts/capture-fixtures.sh against a controller."
         );
         return;
     }
 
-    let (code, stdout, stderr) = run_gate(CLEAN_FIXTURE_DIR);
+    for version in recorded_versions() {
+        let (code, stdout, stderr) = run_gate(&fixture_dir(&version));
+
+        assert_eq!(
+            code, 0,
+            "Gate should pass on live verified-clean fixtures for {version}.\n\
+             stdout: {stdout}\nstderr: {stderr}"
+        );
+    }
+}
+
+/// The synthetic set is committed to a public repo, so the gate has to hold on
+/// it in every run -- not only when a developer happens to have a live capture.
+/// This is the check that makes committing fixtures safe rather than hopeful.
+#[test]
+fn gate_passes_on_the_committed_synthetic_fixtures() {
+    let (code, stdout, stderr) = run_gate(&fixture_dir(SYNTHETIC_FIXTURE_VERSION));
 
     assert_eq!(
         code, 0,
-        "Gate should pass on live verified-clean fixtures.\nstdout: {}\nstderr: {}",
-        stdout, stderr
+        "the committed synthetic fixtures must satisfy the scrub gate.\n\
+         stdout: {stdout}\nstderr: {stderr}"
     );
 }
 

@@ -1,0 +1,17 @@
+{
+  "data": [
+    {
+      "id": "aaaaaaaa-bbbb-cccc-dddd-111111111111",
+      "macAddress": "02:00:00:01:01:01",
+      "ipAddress": "192.0.2.10",
+      "name": "Test AP",
+      "model": "U6-Pro",
+      "state": "ONLINE",
+      "supported": true,
+      "firmwareVersion": "6.5.54",
+      "firmwareUpdatable": false,
+      "features": ["accessPoint"],
+      "interfaces": ["wireless"]
+    }
+  ]
+}

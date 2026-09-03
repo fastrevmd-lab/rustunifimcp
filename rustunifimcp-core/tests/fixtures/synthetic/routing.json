@@ -1,0 +1,17 @@
+{
+  "meta": {
+    "rc": "ok"
+  },
+  "data": [
+    {
+      "_id": "000000000000000000000901",
+      "name": "Test Route",
+      "type": "static-route",
+      "enabled": true,
+      "static-route_type": "nexthop-route",
+      "static-route_network": "198.51.100.0/24",
+      "static-route_nexthop": "192.0.2.1",
+      "static-route_distance": 1
+    }
+  ]
+}

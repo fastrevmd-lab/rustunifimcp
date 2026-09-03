@@ -1,0 +1,16 @@
+[
+  {
+    "_id": "000000000000000000000201",
+    "name": "Allow Internal",
+    "action": "ALLOW",
+    "enabled": true,
+    "index": 1,
+    "predefined": false,
+    "source": {
+      "zone_id": "000000000000000000000101"
+    },
+    "destination": {
+      "zone_id": "000000000000000000000101"
+    }
+  }
+]
