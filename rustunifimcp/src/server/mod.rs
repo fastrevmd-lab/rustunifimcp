@@ -86,6 +86,21 @@ pub struct UnifiServer {
     /// two apply records belong to paths this server drives, so it needs the
     /// recorder too.
     evidence: Option<Arc<mecmcp_audit::recorder::EvidenceRecorder>>,
+    /// Serialises changing a plan against approving one.
+    ///
+    /// The recorder keys its diff hash by change-set id, and the coordinator
+    /// copies that context into the approval record it emits. Publishing a new
+    /// plan is therefore two writes -- the coordinator's and the recorder's --
+    /// that an approval must not land between, and there is no ordering of the
+    /// two that survives on its own: publish first and a concurrent approval of
+    /// the *old* plan is attested with the new digest; publish second and one
+    /// of the new plan is attested with the old. Both are false attestations,
+    /// which is the one thing the evidence chain exists to rule out.
+    ///
+    /// So the window is closed rather than shrunk. Contention is negligible:
+    /// the coordinator already allows one pending change set per principal per
+    /// controller, so these paths are near-serial anyway.
+    plan_lock: Arc<tokio::sync::Mutex<()>>,
     /// Tool router.
     tool_router: ToolRouter<Self>,
 }
@@ -129,6 +144,7 @@ impl UnifiServer {
             coordinator,
             drafts: Arc::new(std::sync::RwLock::new(BTreeMap::new())),
             evidence,
+            plan_lock: Arc::new(tokio::sync::Mutex::new(())),
             tool_router: Self::unifi_tool_router(),
         })
     }
@@ -1243,28 +1259,10 @@ impl UnifiServer {
             staged.owner.clone(),
         );
 
-        // Published before the coordinator write, not after. The recorder keys
-        // the diff hash by change-set id and the later approval and apply
-        // records copy it, so a plan that becomes visible before its proposal
-        // lands leaves a window in which an approval binds to the *previous*
-        // plan's digest -- the precise thing digest binding exists to stop.
-        // Emitting first inverts the failure: a coordinator write that fails
-        // leaves a proposal for a plan that never landed, which is a spurious
-        // record rather than a false attestation, and nothing follows it.
-        //
-        // On every stage, not only the first: the coordinator emits this from
-        // `create_change_set`, which this server cannot use because that call
-        // wants the actions up front and a change set here exists before
-        // anything is staged into it.
-        if let Some(recorder) = self.evidence.as_ref() {
-            recorder.proposal(
-                &args.change_set_id,
-                &args.change_set_id,
-                &device,
-                &owner,
-                &digest,
-            );
-        }
+        // Held across both writes, so no approval can land between the plan
+        // becoming visible and its proposal being published. See `plan_lock`:
+        // neither ordering of the two is safe on its own.
+        let _publishing = self.plan_lock.lock().await;
 
         if draft.is_some() {
             // The plan exists now, so the change set does too.
@@ -1292,6 +1290,28 @@ impl UnifiServer {
                 error.message()
             ));
         }
+
+        // After the write, so a write that failed leaves no proposal for a
+        // plan that never landed. Safe to be second only because the lock is
+        // still held.
+        //
+        // On every stage, not only the first: the coordinator emits this from
+        // `create_change_set`, which this server cannot use because that call
+        // wants the actions up front and a change set here exists before
+        // anything is staged into it. Without a fresh proposal the recorder
+        // keeps the first stage's digest, and the approval and apply records
+        // copy it -- attesting to a plan other than the one approved.
+        if let Some(recorder) = self.evidence.as_ref() {
+            recorder.proposal(
+                &args.change_set_id,
+                &args.change_set_id,
+                &device,
+                &owner,
+                &digest,
+            );
+        }
+
+        drop(_publishing);
 
         let result = serde_json::json!({
             "change_set_id": args.change_set_id,
@@ -1522,6 +1542,11 @@ impl UnifiServer {
         // a distinct call, not a flag on the approval, so the record says which
         // of the two happened -- `approver: None` cannot tell "nobody has
         // approved this" from "this was approved without review".
+        // The same lock staging holds. The coordinator emits the approval
+        // record itself, copying the recorder's diff hash for this change set,
+        // so an approval must not run while a plan is half-published.
+        let _approving = self.plan_lock.lock().await;
+
         let outcome = if approver == record.owner {
             if !self.lab_mode {
                 return tool_error(
@@ -2219,6 +2244,45 @@ mod tests {
                 .claim_change_set_for_apply(&id, "home", ApplyHandle::None)
                 .await
                 .is_err()
+        );
+    }
+
+    /// The lock closes the window; this pins what makes entering it survivable
+    /// anyway. An approver whose plan moved under them approves a digest the
+    /// store no longer holds, and the coordinator refuses it -- so a stale read
+    /// cannot become an approval of a plan nobody reviewed.
+    #[tokio::test]
+    async fn approving_a_digest_the_plan_has_moved_past_is_refused() {
+        let coordinator = coordinator_at(None);
+        let record = planned_record("alice", "home", 300);
+        let (id, stale) = (record.id.clone(), record.digest.clone());
+        coordinator.insert_change_set(record).await.expect("insert");
+
+        // Stage again: same change set, different plan, different digest.
+        let mut restaged = coordinator.change_set(&id, "home").await.expect("stored");
+        restaged = UnifiServer::with_plan(
+            restaged,
+            &[
+                StagedMutation::create("firewall_policy", serde_json::json!({ "name": "a" })),
+                StagedMutation::create("firewall_policy", serde_json::json!({ "name": "b" })),
+            ],
+            &Preimage::from_resources(Vec::new()),
+            "test",
+        )
+        .map_err(|_| "with_plan")
+        .expect("replan");
+        assert_ne!(restaged.digest, stale, "the plan moved");
+        coordinator
+            .update_change_set_from(ChangeSetState::Planned, restaged)
+            .await
+            .expect("update");
+
+        assert!(
+            coordinator
+                .approve_change_set(id, "home".to_owned(), "bob".to_owned(), stale)
+                .await
+                .is_err(),
+            "an approval naming the old digest must not bind to the new plan"
         );
     }
 

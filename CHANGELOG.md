@@ -25,6 +25,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   of the fleet's change records. With `--ssdf-audit-endpoint` configured the coordinator
   now emits proposal, approval, apply-intent and result-receipt records. Off by default.
 
+- **SSDF evidence is wired** (#16). `mecmcp-audit` was a declared dependency imported
+  nowhere and the `--ssdf-audit-*` flags were already on the CLI via
+  `mecmcp_runtime::cli::Cli`, so they parsed and did nothing — this server emitted none
+  of the fleet's change records. With `--ssdf-audit-endpoint` configured all four now
+  land: the coordinator emits the approval records itself, and the server emits the
+  proposal on first stage and the apply-intent and result-receipt around the writes.
+  The apply is **refused** if the intent cannot be made durable, because an intent that
+  survives only in memory proves nothing about a crash; the receipt cannot fail closed,
+  since the controller has already acted. The pipeline is flushed with `shutdown()` at
+  exit — dropping it stops the worker but deliberately does not spool, so a proposal or
+  approval not followed by an apply would otherwise be lost. Off by default.
+
 ### Changed
 
 - **`DEFAULT_FIXTURE_VERSION` is now the synthetic set**, and the fixture-gated tests
@@ -88,19 +100,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   read and adapted into a new one. `FirewallPolicy` now carries the remaining fields
   verbatim and round-trips losslessly.
 
-### Added
-
-- **SSDF evidence is wired** (#16). `mecmcp-audit` was a declared dependency imported
-  nowhere and the `--ssdf-audit-*` flags were already on the CLI via
-  `mecmcp_runtime::cli::Cli`, so they parsed and did nothing — this server emitted none
-  of the fleet's change records. With `--ssdf-audit-endpoint` configured all four now
-  land: the coordinator emits the approval records itself, and the server emits the
-  proposal on first stage and the apply-intent and result-receipt around the writes.
-  The apply is **refused** if the intent cannot be made durable, because an intent that
-  survives only in memory proves nothing about a crash; the receipt cannot fail closed,
-  since the controller has already acted. The pipeline is flushed with `shutdown()` at
-  exit — dropping it stops the worker but deliberately does not spool, so a proposal or
-  approval not followed by an apply would otherwise be lost. Off by default.
 ### Removed
 
 - `mecmcp-job` and `mecmcp-policy` from `[workspace.dependencies]`. Declared, imported
