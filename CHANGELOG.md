@@ -151,9 +151,12 @@ Two behaviour changes that are easier to read here than to discover:
 - **`--approval-timeout-secs` now runs from staging, not from approval.** It configures
   the coordinator's approval TTL, and the deadline is stamped when the change set is
   written — the first `unifi_stage_change`. Apply checks it through `change_set_status`,
-  which is also what transitions a lapsed set to `Expired`: `claim_change_set_for_apply`
-  checks only that the state is `Approved`, so a set approved inside the window and
-  applied long after it would otherwise still reach the controller. The packaged default of 300 seconds therefore bounds the whole
+  and then against the deadline on the record the claim returns. Neither upstream gate
+  covers it: `claim_change_set_for_apply` checks the state and not the clock, and
+  `change_set_status` applies the approval TTL only to a `Planned` record — so an
+  ordinary two-person approval granted inside the window and applied long after it
+  would otherwise still reach the controller. The check is after the claim because the
+  claim is what serialises; a pre-claim check alone is a check-then-act race. The packaged default of 300 seconds therefore bounds the whole
   plan-review-apply round. That also bounds the age of the pre-image the plan was built
   against, which is the point, but it is a shorter window than the old code enforced.
 - **One pending change set per principal per controller.** A second
@@ -166,6 +169,10 @@ Two behaviour changes that are easier to read here than to discover:
   change set is created on the first `unifi_stage_change`. A draft is held in memory,
   reports `state: "draft"` from `unifi_get_change_set`, lapses with the approval window,
   and is lost on restart along with nothing.
+- **`unifi_create_change_set` refuses a description too large for the preview**, which
+  would otherwise mint an id that could never become a change set: the description is
+  stored inside the preview, so every first stage would rebuild it and be refused after
+  the controller reads.
 - **A plan is checked against the configured ceilings at stage.** Neither
   `insert_change_set` nor `update_change_set` consults them — only `create_change_set`
   does, which this server cannot use — while the load path enforces a structural cap of

@@ -289,7 +289,36 @@ impl UnifiServer {
     /// Mirrors the coordinator's own rule -- one pending change set per
     /// principal per controller -- so a draft cannot be used to sidestep it,
     /// and sweeps drafts older than the approval window on the way in.
-    fn hold_draft(&self, id: String, draft: Draft) -> Result<(), Box<CallToolResult>> {
+    async fn hold_draft(&self, id: String, draft: Draft) -> Result<(), Box<CallToolResult>> {
+        // Across *both* stores. Checking only the draft map let a principal who
+        // already had a staged set create another, spend a stage's worth of
+        // controller reads building its pre-image, and only then hit the
+        // coordinator's guard -- leaving a draft that can never become one.
+        if let Some(blocker) = self
+            .coordinator
+            .change_sets()
+            .await
+            .into_iter()
+            .find(|record| {
+                record.owner == draft.owner
+                    && record.device == draft.controller
+                    && matches!(
+                        record.state,
+                        ChangeSetState::Planned
+                            | ChangeSetState::Approved
+                            | ChangeSetState::Applying
+                    )
+            })
+        {
+            return Err(Box::new(tool_error(format!(
+                "change set {} on '{}' is still {}; finish or cancel it before creating \
+                 another",
+                blocker.id,
+                draft.controller,
+                blocker.state.as_str()
+            ))));
+        }
+
         let deadline = self.coordinator.approval_ttl().as_secs();
         let now = unix_seconds_now();
 
@@ -322,14 +351,31 @@ impl UnifiServer {
         Ok(())
     }
 
-    /// The draft for this id, if it is one and the caller named its controller.
+    /// The draft for this id, if it is one, the caller named its controller,
+    /// and it has not lapsed.
+    ///
+    /// Expiry is enforced here rather than only in `hold_draft`'s sweep. A
+    /// lapsed draft that was still returned could be staged and persisted with
+    /// a fresh deadline, so whether a draft had expired depended on whether an
+    /// unrelated create happened to run the sweep first.
     fn draft(&self, change_set_id: &str, controller: &str) -> Option<Draft> {
-        self.drafts
+        let deadline = self.coordinator.approval_ttl().as_secs();
+        let now = unix_seconds_now();
+
+        let held = self
+            .drafts
             .read()
             .ok()?
             .get(change_set_id)
             .filter(|draft| draft.controller == controller)
-            .cloned()
+            .cloned()?;
+
+        if now.saturating_sub(held.created_at_unix) > deadline {
+            self.release_draft(change_set_id);
+            return None;
+        }
+
+        Some(held)
     }
 
     /// Forget a draft that has become a real change set.
@@ -1005,6 +1051,20 @@ impl UnifiServer {
         // whole store unloadable at the next restart -- and nothing in a test
         // run restarts, so CI would never see it. The record is created on the
         // first stage, which is also when there is a plan to propose.
+        // The description ends up inside the preview, so one that cannot fit
+        // there produces an id that can never become a change set: every first
+        // stage would rebuild the preview around it and be refused, after the
+        // controller reads. Refused here instead, where it costs nothing.
+        let preview_budget = crate::changeset_state::limits().max_preview_bytes;
+        if args.description.len() >= preview_budget {
+            return tool_error(format!(
+                "the description is {} bytes; a change set's preview is capped at {}, and \
+                 the description is stored inside it",
+                args.description.len(),
+                preview_budget
+            ));
+        }
+
         let id = crate::changeset_state::new_change_set_id();
         let draft = Draft {
             controller: args.controller.clone(),
@@ -1013,7 +1073,7 @@ impl UnifiServer {
             created_at_unix: unix_seconds_now(),
         };
 
-        if let Err(result) = self.hold_draft(id.clone(), draft) {
+        if let Err(result) = self.hold_draft(id.clone(), draft).await {
             return *result;
         }
 
@@ -1149,15 +1209,16 @@ impl UnifiServer {
             return *result;
         }
 
+        let (digest, device, owner) = (
+            staged.digest.clone(),
+            staged.device.clone(),
+            staged.owner.clone(),
+        );
+
         if draft.is_some() {
-            // The plan exists now, so the change set does too -- and so does
-            // something to propose. `insert_change_set` is what enforces one
-            // pending set per principal per controller.
-            let (digest, device, owner) = (
-                staged.digest.clone(),
-                staged.device.clone(),
-                staged.owner.clone(),
-            );
+            // The plan exists now, so the change set does too.
+            // `insert_change_set` is what enforces one pending set per
+            // principal per controller.
             if let Err(error) = self.coordinator.insert_change_set(staged).await {
                 return tool_error(format!(
                     "failed to store change set ({}): {}",
@@ -1166,19 +1227,6 @@ impl UnifiServer {
                 ));
             }
             self.release_draft(&args.change_set_id);
-
-            // The coordinator emits this itself from `create_change_set`, which
-            // this server cannot use: that call requires the actions up front,
-            // and a change set here is created before anything is staged.
-            if let Some(recorder) = self.evidence.as_ref() {
-                recorder.proposal(
-                    &args.change_set_id,
-                    &args.change_set_id,
-                    &device,
-                    &owner,
-                    &digest,
-                );
-            }
         } else if let Err(error) = self
             // Conditional on the state still being `Planned`. An unconditional
             // write would let a concurrent approval be overwritten by a staging
@@ -1192,6 +1240,23 @@ impl UnifiServer {
                 error.field(),
                 error.message()
             ));
+        }
+
+        // On every stage, not only the first. The coordinator emits this from
+        // `create_change_set`, which this server cannot use: that call wants
+        // the actions up front, and a change set here exists before anything is
+        // staged into it. The recorder keys the diff hash by change-set id and
+        // the later approval and apply records copy it, so a second stage
+        // without a fresh proposal would have those records attesting to the
+        // first stage's plan rather than the one approved and applied.
+        if let Some(recorder) = self.evidence.as_ref() {
+            recorder.proposal(
+                &args.change_set_id,
+                &args.change_set_id,
+                &device,
+                &owner,
+                &digest,
+            );
         }
 
         let result = serde_json::json!({
@@ -1515,33 +1580,21 @@ impl UnifiServer {
         // controller knows which of them landed. Detectable, not recoverable,
         // and a human has to look -- which is the honest state, and keeps the
         // approval from being spent twice.
-        // The deadline is checked here because the claim does not check it. It
-        // refuses anything that is not `Approved`, and approve refuses an
-        // expired set -- but a set approved inside the window and applied long
-        // after it still claims cleanly, which is exactly the case
-        // `--approval-timeout-secs` exists to stop. `change_set_status` is the
-        // path that transitions and persists `Approved -> Expired`, so the
-        // record is left Expired rather than merely reported as stale.
-        match self
+        // Retires a `Planned` set whose window has closed, so the common case
+        // reports "expired" rather than "not approved". It does not cover an
+        // `Approved` one: `retire_if_deadline_passed` only applies the approval
+        // TTL to `Planned`, and otherwise expires only a lapsed lab-mode
+        // waiver. The real gate is after the claim.
+        if let Err(error) = self
             .coordinator
             .change_set_status(args.change_set_id.clone(), args.controller.clone())
             .await
         {
-            Ok(status) if status.state == ChangeSetState::Expired => {
-                return tool_error(format!(
-                    "apply refused: the approval window closed at {}; re-plan and \
-                     re-approve before applying",
-                    status.expires_at_unix
-                ));
-            }
-            Ok(_) => {}
-            Err(error) => {
-                return tool_error(format!(
-                    "apply refused ({}): {}",
-                    error.field(),
-                    error.message()
-                ));
-            }
+            return tool_error(format!(
+                "apply refused ({}): {}",
+                error.field(),
+                error.message()
+            ));
         }
 
         let claimed = match self
@@ -1558,6 +1611,34 @@ impl UnifiServer {
                 ));
             }
         };
+
+        // The deadline, enforced on the record the claim just returned. Nothing
+        // upstream does it: `claim_change_set_for_apply` checks the state and
+        // not the clock, and `change_set_status` applies the approval TTL only
+        // to a `Planned` record -- so an ordinary two-person approval granted
+        // inside the window and applied long after it reached the controller,
+        // which is precisely what `--approval-timeout-secs` exists to stop.
+        //
+        // Here rather than before the claim because the claim is what
+        // serialises: one caller holds it, and it refuses before anything is
+        // written. A pre-claim check alone is a check-then-act race.
+        if unix_seconds_now() >= claimed.expires_at_unix {
+            let deadline = claimed.expires_at_unix;
+            let mut lapsed = claimed;
+            lapsed.state = ChangeSetState::Failed;
+            if let Err(error) = self.coordinator.update_change_set(lapsed).await {
+                tracing::error!(
+                    change_set_id = %args.change_set_id,
+                    field = error.field(),
+                    message = error.message(),
+                    "an expired change set could not be settled after its claim"
+                );
+            }
+            return tool_error(format!(
+                "apply refused: the approval window closed at {deadline}; nothing was \
+                 written. Re-plan and re-approve before applying."
+            ));
+        }
 
         // A claim has no route back to `Approved`, so a failure between here
         // and the first write has to settle the record itself or it sits in
@@ -1614,6 +1695,8 @@ impl UnifiServer {
             State::RefusedStale => "refused_stale",
         };
 
+        let succeeded = matches!(outcome.state, State::Applied | State::AppliedUnverified);
+
         // The breakdown goes to the audit trail, which is where an event
         // belongs -- the state file holds state. It has no home on
         // `ChangeSetRecord`, which is `deny_unknown_fields`, and the shared
@@ -1648,7 +1731,7 @@ impl UnifiServer {
         // a change landed when only some of it did is worse than one an
         // operator has to go and read.
         let mut settled = claimed;
-        settled.state = if matches!(outcome.state, State::Applied | State::AppliedUnverified) {
+        settled.state = if succeeded {
             ChangeSetState::Applied
         } else {
             ChangeSetState::Failed
@@ -1662,8 +1745,12 @@ impl UnifiServer {
                 &args.change_set_id,
                 &args.controller,
                 &principal,
-                matches!(outcome.state, State::Applied | State::AppliedUnverified),
-                state_str,
+                succeeded,
+                // Failures only. The schema reads a non-empty `error` as an
+                // execution failure, so passing the outcome unconditionally
+                // made every successful receipt carry `error: "applied"` and
+                // read as a failure to anything filtering on it.
+                if succeeded { "" } else { state_str },
             )
         {
             tracing::error!(
@@ -2098,6 +2185,54 @@ mod tests {
                 .claim_change_set_for_apply(&id, "home", ApplyHandle::None)
                 .await
                 .is_err()
+        );
+    }
+
+    /// The gate the claim does not provide. `claim_change_set_for_apply`
+    /// checks the state and not the clock, and `change_set_status` applies the
+    /// approval TTL only to a `Planned` record -- so an ordinary two-person
+    /// approval granted inside the window stays claimable indefinitely, which
+    /// is what this asserts is no longer true of the record apply acts on.
+    #[tokio::test]
+    async fn an_approved_change_set_past_its_deadline_is_still_claimable_upstream() {
+        let coordinator = coordinator_at(None);
+        let mut record = planned_record("alice", "home", 300);
+        let (id, digest) = (record.id.clone(), record.digest.clone());
+        record.expires_at_unix = unix_seconds_now().saturating_add(2);
+        coordinator.insert_change_set(record).await.expect("insert");
+        coordinator
+            .approve_change_set(id.clone(), "home".to_owned(), "bob".to_owned(), digest)
+            .await
+            .expect("approved inside the window");
+
+        // Move the deadline into the past, which is what the clock does on a
+        // set left approved overnight.
+        let mut approved = coordinator.change_set(&id, "home").await.expect("stored");
+        approved.expires_at_unix = unix_seconds_now().saturating_sub(1);
+        coordinator
+            .update_change_set(approved)
+            .await
+            .expect("update");
+
+        // Neither upstream gate refuses it...
+        let status = coordinator
+            .change_set_status(id.clone(), "home".to_owned())
+            .await
+            .expect("status");
+        assert_eq!(
+            status.state,
+            ChangeSetState::Approved,
+            "change_set_status retires Planned records only"
+        );
+        let claimed = coordinator
+            .claim_change_set_for_apply(&id, "home", ApplyHandle::None)
+            .await
+            .expect("the claim checks the state, not the clock");
+
+        // ...so the deadline on the claimed record is what apply has to read.
+        assert!(
+            unix_seconds_now() >= claimed.expires_at_unix,
+            "the record apply acts on carries the lapsed deadline"
         );
     }
 
