@@ -25,6 +25,18 @@ impl Preimage {
         }
     }
 
+    /// Construct a pre-image from the resources it snapshots.
+    ///
+    /// The inverse of reading the entries back out of a stored change set: the
+    /// pre-image travels folded into the record's actions, one entry per
+    /// mutation, and is reassembled here.
+    #[must_use]
+    pub fn from_resources(resources: Vec<Value>) -> Self {
+        Self {
+            resources: serde_json::json!({ "data": resources }),
+        }
+    }
+
     /// Capture a pre-image from a live controller.
     ///
     /// Fetches the current state of all resources that will be touched by the
@@ -249,6 +261,18 @@ impl StagedMutation {
     pub fn restore(backup_id: impl Into<String>) -> Self {
         Self::Restore {
             backup_id: backup_id.into(),
+        }
+    }
+
+    /// The resource this mutation addresses, if it addresses one by id.
+    ///
+    /// `None` for a create, which has no id until apply, and for a restore,
+    /// which addresses the whole controller.
+    #[must_use]
+    pub fn resource_id(&self) -> Option<&str> {
+        match self {
+            Self::Update { id, .. } | Self::Delete { id, .. } => Some(id.as_str()),
+            Self::Create { .. } | Self::Restore { .. } => None,
         }
     }
 

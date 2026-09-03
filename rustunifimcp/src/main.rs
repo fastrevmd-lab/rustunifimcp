@@ -413,21 +413,53 @@ async fn run_inner() -> Result<()> {
         &cli.controllers_file,
     )?);
 
-    // Build changeset store.
-    let changeset_store =
-        rustunifimcp::changeset_store::ChangeSetStore::new(cli.state_file.clone())
-            .map_err(|e| anyhow::anyhow!("failed to initialize changeset store: {e}"))?;
+    // Built before serving, and started eagerly, so a misconfigured pipeline
+    // stops the server here rather than at the first change.
+    let evidence = match cli.common.evidence.into_config() {
+        Ok(Some(config)) => {
+            tracing::info!(
+                server_id = %config.server_id,
+                run_id = %config.run_id,
+                "SSDF evidence pipeline enabled"
+            );
+            // aws-lc-rs, not ring: this workspace's rustls is built with that
+            // provider, and the fleet is genuinely split.
+            let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+            let transport = Arc::new(
+                mecmcp_transport::evidence_transport::EvidenceHttpTransport::new(
+                    cli.common.evidence.ca_file(),
+                    provider,
+                )
+                .map_err(|e| anyhow::anyhow!("building the SSDF evidence transport: {e}"))?,
+            );
+            Some(
+                mecmcp_audit::EvidenceService::start_with_transport(config, transport)
+                    .map_err(|e| anyhow::anyhow!("starting the SSDF evidence pipeline: {e}"))?,
+            )
+        }
+        Ok(None) => None,
+        Err(error) => anyhow::bail!("SSDF evidence configuration: {error}"),
+    };
+    let recorder = evidence
+        .as_ref()
+        .map(mecmcp_audit::EvidenceService::recorder);
+    // `recorder` is cloned into the server; the coordinator holds its own.
+    let recorder_for_coordinator = recorder.clone();
+
+    // Build the change-set coordinator.
+    let coordinator = rustunifimcp::changeset_state::build_coordinator(
+        cli.state_file.as_deref(),
+        std::time::Duration::from_secs(cli.approval_timeout_secs),
+        cli.lab_mode(),
+        recorder_for_coordinator,
+    )
+    .map_err(|e| anyhow::anyhow!("failed to initialize the change-set coordinator: {e}"))?;
 
     // Build server.
-    let server = UnifiServer::new(
-        Arc::clone(&registry),
-        cli.lab_mode(),
-        changeset_store,
-        cli.approval_timeout_secs,
-    )?;
+    let server = UnifiServer::new(Arc::clone(&registry), cli.lab_mode(), coordinator, recorder)?;
 
     // Determine transport.
-    match cli.common.transport {
+    let served = match cli.common.transport {
         mecmcp_runtime::cli::Transport::Stdio => {
             // SIGHUP reloads the inventory and rebuilds clients.
             // Clone the server for the reload handler; serve_stdio consumes the original.
@@ -435,7 +467,22 @@ async fn run_inner() -> Result<()> {
             serve_stdio(server).await
         }
         mecmcp_runtime::cli::Transport::StreamableHttp => serve_http(server, &cli, registry).await,
+    };
+
+    // Dropping the service stops its worker but deliberately does not flush:
+    // a `Drop` that performs network I/O turns an ordinary teardown into an
+    // unpredictable stall. Only `shutdown` closes and spools what the recorder
+    // still holds, and only `apply_intent` and `result_receipt` flush on their
+    // own -- so without this a proposal or an approval not followed by an apply
+    // is lost at exit. Runs on the error path too, and the serving result is
+    // what is returned either way.
+    if let Some(service) = evidence
+        && let Err(error) = service.shutdown()
+    {
+        tracing::error!(%error, "the SSDF evidence pipeline did not flush cleanly");
     }
+
+    served
 }
 
 /// Load TLS configuration for the listener.
@@ -901,10 +948,16 @@ mod tests {
                 .unwrap(),
         );
 
-        let changeset_store = rustunifimcp::changeset_store::ChangeSetStore::new(None).unwrap();
+        let coordinator = rustunifimcp::changeset_state::build_coordinator(
+            None,
+            std::time::Duration::from_secs(300),
+            false,
+            None,
+        )
+        .unwrap();
 
         // Build a server for the reload handler.
-        let server = UnifiServer::new(Arc::clone(&registry), false, changeset_store, 300).unwrap();
+        let server = UnifiServer::new(Arc::clone(&registry), false, coordinator, None).unwrap();
 
         // Should install successfully without a token store.
         let result = install_sighup_reload(registry, Some(server), None);
@@ -949,8 +1002,14 @@ mod tests {
                 .unwrap(),
         );
 
-        let changeset_store = rustunifimcp::changeset_store::ChangeSetStore::new(None).unwrap();
-        let server = UnifiServer::new(Arc::clone(&registry), false, changeset_store, 300).unwrap();
+        let coordinator = rustunifimcp::changeset_state::build_coordinator(
+            None,
+            std::time::Duration::from_secs(300),
+            false,
+            None,
+        )
+        .unwrap();
+        let server = UnifiServer::new(Arc::clone(&registry), false, coordinator, None).unwrap();
 
         let token_store = Arc::new(mecmcp_auth::TokenStoreFile::load(tokens_file.path()).unwrap());
 
@@ -1023,8 +1082,14 @@ mod tests {
                 .unwrap(),
         );
 
-        let changeset_store = rustunifimcp::changeset_store::ChangeSetStore::new(None).unwrap();
-        let server = UnifiServer::new(Arc::clone(&registry), false, changeset_store, 300).unwrap();
+        let coordinator = rustunifimcp::changeset_state::build_coordinator(
+            None,
+            std::time::Duration::from_secs(300),
+            false,
+            None,
+        )
+        .unwrap();
+        let server = UnifiServer::new(Arc::clone(&registry), false, coordinator, None).unwrap();
 
         // Initial state: no controllers, no clients
         assert_eq!(registry.names().len(), 0);

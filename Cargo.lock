@@ -2229,9 +2229,12 @@ version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
+ "mecmcp-audit",
  "mecmcp-auth",
+ "mecmcp-changeset",
  "mecmcp-http",
  "mecmcp-runtime",
+ "mecmcp-secret",
  "mecmcp-server",
  "mecmcp-transport",
  "rcgen",
@@ -2253,7 +2256,6 @@ dependencies = [
 name = "rustunifimcp-core"
 version = "0.2.0"
 dependencies = [
- "mecmcp-audit",
  "mecmcp-changeset",
  "mecmcp-http",
  "mecmcp-inventory",
