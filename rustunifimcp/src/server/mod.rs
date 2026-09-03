@@ -18,8 +18,8 @@ use rmcp::{
 };
 use rustunifimcp_core::{
     changeset::{
-        Preimage, StagedMutation, State, ZoneIndex, apply_sequentially, check_references,
-        diff_against_preimage, referenced_zone_ids, validate_locally,
+        Preimage, StagedMutation, State, ZoneIndex, apply_sequentially, check_zone_deletions,
+        check_zone_references, diff_against_preimage, referenced_zone_ids, validate_locally,
     },
     client::UnifiClient,
     error::UnifiError,
@@ -972,6 +972,13 @@ impl UnifiServer {
             return tool_error(format!("local validation failed: {e}"));
         }
 
+        // A zone this set deletes must not be left referenced by anything else
+        // in the set. Checked first because it needs no controller round trip:
+        // it compares the set against itself and against the pre-image.
+        if let Err(e) = check_zone_deletions(preimage, &change_set.mutations) {
+            return tool_error(format!("reference check failed: {e}"));
+        }
+
         // Referential integrity is checked against the controller's live zone
         // list, not the pre-image. The pre-image records nothing for a create,
         // and it was being searched for a resource with `_id == "_all_"` that
@@ -1016,7 +1023,7 @@ impl UnifiServer {
                 }
             };
 
-            if let Err(e) = check_references(&zones, &change_set.mutations) {
+            if let Err(e) = check_zone_references(&zones, &change_set.mutations) {
                 return tool_error(format!("reference check failed: {e}"));
             }
         }

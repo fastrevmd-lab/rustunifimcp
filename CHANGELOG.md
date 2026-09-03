@@ -23,7 +23,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   shape" prefix that made a lookup miss read like a parse failure. A policy naming a
   zone the same change set deletes is now refused too — apply runs the staged writes
   in order, so the live list still has a zone that will be gone by the time the policy
-  lands.
+  lands. That check follows staging order and runs against the *effective* policy, not
+  the staged fragment: a Private v2 update is a partial write the client overlays on
+  the live resource, so a fragment touching only `enabled` still applies a policy
+  carrying the live zones, a second fragment lands on the result of the first, and a
+  non-object body changes nothing at all. Both failing orderings are reported with the
+  ordering named as the fix.
 - **Change-set tools now refuse a controller that does not own the change set.** Every
   one of the seven took a `controller` argument and used it to pick the client without
   ever comparing it to the controller the set was created against, so a set planned
