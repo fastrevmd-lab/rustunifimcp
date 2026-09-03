@@ -3,8 +3,11 @@
 //! UniFi has no server-side dry-run validation, so referential integrity and
 //! schema constraints must be checked locally before apply.
 
+use crate::ApiSurface;
 use crate::error::UnifiError;
+use crate::model::ResourceKind;
 use serde_json::Value;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::preimage::{Preimage, StagedMutation};
 
@@ -28,38 +31,365 @@ pub fn validate_locally(
     Ok(())
 }
 
-/// Check referential integrity for staged mutations.
+/// The firewall zones a staged mutation is allowed to reference.
 ///
-/// # Errors
+/// Built from the controller's live zone list, never from the pre-image. A
+/// create records no prior state at all, so a pre-image-derived index is empty
+/// for exactly the mutations that need checking, and every zone reference in a
+/// `firewall_policy` create was reported missing.
+#[derive(Debug, Clone, Default)]
+pub struct ZoneIndex {
+    /// Zone `_id` to zone name.
+    by_id: BTreeMap<String, String>,
+    /// Zone `external_id` to the `_id` the controller wants instead.
+    by_external_id: BTreeMap<String, String>,
+}
+
+/// What a zone identifier in a staged body resolves to.
+enum ZoneLookup<'index> {
+    /// The identifier is a zone `_id` on this controller.
+    Known,
+    /// The identifier is a zone's `external_id`; the `_id` is carried along
+    /// because naming it is the whole fix.
+    ExternalId(&'index str),
+    /// The identifier is neither.
+    Absent,
+}
+
+impl ZoneIndex {
+    /// Build the index from the controller's firewall zone list.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UnifiError::Malformed`] if the response is not an array of
+    /// zone objects each carrying an `_id`. Read that as "the zone list could
+    /// not be read", which needs a different operator response from "the zone
+    /// is not there" — conflating the two is what made this check unusable.
+    pub fn from_zone_list(raw: &Value) -> Result<Self, UnifiError> {
+        let items = raw.as_array().ok_or_else(|| {
+            UnifiError::Malformed("firewall zone list is not an array".to_owned())
+        })?;
+
+        let mut by_id = BTreeMap::new();
+        let mut by_external_id = BTreeMap::new();
+
+        for (position, item) in items.iter().enumerate() {
+            let id = item
+                .get("_id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    UnifiError::Malformed(format!(
+                        "firewall zone at position {position} has no `_id`"
+                    ))
+                })?
+                .to_owned();
+
+            if let Some(external) = item.get("external_id").and_then(Value::as_str) {
+                by_external_id.insert(external.to_owned(), id.clone());
+            }
+
+            let name = item
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or("<unnamed>")
+                .to_owned();
+            by_id.insert(id, name);
+        }
+
+        Ok(Self {
+            by_id,
+            by_external_id,
+        })
+    }
+
+    /// How many zones the controller reported.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.by_id.len()
+    }
+
+    /// Whether the controller reported no zones at all.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.by_id.is_empty()
+    }
+
+    /// Resolve one identifier taken from a staged body.
+    fn resolve(&self, identifier: &str) -> ZoneLookup<'_> {
+        if self.by_id.contains_key(identifier) {
+            return ZoneLookup::Known;
+        }
+        if let Some(id) = self.by_external_id.get(identifier) {
+            return ZoneLookup::ExternalId(id.as_str());
+        }
+        ZoneLookup::Absent
+    }
+}
+
+/// The body fields a zone reference can appear under.
+const ZONE_REFERENCE_FIELDS: &[&str] = &["source", "destination"];
+
+/// The zone identifiers staged mutations reference, in staging order.
 ///
-/// Returns an error if any mutation references a zone or resource that does
-/// not exist in the provided data.
-pub fn check_references(data: &Value, mutations: &[StagedMutation]) -> Result<(), UnifiError> {
-    // Extract zone IDs from the data
-    let zone_ids: Vec<String> = if let Some(zones) = data.as_array() {
-        zones
-            .iter()
-            .filter_map(|zone| zone.get("_id").and_then(|id| id.as_str()).map(String::from))
-            .collect()
-    } else {
-        Vec::new()
-    };
+/// Empty means no staged body names a zone, so the caller can skip fetching
+/// the zone list rather than making a change set that touches no firewall
+/// depend on the firewall surface being reachable.
+#[must_use]
+pub fn referenced_zone_ids(mutations: &[StagedMutation]) -> Vec<String> {
+    let mut referenced = Vec::new();
 
     for mutation in mutations {
-        // Check if this mutation references a zone
         let body = match mutation {
             StagedMutation::Create { body, .. } | StagedMutation::Update { body, .. } => body,
             StagedMutation::Delete { .. } | StagedMutation::Restore { .. } => continue,
         };
 
-        // Check if the body references a zone_id
-        if let Some(source) = body.get("source")
-            && let Some(zone_id) = source.get("zone_id").and_then(|id| id.as_str())
-            && !zone_ids.contains(&zone_id.to_owned())
-        {
-            return Err(UnifiError::Malformed(format!(
-                "mutation references non-existent zone '{zone_id}'"
+        for field in ZONE_REFERENCE_FIELDS {
+            if let Some(zone_id) = body
+                .get(field)
+                .and_then(|side| side.get("zone_id"))
+                .and_then(Value::as_str)
+                && !referenced.iter().any(|seen| seen == zone_id)
+            {
+                referenced.push(zone_id.to_owned());
+            }
+        }
+    }
+
+    referenced
+}
+
+/// The resource kind whose deletion removes a zone a policy could name.
+const ZONE_KIND: &str = "firewall_zone";
+
+/// The zones this change set deletes.
+fn zones_deleted_by(mutations: &[StagedMutation]) -> Vec<&str> {
+    mutations
+        .iter()
+        .filter_map(|mutation| match mutation {
+            StagedMutation::Delete { kind, id } if kind == ZONE_KIND => Some(id.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Whether an update of this kind is a partial write apply merges.
+///
+/// Only the Private v2 surface: [`crate::client::UnifiClient::apply_mutation`]
+/// fetches the resource and overlays the staged fields for those kinds, and
+/// sends the body as-is for every other surface. An unrecognised kind fails at
+/// apply, so the verdict for it does not matter.
+fn merges_partially(kind: &str) -> bool {
+    serde_json::from_value::<ResourceKind>(Value::String(kind.to_owned()))
+        .is_ok_and(|resource_kind| resource_kind.surface() == ApiSurface::PrivateV2)
+}
+
+/// Overlay a staged fragment on a resource the way apply does.
+///
+/// Whole top-level keys are replaced, not deep-merged, and the
+/// controller-managed `_id` and `site_id` are never taken from the fragment.
+/// A fragment that supplies `source` therefore replaces the live `source`
+/// entirely, including when the replacement carries no `zone_id`.
+///
+/// Both sides must be objects or nothing is merged and the resource is sent
+/// unchanged, because that is what apply's own guard does. `MutationSpec`
+/// accepts any JSON as a body, and treating a null or a scalar as a
+/// replacement here erased the inherited zone references apply would in fact
+/// still send.
+fn overlay(base: &mut Value, fragment: &Value) {
+    let (Some(base_object), Some(fragment_object)) = (base.as_object_mut(), fragment.as_object())
+    else {
+        return;
+    };
+
+    for (key, value) in fragment_object {
+        if key != "_id" && key != "site_id" {
+            base_object.insert(key.clone(), value.clone());
+        }
+    }
+}
+
+/// The zone one side of a resource names, if any.
+fn zone_of(resource: &Value, field: &str) -> Option<String> {
+    resource
+        .get(field)
+        .and_then(|side| side.get("zone_id"))
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+}
+
+/// Refuse a change set whose zone deletions and policy writes contradict.
+///
+/// Apply is a sequence of independent REST calls in staging order, with no
+/// candidate and no commit, so the check has to follow that order rather than
+/// compare start to end. Two orderings fail, and they fail differently:
+///
+/// - A zone deleted while something the set writes still references it. The
+///   controller refuses to remove a zone in use, and by then earlier writes
+///   have already landed.
+/// - A policy written after the set has deleted the zone it names. That write
+///   fails on a zone that no longer exists.
+///
+/// The state the check walks starts from the pre-image for every resource the
+/// set updates or deletes, because a zone delete is refused by what is *live*
+/// and not only by what this set has written so far. Updates then fold
+/// cumulatively: apply re-fetches before each one, so a second fragment lands
+/// on the result of the first, and projecting each from the pre-image
+/// independently refused sets that apply cleanly.
+///
+/// Bounded to the resources the set touches. A live policy the set never
+/// writes is not in the pre-image and cannot be projected, so a zone deletion
+/// that orphans an untouched policy is left to the controller to refuse.
+///
+/// Separate from [`check_zone_references`] because it needs no zone list: it
+/// compares the set against itself, so it runs even when nothing was fetched.
+///
+/// # Errors
+///
+/// Returns [`UnifiError::ReferenceNotFound`] naming both sides of the conflict
+/// and, where it is the fix, the ordering.
+pub fn check_zone_deletions(
+    preimage: &Preimage,
+    mutations: &[StagedMutation],
+) -> Result<(), UnifiError> {
+    if zones_deleted_by(mutations).is_empty() {
+        return Ok(());
+    }
+
+    // Every resource the set addresses by id, seeded with its live state.
+    let mut live: BTreeMap<String, (String, Value)> = BTreeMap::new();
+    for mutation in mutations {
+        let (kind, id) = match mutation {
+            StagedMutation::Update { kind, id, .. } | StagedMutation::Delete { kind, id } => {
+                (kind, id)
+            }
+            StagedMutation::Create { .. } | StagedMutation::Restore { .. } => continue,
+        };
+        if kind == ZONE_KIND {
+            continue;
+        }
+        if let Some(resource) = preimage.get_resource(id) {
+            live.insert(id.clone(), (format!("the live {kind} {id}"), resource));
+        }
+    }
+
+    // Resources this set creates. They have no id until apply, so they cannot
+    // be addressed by a later mutation and never need folding.
+    let mut created: Vec<(String, Value)> = Vec::new();
+    let mut deleted: BTreeSet<&str> = BTreeSet::new();
+
+    for mutation in mutations {
+        match mutation {
+            StagedMutation::Create { body, .. } => {
+                refuse_reference_to_deleted(&mutation.preview(), body, &deleted)?;
+                created.push((mutation.preview(), body.clone()));
+            }
+            StagedMutation::Update { kind, id, body } => {
+                let entry = live
+                    .entry(id.clone())
+                    .or_insert_with(|| (mutation.preview(), Value::Object(serde_json::Map::new())));
+                if merges_partially(kind) {
+                    overlay(&mut entry.1, body);
+                } else {
+                    entry.1 = body.clone();
+                }
+                entry.0 = mutation.preview();
+                let (preview, resource) = (entry.0.clone(), entry.1.clone());
+                refuse_reference_to_deleted(&preview, &resource, &deleted)?;
+            }
+            StagedMutation::Delete { kind, id } if kind == ZONE_KIND => {
+                for (preview, resource) in live.values().chain(created.iter()) {
+                    for field in ZONE_REFERENCE_FIELDS {
+                        if zone_of(resource, field).as_deref() == Some(id.as_str()) {
+                            return Err(UnifiError::ReferenceNotFound(format!(
+                                "staged delete firewall_zone {id} would remove a zone \
+                                 {preview} still names as {field}.zone_id; stage the \
+                                 change that moves it off the zone before the delete"
+                            )));
+                        }
+                    }
+                }
+                deleted.insert(id.as_str());
+            }
+            StagedMutation::Delete { id, .. } => {
+                live.remove(id);
+            }
+            StagedMutation::Restore { .. } => {}
+        }
+    }
+
+    Ok(())
+}
+
+/// Refuse a write naming a zone an earlier mutation in the set removed.
+fn refuse_reference_to_deleted(
+    preview: &str,
+    resource: &Value,
+    deleted: &BTreeSet<&str>,
+) -> Result<(), UnifiError> {
+    for field in ZONE_REFERENCE_FIELDS {
+        let Some(zone_id) = zone_of(resource, field) else {
+            continue;
+        };
+        if deleted.contains(zone_id.as_str()) {
+            return Err(UnifiError::ReferenceNotFound(format!(
+                "staged {preview} names {field}.zone_id '{zone_id}', which an earlier \
+                 mutation in this change set deletes"
             )));
+        }
+    }
+    Ok(())
+}
+
+/// Check that every zone a staged body names exists on the controller.
+///
+/// Only the staged fragments are checked here: a reference inherited from the
+/// live resource is already resolvable by definition, and the case where the
+/// set removes it is [`check_zone_deletions`]'s.
+///
+/// # Errors
+///
+/// Returns [`UnifiError::ReferenceNotFound`] if a staged body names a zone the
+/// controller does not have. That variant renders on its own, without the
+/// "unexpected response shape" prefix a parse failure carries, so the two read
+/// differently in a tool result.
+pub fn check_zone_references(
+    zones: &ZoneIndex,
+    mutations: &[StagedMutation],
+) -> Result<(), UnifiError> {
+    for mutation in mutations {
+        let body = match mutation {
+            StagedMutation::Create { body, .. } | StagedMutation::Update { body, .. } => body,
+            StagedMutation::Delete { .. } | StagedMutation::Restore { .. } => continue,
+        };
+
+        for field in ZONE_REFERENCE_FIELDS {
+            let Some(zone_id) = body
+                .get(field)
+                .and_then(|side| side.get("zone_id"))
+                .and_then(Value::as_str)
+            else {
+                continue;
+            };
+
+            match zones.resolve(zone_id) {
+                ZoneLookup::Known => {}
+                ZoneLookup::ExternalId(id) => {
+                    return Err(UnifiError::ReferenceNotFound(format!(
+                        "staged {} names {field}.zone_id '{zone_id}', which is that zone's \
+                         external_id; the controller addresses it by `_id` '{id}'",
+                        mutation.preview()
+                    )));
+                }
+                ZoneLookup::Absent => {
+                    return Err(UnifiError::ReferenceNotFound(format!(
+                        "staged {} names {field}.zone_id '{zone_id}', which is not one of the \
+                         {} firewall zones on this controller",
+                        mutation.preview(),
+                        zones.len()
+                    )));
+                }
+            }
         }
     }
 
@@ -68,23 +398,362 @@ pub fn check_references(data: &Value, mutations: &[StagedMutation]) -> Result<()
 
 #[cfg(test)]
 mod tests {
-    use crate::testing::{DEFAULT_FIXTURE_VERSION, fixture, fixtures_available};
+    use super::{ZoneIndex, check_zone_deletions, check_zone_references, referenced_zone_ids};
+    use crate::changeset::{Preimage, StagedMutation};
+    use serde_json::{Value, json};
+
+    /// A zone list as the Private v2 surface returns it: a bare array.
+    fn zone_list() -> serde_json::Value {
+        json!([
+            {
+                "_id": "aaaaaaaaaaaaaaaaaaaaaaaa",
+                "name": "Internal",
+                "default_zone": true,
+                "network_ids": ["bbbbbbbbbbbbbbbbbbbbbbbb"],
+                "external_id": "11111111-1111-4111-8111-111111111111"
+            },
+            {
+                "_id": "cccccccccccccccccccccccc",
+                "name": "DMZ",
+                "default_zone": false,
+                "network_ids": [],
+                "external_id": "22222222-2222-4222-8222-222222222222"
+            }
+        ])
+    }
+
+    fn policy_between(source: &str, destination: &str) -> StagedMutation {
+        StagedMutation::create(
+            "firewall_policy",
+            json!({
+                "name": "probe",
+                "action": "ALLOW",
+                "source": { "zone_id": source, "matching_target": "ZONE" },
+                "destination": { "zone_id": destination, "matching_target": "ZONE" }
+            }),
+        )
+    }
 
     /// Referential checks are local because no controller-side dry run exists.
     #[test]
     fn a_policy_referencing_an_absent_zone_is_refused() {
-        if !fixtures_available() {
-            eprintln!(
-                "SKIPPED: no fixtures. Run scripts/capture-fixtures.sh against a controller."
-            );
-            return;
-        }
-
-        let zones = fixture(DEFAULT_FIXTURE_VERSION, "zones");
-        let staged = super::StagedMutation::create(
-            "firewall_policy",
-            serde_json::json!({ "source": { "zone_id": "does-not-exist" } }),
+        let zones = ZoneIndex::from_zone_list(&zone_list()).expect("a well-formed zone list");
+        let staged = policy_between("does-not-exist", "cccccccccccccccccccccccc");
+        let error =
+            check_zone_references(&zones, &[staged]).expect_err("an absent zone must be caught");
+        let rendered = error.to_string();
+        assert!(rendered.contains("does-not-exist"), "{rendered}");
+        assert!(
+            rendered.contains('2'),
+            "the count of known zones: {rendered}"
         );
-        assert!(super::check_references(&zones, &[staged]).is_err());
+    }
+
+    /// The bug this replaces: a policy naming zones the controller listed
+    /// moments earlier was refused, because the check ran against the
+    /// pre-image, which is empty for a create.
+    #[test]
+    fn a_policy_referencing_listed_zones_passes() {
+        let zones = ZoneIndex::from_zone_list(&zone_list()).expect("a well-formed zone list");
+        let staged = policy_between("aaaaaaaaaaaaaaaaaaaaaaaa", "cccccccccccccccccccccccc");
+        assert!(
+            check_zone_references(&zones, &[staged]).is_ok(),
+            "both zones are in the list the controller returned"
+        );
+    }
+
+    /// A zone list the caller can read hands out two identifiers. Naming the
+    /// wrong one has to say so, not report the zone missing.
+    #[test]
+    fn an_external_id_reference_names_the_id_to_use_instead() {
+        let zones = ZoneIndex::from_zone_list(&zone_list()).expect("a well-formed zone list");
+        let staged = policy_between(
+            "11111111-1111-4111-8111-111111111111",
+            "cccccccccccccccccccccccc",
+        );
+        let error =
+            check_zone_references(&zones, &[staged]).expect_err("an external_id is not an _id");
+        let rendered = error.to_string();
+        assert!(rendered.contains("external_id"), "{rendered}");
+        assert!(rendered.contains("aaaaaaaaaaaaaaaaaaaaaaaa"), "{rendered}");
+    }
+
+    /// "Could not read the zone list" and "the zone is not there" want
+    /// different operator responses, so they must not render alike.
+    #[test]
+    fn an_unreadable_zone_list_does_not_read_as_a_missing_zone() {
+        let error = ZoneIndex::from_zone_list(&serde_json::json!({ "data": [] }))
+            .expect_err("an envelope is not the Private v2 shape");
+        let rendered = error.to_string();
+        assert!(rendered.contains("unexpected response shape"), "{rendered}");
+        assert!(
+            !rendered.contains("not one of the"),
+            "a parse failure must not claim a zone is absent: {rendered}"
+        );
+    }
+
+    /// A zone entry with no `_id` is drift, not an absent reference.
+    #[test]
+    fn a_zone_without_an_id_is_a_parse_failure() {
+        let error = ZoneIndex::from_zone_list(&serde_json::json!([{ "name": "Internal" }]))
+            .expect_err("a zone with no `_id` cannot be indexed");
+        assert!(error.to_string().contains("position 0"), "{error}");
+    }
+
+    /// Both sides of a policy are checked. Only checking `source` let a
+    /// destination naming a deleted zone through to apply.
+    #[test]
+    fn the_destination_zone_is_checked_too() {
+        let zones = ZoneIndex::from_zone_list(&zone_list()).expect("a well-formed zone list");
+        let staged = policy_between("aaaaaaaaaaaaaaaaaaaaaaaa", "does-not-exist");
+        let error =
+            check_zone_references(&zones, &[staged]).expect_err("destination must be checked");
+        assert!(error.to_string().contains("destination"), "{error}");
+    }
+
+    /// A pre-image holding one live policy, so a partial update has something
+    /// to inherit from.
+    fn preimage_with_live_policy() -> Preimage {
+        Preimage::from_fixture(&json!({ "data": [{
+            "_id": "dddddddddddddddddddddddd",
+            "name": "live policy",
+            "action": "ALLOW",
+            "enabled": false,
+            "source": { "zone_id": "aaaaaaaaaaaaaaaaaaaaaaaa", "matching_target": "ZONE" },
+            "destination": { "zone_id": "cccccccccccccccccccccccc", "matching_target": "ZONE" }
+        }]}))
+    }
+
+    /// Apply runs staged mutations in order against live state, so a zone the
+    /// same change set deletes is gone before a later policy write lands. The
+    /// live list still has it, which is why the zone index alone is not enough.
+    #[test]
+    fn a_policy_naming_a_zone_the_same_set_deletes_is_refused() {
+        let staged = vec![
+            StagedMutation::delete("firewall_zone", "cccccccccccccccccccccccc"),
+            policy_between("aaaaaaaaaaaaaaaaaaaaaaaa", "cccccccccccccccccccccccc"),
+        ];
+        let error = check_zone_deletions(&preimage_with_live_policy(), &staged)
+            .expect_err("the destination zone is being deleted");
+        let rendered = error.to_string();
+        assert!(rendered.contains("deletes"), "{rendered}");
+        assert!(rendered.contains("cccccccccccccccccccccccc"), "{rendered}");
+    }
+
+    /// Staging order does not rescue it: the policy is checked against the
+    /// state the whole set projects, not the prefix before it.
+    #[test]
+    fn the_delete_is_caught_even_when_staged_after_the_policy() {
+        let staged = vec![
+            policy_between("cccccccccccccccccccccccc", "aaaaaaaaaaaaaaaaaaaaaaaa"),
+            StagedMutation::delete("firewall_zone", "cccccccccccccccccccccccc"),
+        ];
+        assert!(check_zone_deletions(&preimage_with_live_policy(), &staged).is_err());
+    }
+
+    /// Deleting some other resource that happens to share an id must not
+    /// invalidate a zone reference.
+    #[test]
+    fn deleting_a_non_zone_resource_does_not_invalidate_a_zone_reference() {
+        let staged = vec![
+            StagedMutation::delete("firewall_policy", "cccccccccccccccccccccccc"),
+            policy_between("aaaaaaaaaaaaaaaaaaaaaaaa", "cccccccccccccccccccccccc"),
+        ];
+        assert!(check_zone_deletions(&preimage_with_live_policy(), &staged).is_ok());
+    }
+
+    /// A Private v2 update is a partial write: the client overlays the staged
+    /// fields on the live resource, so a fragment that touches only `enabled`
+    /// still applies a policy carrying the live zones. Reading the fragment
+    /// alone saw no reference at all and let the set delete a zone the
+    /// surviving policy points at.
+    #[test]
+    fn a_partial_update_inherits_the_zone_it_does_not_mention() {
+        let staged = vec![
+            StagedMutation::update(
+                "firewall_policy",
+                "dddddddddddddddddddddddd",
+                json!({ "enabled": true }),
+            ),
+            StagedMutation::delete("firewall_zone", "cccccccccccccccccccccccc"),
+        ];
+        let error = check_zone_deletions(&preimage_with_live_policy(), &staged)
+            .expect_err("the applied policy still names the deleted zone");
+        assert!(
+            error.to_string().contains("cccccccccccccccccccccccc"),
+            "{error}"
+        );
+    }
+
+    /// The overlay replaces whole top-level keys, so a fragment that supplies
+    /// `destination` wins outright -- moving the policy off the doomed zone is
+    /// a legitimate way to make the set consistent.
+    #[test]
+    fn a_partial_update_that_moves_the_zone_is_allowed() {
+        let staged = vec![
+            StagedMutation::update(
+                "firewall_policy",
+                "dddddddddddddddddddddddd",
+                json!({ "destination": { "zone_id": "aaaaaaaaaaaaaaaaaaaaaaaa" } }),
+            ),
+            StagedMutation::delete("firewall_zone", "cccccccccccccccccccccccc"),
+        ];
+        assert!(check_zone_deletions(&preimage_with_live_policy(), &staged).is_ok());
+    }
+
+    /// Apply re-fetches before each update, so a second fragment is overlaid
+    /// on the result of the first. Projecting each one from the pre-image
+    /// independently made this set -- move the policy off Z, toggle another
+    /// field, delete Z -- look as though it still referenced the zone it had
+    /// just left, and refused a change set that applies cleanly.
+    #[test]
+    fn a_second_update_is_overlaid_on_the_first_not_on_the_preimage() {
+        let staged = vec![
+            StagedMutation::update(
+                "firewall_policy",
+                "dddddddddddddddddddddddd",
+                json!({ "destination": { "zone_id": "aaaaaaaaaaaaaaaaaaaaaaaa" } }),
+            ),
+            StagedMutation::update(
+                "firewall_policy",
+                "dddddddddddddddddddddddd",
+                json!({ "enabled": true }),
+            ),
+            StagedMutation::delete("firewall_zone", "cccccccccccccccccccccccc"),
+        ];
+        assert!(
+            check_zone_deletions(&preimage_with_live_policy(), &staged).is_ok(),
+            "the policy was moved off the deleted zone by the first update"
+        );
+    }
+
+    /// And the fold does not launder a reference back in: moving the policy
+    /// onto the doomed zone in a later update is still refused.
+    #[test]
+    fn a_later_update_moving_onto_the_deleted_zone_is_refused() {
+        let staged = vec![
+            StagedMutation::update(
+                "firewall_policy",
+                "dddddddddddddddddddddddd",
+                json!({ "destination": { "zone_id": "aaaaaaaaaaaaaaaaaaaaaaaa" } }),
+            ),
+            StagedMutation::update(
+                "firewall_policy",
+                "dddddddddddddddddddddddd",
+                json!({ "destination": { "zone_id": "cccccccccccccccccccccccc" } }),
+            ),
+            StagedMutation::delete("firewall_zone", "cccccccccccccccccccccccc"),
+        ];
+        assert!(check_zone_deletions(&preimage_with_live_policy(), &staged).is_err());
+    }
+
+    /// A policy this set deletes leaves nothing to reference, so deleting it
+    /// and its zone together is consistent.
+    #[test]
+    fn deleting_the_policy_and_its_zone_together_is_allowed() {
+        let staged = vec![
+            StagedMutation::update(
+                "firewall_policy",
+                "dddddddddddddddddddddddd",
+                json!({ "enabled": true }),
+            ),
+            StagedMutation::delete("firewall_policy", "dddddddddddddddddddddddd"),
+            StagedMutation::delete("firewall_zone", "cccccccccccccccccccccccc"),
+        ];
+        assert!(check_zone_deletions(&preimage_with_live_policy(), &staged).is_ok());
+    }
+
+    /// Comparing start to end is not enough, because apply has no candidate
+    /// and no commit: it writes in order. This set puts the policy on the
+    /// doomed zone, deletes the zone, then moves the policy off. The end state
+    /// is consistent and the zone is in the live list, but the controller
+    /// reaches the delete while the policy still references the zone, refuses
+    /// it, and the first write has already landed.
+    #[test]
+    fn a_reference_live_at_the_moment_of_the_delete_is_refused() {
+        let staged = vec![
+            StagedMutation::update(
+                "firewall_policy",
+                "dddddddddddddddddddddddd",
+                json!({ "destination": { "zone_id": "cccccccccccccccccccccccc" } }),
+            ),
+            StagedMutation::delete("firewall_zone", "cccccccccccccccccccccccc"),
+            StagedMutation::update(
+                "firewall_policy",
+                "dddddddddddddddddddddddd",
+                json!({ "destination": { "zone_id": "aaaaaaaaaaaaaaaaaaaaaaaa" } }),
+            ),
+        ];
+        let error = check_zone_deletions(&preimage_with_live_policy(), &staged)
+            .expect_err("the delete is reached while the policy still names the zone");
+        assert!(
+            error.to_string().contains("before the delete"),
+            "the fix is an ordering one and the message should say so: {error}"
+        );
+    }
+
+    /// The live state is what refuses a zone delete, not only what this set
+    /// has written so far. A policy the set deletes *after* the zone still
+    /// holds the zone when the zone delete is reached.
+    #[test]
+    fn a_live_reference_blocks_the_delete_even_before_the_set_touches_it() {
+        let staged = vec![
+            StagedMutation::delete("firewall_zone", "cccccccccccccccccccccccc"),
+            StagedMutation::delete("firewall_policy", "dddddddddddddddddddddddd"),
+        ];
+        assert!(
+            check_zone_deletions(&preimage_with_live_policy(), &staged).is_err(),
+            "the live policy still names the zone when the zone delete lands"
+        );
+    }
+
+    /// `MutationSpec` accepts any JSON as a body. Apply's merge is guarded on
+    /// both sides being objects, so a null body sends the resource unchanged --
+    /// inherited zone references and all. Treating it as a replacement erased
+    /// them and let the zone delete validate.
+    #[test]
+    fn a_non_object_update_body_leaves_the_resource_as_apply_would() {
+        let staged = vec![
+            StagedMutation::update("firewall_policy", "dddddddddddddddddddddddd", Value::Null),
+            StagedMutation::delete("firewall_zone", "cccccccccccccccccccccccc"),
+        ];
+        assert!(
+            check_zone_deletions(&preimage_with_live_policy(), &staged).is_err(),
+            "a null body changes nothing, so the policy still names the deleted zone"
+        );
+    }
+
+    /// A set that deletes no zone needs no projection at all.
+    #[test]
+    fn a_set_deleting_no_zone_passes_the_deletion_check() {
+        let staged = vec![policy_between(
+            "aaaaaaaaaaaaaaaaaaaaaaaa",
+            "cccccccccccccccccccccccc",
+        )];
+        assert!(check_zone_deletions(&preimage_with_live_policy(), &staged).is_ok());
+    }
+
+    /// A change set that names no zone must not be made to depend on the
+    /// firewall surface being reachable.
+    #[test]
+    fn a_change_set_naming_no_zone_needs_no_zone_list() {
+        let staged = StagedMutation::update("network", "abc123", serde_json::json!({"name": "x"}));
+        assert!(referenced_zone_ids(&[staged]).is_empty());
+    }
+
+    /// Deletes carry no body, so they contribute no reference to resolve.
+    #[test]
+    fn deletes_reference_no_zones() {
+        let staged = StagedMutation::delete("firewall_policy", "abc123");
+        assert!(referenced_zone_ids(&[staged]).is_empty());
+    }
+
+    #[test]
+    fn both_sides_of_a_policy_are_collected_once_each() {
+        let staged = policy_between("aaaaaaaaaaaaaaaaaaaaaaaa", "aaaaaaaaaaaaaaaaaaaaaaaa");
+        assert_eq!(
+            referenced_zone_ids(&[staged]),
+            vec!["aaaaaaaaaaaaaaaaaaaaaaaa"]
+        );
     }
 }

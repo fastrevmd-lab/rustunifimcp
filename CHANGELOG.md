@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`unifi_validate_change_set` no longer refuses every zone-based firewall policy**
+  (#10). The reference check read its zone list from the change set's pre-image and
+  looked for a resource with `_id == "_all_"`, which no controller returns. A create
+  records no pre-image at all, so the zone index was empty for exactly the mutations
+  that needed checking and every `firewall_policy` create was rejected as referencing
+  a zone that did not exist. Validate now fetches the controller's live zone list, and
+  only when a staged body names a zone. Three further changes to the same check:
+  `destination.zone_id` is checked as well as `source.zone_id`; a zone named by its
+  `external_id` reports the `_id` to use instead of claiming the zone is absent; and a
+  zone list that cannot be read is a distinct error from a zone that is not there —
+  the new `UnifiError::ReferenceNotFound` renders without the "unexpected response
+  shape" prefix that made a lookup miss read like a parse failure. A policy naming a
+  zone the same change set deletes is now refused too — apply runs the staged writes
+  in order, so the live list still has a zone that will be gone by the time the policy
+  lands. That check follows staging order and runs against the *effective* policy, not
+  the staged fragment: a Private v2 update is a partial write the client overlays on
+  the live resource, so a fragment touching only `enabled` still applies a policy
+  carrying the live zones, a second fragment lands on the result of the first, and a
+  non-object body changes nothing at all. Both failing orderings are reported with the
+  ordering named as the fix.
+- **Change-set tools now refuse a controller that does not own the change set.** Every
+  one of the seven took a `controller` argument and used it to pick the client without
+  ever comparing it to the controller the set was created against, so a set planned
+  against one controller could be validated — and applied — against another.
+
+### Changed
+
+- **`kind=firewall_policy` now returns the whole policy** from `unifi_get_resource`
+  and `unifi_list_resources` (#11). The projection kept six summary fields and dropped
+  `source`, `destination`, `protocol`, ports, `schedule` and `connection_state_type` —
+  everything that makes a policy mean anything — so an existing policy could not be
+  read and adapted into a new one. `FirewallPolicy` now carries the remaining fields
+  verbatim and round-trips losslessly.
+
 ## [0.2.0] - 2026-09-01
 
 This is a **minor version** because it adds the reproducible release path (Dockerfile
