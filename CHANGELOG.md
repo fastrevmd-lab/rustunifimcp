@@ -20,7 +20,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `external_id` reports the `_id` to use instead of claiming the zone is absent; and a
   zone list that cannot be read is a distinct error from a zone that is not there —
   the new `UnifiError::ReferenceNotFound` renders without the "unexpected response
-  shape" prefix that made a lookup miss read like a parse failure.
+  shape" prefix that made a lookup miss read like a parse failure. A policy naming a
+  zone the same change set deletes is now refused too — apply runs the staged writes
+  in order, so the live list still has a zone that will be gone by the time the policy
+  lands.
+- **Change-set tools now refuse a controller that does not own the change set.** Every
+  one of the seven took a `controller` argument and used it to pick the client without
+  ever comparing it to the controller the set was created against, so a set planned
+  against one controller could be validated — and applied — against another.
 
 ### Changed
 

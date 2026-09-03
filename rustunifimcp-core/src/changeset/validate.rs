@@ -157,15 +157,40 @@ pub fn referenced_zone_ids(mutations: &[StagedMutation]) -> Vec<String> {
     referenced
 }
 
+/// The resource kind whose deletion removes a zone a policy could name.
+const ZONE_KIND: &str = "firewall_zone";
+
+/// The zones this change set deletes.
+///
+/// Apply is a sequence of independent REST calls in staging order, so a zone
+/// deleted by the same set is gone by the time a later policy write lands even
+/// though the live list still had it when validate read it. The projected state
+/// is what a policy has to be checked against, not the pre-change one.
+fn zones_deleted_by(mutations: &[StagedMutation]) -> Vec<&str> {
+    mutations
+        .iter()
+        .filter_map(|mutation| match mutation {
+            StagedMutation::Delete { kind, id } if kind == ZONE_KIND => Some(id.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
 /// Check referential integrity for staged mutations against a zone index.
+///
+/// The zone must exist on the controller *and* survive the change set: a set
+/// that deletes a zone and writes a policy naming it is internally
+/// inconsistent, and validate is the last place to say so.
 ///
 /// # Errors
 ///
 /// Returns [`UnifiError::ReferenceNotFound`] if a staged body names a zone the
-/// controller does not have. That variant renders on its own, without the
-/// "unexpected response shape" prefix a parse failure carries, so the two read
-/// differently in a tool result.
+/// controller does not have, or one this change set removes. That variant
+/// renders on its own, without the "unexpected response shape" prefix a parse
+/// failure carries, so the two read differently in a tool result.
 pub fn check_references(zones: &ZoneIndex, mutations: &[StagedMutation]) -> Result<(), UnifiError> {
+    let deleted = zones_deleted_by(mutations);
+
     for mutation in mutations {
         let body = match mutation {
             StagedMutation::Create { body, .. } | StagedMutation::Update { body, .. } => body,
@@ -180,6 +205,14 @@ pub fn check_references(zones: &ZoneIndex, mutations: &[StagedMutation]) -> Resu
             else {
                 continue;
             };
+
+            if deleted.contains(&zone_id) {
+                return Err(UnifiError::ReferenceNotFound(format!(
+                    "staged {} names {field}.zone_id '{zone_id}', which this change set also \
+                     deletes",
+                    mutation.preview()
+                )));
+            }
 
             match zones.resolve(zone_id) {
                 ZoneLookup::Known => {}
@@ -315,6 +348,47 @@ mod tests {
         let staged = policy_between("aaaaaaaaaaaaaaaaaaaaaaaa", "does-not-exist");
         let error = check_references(&zones, &[staged]).expect_err("destination must be checked");
         assert!(error.to_string().contains("destination"), "{error}");
+    }
+
+    /// Apply runs staged mutations in order against live state, so a zone the
+    /// same change set deletes is gone before a later policy write lands. The
+    /// live list still has it, which is why the index alone is not enough.
+    #[test]
+    fn a_policy_naming_a_zone_the_same_set_deletes_is_refused() {
+        let zones = ZoneIndex::from_zone_list(&zone_list()).expect("a well-formed zone list");
+        let staged = vec![
+            StagedMutation::delete("firewall_zone", "cccccccccccccccccccccccc"),
+            policy_between("aaaaaaaaaaaaaaaaaaaaaaaa", "cccccccccccccccccccccccc"),
+        ];
+        let error =
+            check_references(&zones, &staged).expect_err("the destination zone is being deleted");
+        let rendered = error.to_string();
+        assert!(rendered.contains("also"), "{rendered}");
+        assert!(rendered.contains("deletes"), "{rendered}");
+    }
+
+    /// Staging order does not rescue it: the policy is checked against the
+    /// state the whole set projects, not the prefix before it.
+    #[test]
+    fn the_delete_is_caught_even_when_staged_after_the_policy() {
+        let zones = ZoneIndex::from_zone_list(&zone_list()).expect("a well-formed zone list");
+        let staged = vec![
+            policy_between("cccccccccccccccccccccccc", "aaaaaaaaaaaaaaaaaaaaaaaa"),
+            StagedMutation::delete("firewall_zone", "cccccccccccccccccccccccc"),
+        ];
+        assert!(check_references(&zones, &staged).is_err());
+    }
+
+    /// Deleting some other resource that happens to share an id must not
+    /// invalidate a zone reference.
+    #[test]
+    fn deleting_a_non_zone_resource_does_not_invalidate_a_zone_reference() {
+        let zones = ZoneIndex::from_zone_list(&zone_list()).expect("a well-formed zone list");
+        let staged = vec![
+            StagedMutation::delete("firewall_policy", "cccccccccccccccccccccccc"),
+            policy_between("aaaaaaaaaaaaaaaaaaaaaaaa", "cccccccccccccccccccccccc"),
+        ];
+        assert!(check_references(&zones, &staged).is_ok());
     }
 
     /// A change set that names no zone must not be made to depend on the

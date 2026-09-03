@@ -146,6 +146,44 @@ impl UnifiServer {
     fn caller(context: &RequestContext<RoleServer>) -> Option<mecmcp_auth::CallerCtx<NoGrant>> {
         caller_from_extensions::<NoGrant>(&context.extensions).cloned()
     }
+
+    /// Fetch a change set, refusing it if the caller named another controller.
+    ///
+    /// A change set records the controller it was created against, and its
+    /// mutations and pre-image are meaningful only there. Every change-set tool
+    /// also takes a `controller` argument and used it to pick the client
+    /// without ever comparing the two, so a set planned against one controller
+    /// could be validated -- and applied -- against another: resource ids that
+    /// exist on neither, or worse, ids that happen to exist on both and name
+    /// different things.
+    fn change_set_for(
+        &self,
+        change_set_id: &str,
+        controller: &str,
+    ) -> Result<ChangeSet, Box<CallToolResult>> {
+        let change_set = match self.changeset_store.get(change_set_id) {
+            Ok(Some(set)) => set,
+            Ok(None) => {
+                return Err(Box::new(tool_error(format!(
+                    "change set not found: {change_set_id}"
+                ))));
+            }
+            Err(e) => {
+                return Err(Box::new(tool_error(format!(
+                    "failed to retrieve change set: {e}"
+                ))));
+            }
+        };
+
+        if change_set.controller != controller {
+            return Err(Box::new(tool_error(format!(
+                "change set {change_set_id} targets controller '{}', not '{controller}'",
+                change_set.controller
+            ))));
+        }
+
+        Ok(change_set)
+    }
 }
 
 #[tool_router(router = unifi_tool_router, vis = "pub(crate)")]
@@ -787,10 +825,9 @@ impl UnifiServer {
         }
 
         // Retrieve the change set
-        let mut change_set = match self.changeset_store.get(&args.change_set_id) {
-            Ok(Some(cs)) => cs,
-            Ok(None) => return tool_error(format!("change set not found: {}", args.change_set_id)),
-            Err(e) => return tool_error(format!("failed to retrieve change set: {e}")),
+        let mut change_set = match self.change_set_for(&args.change_set_id, &args.controller) {
+            Ok(set) => set,
+            Err(result) => return *result,
         };
 
         // Get the client
@@ -869,10 +906,9 @@ impl UnifiServer {
         }
 
         // Retrieve the change set
-        let change_set = match self.changeset_store.get(&args.change_set_id) {
-            Ok(Some(cs)) => cs,
-            Ok(None) => return tool_error(format!("change set not found: {}", args.change_set_id)),
-            Err(e) => return tool_error(format!("failed to retrieve change set: {e}")),
+        let change_set = match self.change_set_for(&args.change_set_id, &args.controller) {
+            Ok(set) => set,
+            Err(result) => return *result,
         };
 
         let preimage = match &change_set.preimage {
@@ -919,10 +955,9 @@ impl UnifiServer {
         }
 
         // Retrieve the change set
-        let change_set = match self.changeset_store.get(&args.change_set_id) {
-            Ok(Some(cs)) => cs,
-            Ok(None) => return tool_error(format!("change set not found: {}", args.change_set_id)),
-            Err(e) => return tool_error(format!("failed to retrieve change set: {e}")),
+        let change_set = match self.change_set_for(&args.change_set_id, &args.controller) {
+            Ok(set) => set,
+            Err(result) => return *result,
         };
 
         let preimage = match &change_set.preimage {
@@ -1024,10 +1059,9 @@ impl UnifiServer {
             .unwrap_or_else(|| "unknown".to_owned());
 
         // Retrieve the change set
-        let mut change_set = match self.changeset_store.get(&args.change_set_id) {
-            Ok(Some(cs)) => cs,
-            Ok(None) => return tool_error(format!("change set not found: {}", args.change_set_id)),
-            Err(e) => return tool_error(format!("failed to retrieve change set: {e}")),
+        let mut change_set = match self.change_set_for(&args.change_set_id, &args.controller) {
+            Ok(set) => set,
+            Err(result) => return *result,
         };
 
         // An approval is a statement about specific staged changes. A set with
@@ -1087,10 +1121,9 @@ impl UnifiServer {
         }
 
         // Retrieve the change set
-        let mut change_set = match self.changeset_store.get(&args.change_set_id) {
-            Ok(Some(cs)) => cs,
-            Ok(None) => return tool_error(format!("change set not found: {}", args.change_set_id)),
-            Err(e) => return tool_error(format!("failed to retrieve change set: {e}")),
+        let mut change_set = match self.change_set_for(&args.change_set_id, &args.controller) {
+            Ok(set) => set,
+            Err(result) => return *result,
         };
 
         // Check approval
@@ -1191,10 +1224,9 @@ impl UnifiServer {
         }
 
         // Retrieve the change set
-        let change_set = match self.changeset_store.get(&args.change_set_id) {
-            Ok(Some(cs)) => cs,
-            Ok(None) => return tool_error(format!("change set not found: {}", args.change_set_id)),
-            Err(e) => return tool_error(format!("failed to retrieve change set: {e}")),
+        let change_set = match self.change_set_for(&args.change_set_id, &args.controller) {
+            Ok(set) => set,
+            Err(result) => return *result,
         };
 
         let state_str = if let Some(ref outcome) = change_set.outcome {
