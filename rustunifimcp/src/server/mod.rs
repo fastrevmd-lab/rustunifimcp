@@ -1,7 +1,10 @@
 //! The MCP server handler.
 
-use crate::changeset_store::{ChangeSet, ChangeSetStore};
 use mecmcp_auth::NoGrant;
+use mecmcp_changeset::{
+    ApplyHandle, ChangeSetRecord, ChangeSetState, ChangesetCoordinator, PreviewRecord,
+    change_set_digest, preview_digest,
+};
 use mecmcp_server::{
     ResultFormat, ResultLimits, authorize_call, caller_from_extensions, filter_tools_for_scope,
     tool_error, tool_result,
@@ -18,8 +21,9 @@ use rmcp::{
 };
 use rustunifimcp_core::{
     changeset::{
-        Preimage, StagedMutation, State, ZoneIndex, apply_sequentially, check_zone_deletions,
-        check_zone_references, diff_against_preimage, referenced_zone_ids, validate_locally,
+        Preimage, StagedMutation, State, UnifiTransaction, ZoneIndex, actions_for,
+        apply_sequentially, check_zone_deletions, check_zone_references, diff_against_preimage,
+        fingerprint_of, mutations_of, preimage_of, referenced_zone_ids, validate_locally,
     },
     client::UnifiClient,
     error::UnifiError,
@@ -60,16 +64,18 @@ pub struct UnifiServer {
     clients: Arc<std::sync::RwLock<BTreeMap<String, UnifiClient>>>,
     /// Whether lab mode is enabled.
     lab_mode: bool,
-    /// Change-set storage.
-    changeset_store: ChangeSetStore,
-    /// How long an approval stays usable, in seconds.
-    approval_timeout_secs: u64,
+    /// The change-set lifecycle.
+    ///
+    /// `mecmcp-changeset`'s coordinator, not a map: it owns the transition
+    /// policy, the claim-before-apply and the preview-bound approval, and the
+    /// approval TTL that `--approval-timeout-secs` configures.
+    coordinator: Arc<ChangesetCoordinator>,
     /// Tool router.
     tool_router: ToolRouter<Self>,
 }
 
 impl UnifiServer {
-    /// Create a new server with the given registry, lab mode setting, and changeset store.
+    /// Create a new server with the given registry, lab mode, and coordinator.
     ///
     /// # Errors
     ///
@@ -77,16 +83,14 @@ impl UnifiServer {
     pub fn new(
         registry: Arc<ControllerRegistry>,
         lab_mode: bool,
-        changeset_store: ChangeSetStore,
-        approval_timeout_secs: u64,
+        coordinator: Arc<ChangesetCoordinator>,
     ) -> Result<Self, UnifiError> {
         let clients = Self::build_clients(&registry)?;
         Ok(Self {
             registry,
             clients: Arc::new(std::sync::RwLock::new(clients)),
             lab_mode,
-            changeset_store,
-            approval_timeout_secs,
+            coordinator,
             tool_router: Self::unifi_tool_router(),
         })
     }
@@ -147,42 +151,137 @@ impl UnifiServer {
         caller_from_extensions::<NoGrant>(&context.extensions).cloned()
     }
 
-    /// Fetch a change set, refusing it if the caller named another controller.
+    /// The principal behind this call.
+    fn principal(caller: Option<&mecmcp_auth::CallerCtx<NoGrant>>) -> String {
+        caller.map_or_else(|| "unknown".to_owned(), |ctx| ctx.token_name.clone())
+    }
+
+    /// Fetch a change set, refusing a controller that does not own it.
     ///
-    /// A change set records the controller it was created against, and its
-    /// mutations and pre-image are meaningful only there. Every change-set tool
-    /// also takes a `controller` argument and used it to pick the client
-    /// without ever comparing the two, so a set planned against one controller
-    /// could be validated -- and applied -- against another: resource ids that
-    /// exist on neither, or worse, ids that happen to exist on both and name
-    /// different things.
-    fn change_set_for(
+    /// The coordinator addresses a change set by `(id, device)` and refuses a
+    /// mismatch itself, which closes a hole the map-backed store had: every
+    /// change-set tool takes a `controller` argument and used it to pick the
+    /// client without ever comparing it to the controller the set was planned
+    /// against, so a set could be validated -- and applied -- against another.
+    async fn record_for(
         &self,
         change_set_id: &str,
         controller: &str,
-    ) -> Result<ChangeSet, Box<CallToolResult>> {
-        let change_set = match self.changeset_store.get(change_set_id) {
-            Ok(Some(set)) => set,
-            Ok(None) => {
-                return Err(Box::new(tool_error(format!(
-                    "change set not found: {change_set_id}"
-                ))));
-            }
-            Err(e) => {
-                return Err(Box::new(tool_error(format!(
-                    "failed to retrieve change set: {e}"
-                ))));
-            }
+    ) -> Result<ChangeSetRecord, Box<CallToolResult>> {
+        self.coordinator
+            .change_set(change_set_id, controller)
+            .await
+            .map_err(|error| {
+                Box::new(tool_error(format!(
+                    "change set {change_set_id} on {controller} ({}): {}",
+                    error.field(),
+                    error.message()
+                )))
+            })
+    }
+
+    /// Read the plan back off a stored record.
+    fn plan_of(
+        record: &ChangeSetRecord,
+    ) -> Result<(Vec<StagedMutation>, Preimage), Box<CallToolResult>> {
+        let mutations = mutations_of(&record.actions)
+            .map_err(|error| Box::new(tool_error(format!("stored change set: {error}"))))?;
+        let preimage = preimage_of(&record.actions)
+            .map_err(|error| Box::new(tool_error(format!("stored change set: {error}"))))?;
+        Ok((mutations, preimage))
+    }
+
+    /// Render the preview an approver signs off on.
+    ///
+    /// Stored as JSON rather than prose because it is read by a model relaying
+    /// to an operator, and because it is also where the description lives:
+    /// `ChangeSetRecord` has no field for one, and a side-car map holding it
+    /// would be a second store to disagree with the first.
+    ///
+    /// The atomicity declaration is part of the preview deliberately. UniFi
+    /// offers no atomic apply, no dry run and no guaranteed rollback, and an
+    /// approver who is not told that is approving something else.
+    fn render_preview(
+        controller: &str,
+        description: &str,
+        mutations: &[StagedMutation],
+        preimage: &Preimage,
+    ) -> Result<String, Box<CallToolResult>> {
+        let diff = diff_against_preimage(preimage, mutations)
+            .map_err(|error| Box::new(tool_error(format!("failed to compute diff: {error}"))))?;
+        let atomicity = UnifiTransaction::atomicity();
+
+        serde_json::to_string_pretty(&serde_json::json!({
+            "controller": controller,
+            "description": description,
+            "staged_count": mutations.len(),
+            "atomicity": {
+                "atomic_apply": atomicity.atomic_apply,
+                "dry_run_validation": atomicity.dry_run_validation,
+                "guaranteed_rollback": atomicity.guaranteed_rollback,
+                "note": "UniFi writes directly to running state: a partial apply is \
+                         reachable and rollback is best-effort",
+            },
+            "changes": diff.changes,
+        }))
+        .map_err(|error| Box::new(tool_error(format!("failed to render the preview: {error}"))))
+    }
+
+    /// The description carried in a record's preview.
+    fn description_of(record: &ChangeSetRecord) -> Result<String, Box<CallToolResult>> {
+        let Some(preview) = record.preview.as_ref() else {
+            return Err(Box::new(tool_error(
+                "change set has no stored preview; create it again",
+            )));
         };
+        let parsed: serde_json::Value = serde_json::from_str(&preview.artifact).map_err(|_| {
+            Box::new(tool_error(
+                "stored change set: the preview is not the shape this server writes",
+            ))
+        })?;
+        Ok(parsed
+            .get("description")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .to_owned())
+    }
 
-        if change_set.controller != controller {
-            return Err(Box::new(tool_error(format!(
-                "change set {change_set_id} targets controller '{}', not '{controller}'",
-                change_set.controller
-            ))));
-        }
+    /// Rewrite a record's plan, its fingerprint, its digest and its preview.
+    ///
+    /// All four move together. The digest binds `(owner, device, fingerprint,
+    /// actions)` and the approval binds the digest, so a plan changed without
+    /// its digest would carry an approval for a plan nobody approved.
+    fn with_plan(
+        mut record: ChangeSetRecord,
+        mutations: &[StagedMutation],
+        preimage: &Preimage,
+        description: &str,
+    ) -> Result<ChangeSetRecord, Box<CallToolResult>> {
+        let actions = actions_for(mutations, preimage);
+        let fingerprint = fingerprint_of(&actions)
+            .map_err(|error| Box::new(tool_error(format!("failed to fingerprint: {error}"))))?;
+        let artifact = Self::render_preview(&record.device, description, mutations, preimage)?;
 
-        Ok(change_set)
+        record.actions = actions
+            .iter()
+            .map(serde_json::to_value)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| Box::new(tool_error(format!("failed to store the plan: {error}"))))?;
+        record.expected_candidate_fingerprint = fingerprint;
+        record.digest = change_set_digest(
+            &record.owner,
+            &record.device,
+            &record.expected_candidate_fingerprint,
+            &record.actions,
+        )
+        .map_err(|error| Box::new(tool_error(format!("failed to digest the plan: {error}"))))?;
+        record.preview = Some(PreviewRecord {
+            digest: preview_digest(&artifact),
+            artifact,
+            job_id: None,
+        });
+
+        Ok(record)
     }
 }
 
@@ -762,40 +861,62 @@ impl UnifiServer {
             return tool_error(error);
         }
 
-        let creator = caller
-            .as_ref()
-            .map(|c| c.token_name.clone())
-            .unwrap_or_else(|| "unknown".to_owned());
+        let owner = Self::principal(caller.as_ref());
 
-        let id = format!("cs-{}", uuid::Uuid::new_v4());
+        // The controller has to be one this server knows before a change set
+        // names it: the coordinator addresses records by device, and a record
+        // naming a controller absent from the inventory can never be applied.
+        if let Err(result) = self.client_for(&args.controller) {
+            return *result;
+        }
 
-        let (approver, approval_waiver) = if self.lab_mode {
-            (None, Some("lab-mode".to_owned()))
-        } else {
-            (None, None)
+        // Empty, `Planned`, and already carrying a preview. Nothing is staged
+        // yet, so the preview says so -- and approve refuses an empty plan
+        // separately, which is what stops an approval over a preview with no
+        // changes in it.
+        let empty = Preimage::from_resources(Vec::new());
+        let record = ChangeSetRecord {
+            id: crate::changeset_state::new_change_set_id(),
+            owner,
+            device: args.controller.clone(),
+            expected_candidate_fingerprint: String::new(),
+            actions: Vec::new(),
+            digest: String::new(),
+            state: ChangeSetState::Planned,
+            approver: None,
+            approval: None,
+            expires_at_unix: unix_seconds_now()
+                .saturating_add(self.coordinator.approval_ttl().as_secs()),
+            operation_id: None,
+            policy_signature: String::new(),
+            targets: Vec::new(),
+            preview: None,
+            task_id: None,
+            apply_without_handle: false,
         };
 
-        let change_set = ChangeSet {
-            approved_at: None,
-            id: id.clone(),
-            controller: args.controller.clone(),
-            description: args.description,
-            creator,
-            approver,
-            approval_waiver,
-            preimage: None,
-            mutations: Vec::new(),
-            outcome: None,
+        let record = match Self::with_plan(record, &[], &empty, &args.description) {
+            Ok(record) => record,
+            Err(result) => return *result,
         };
+        let id = record.id.clone();
 
-        if let Err(e) = self.changeset_store.insert(change_set) {
-            return tool_error(format!("failed to store change set: {e}"));
+        // One pending change set per principal per controller, which the
+        // coordinator enforces. Worth knowing rather than discovering: a second
+        // create on the same controller by the same token is refused until the
+        // first reaches an outcome or is cancelled.
+        if let Err(error) = self.coordinator.insert_change_set(record).await {
+            return tool_error(format!(
+                "failed to store change set ({}): {}",
+                error.field(),
+                error.message()
+            ));
         }
 
         let result = serde_json::json!({
             "change_set_id": id,
             "controller": args.controller,
-            "state": "pending",
+            "state": ChangeSetState::Planned.as_str(),
         });
 
         tool_result(
@@ -824,22 +945,39 @@ impl UnifiServer {
             return tool_error(error);
         }
 
-        // Retrieve the change set
-        let mut change_set = match self.change_set_for(&args.change_set_id, &args.controller) {
-            Ok(set) => set,
+        let record = match self.record_for(&args.change_set_id, &args.controller).await {
+            Ok(record) => record,
             Err(result) => return *result,
         };
 
-        // Get the client
+        // Staging rewrites the plan, and with it the digest an approval binds
+        // to. Allowing it after approval would let a reviewed plan be swapped
+        // for an unreviewed one while the approval stayed attached, which is
+        // the whole reason the digest exists.
+        if record.state != ChangeSetState::Planned {
+            return tool_error(format!(
+                "change set is {} and can no longer be staged into; create a new one",
+                record.state.as_str()
+            ));
+        }
+
+        let description = match Self::description_of(&record) {
+            Ok(description) => description,
+            Err(result) => return *result,
+        };
+
         let client = match self.client_for(&args.controller) {
             Ok(client) => client,
             Err(result) => return *result,
         };
 
-        // Convert MutationSpec to StagedMutation
-        let mut new_mutations = Vec::new();
+        let (mut mutations, _) = match Self::plan_of(&record) {
+            Ok(plan) => plan,
+            Err(result) => return *result,
+        };
+
         for spec in args.mutations {
-            let mutation = match spec {
+            mutations.push(match spec {
                 changeset::MutationSpec::Create { kind, body } => {
                     StagedMutation::create(kind, body)
                 }
@@ -850,33 +988,41 @@ impl UnifiServer {
                 changeset::MutationSpec::Restore { backup_id } => {
                     StagedMutation::restore(backup_id)
                 }
-            };
-            new_mutations.push(mutation);
+            });
         }
 
-        // Capture pre-image for the new mutations
-        let all_mutations: Vec<_> = change_set
-            .mutations
-            .iter()
-            .chain(new_mutations.iter())
-            .cloned()
-            .collect();
-        let preimage = match Preimage::capture_preimage(&client, &all_mutations).await {
-            Ok(p) => p,
+        // Re-captured over the whole plan, not only the new mutations: the
+        // fingerprint stands in for a candidate UniFi does not have, so it has
+        // to describe the state the plan as a whole was built against.
+        let preimage = match Preimage::capture_preimage(&client, &mutations).await {
+            Ok(preimage) => preimage,
             Err(e) => return tool_error(format!("failed to capture pre-image: {e}")),
         };
 
-        // Update the change set
-        change_set.mutations.extend(new_mutations);
-        change_set.preimage = Some(preimage);
+        let staged_count = mutations.len();
+        let staged = match Self::with_plan(record, &mutations, &preimage, &description) {
+            Ok(record) => record,
+            Err(result) => return *result,
+        };
 
-        if let Err(e) = self.changeset_store.insert(change_set.clone()) {
-            return tool_error(format!("failed to update change set: {e}"));
+        // Conditional on the state still being `Planned`. An unconditional
+        // write would let a concurrent approval be overwritten by a staging
+        // call that read the record before it.
+        if let Err(error) = self
+            .coordinator
+            .update_change_set_from(ChangeSetState::Planned, staged)
+            .await
+        {
+            return tool_error(format!(
+                "failed to update change set ({}): {}",
+                error.field(),
+                error.message()
+            ));
         }
 
         let result = serde_json::json!({
-            "change_set_id": change_set.id,
-            "staged_count": change_set.mutations.len(),
+            "change_set_id": args.change_set_id,
+            "staged_count": staged_count,
         });
 
         tool_result(
@@ -905,26 +1051,24 @@ impl UnifiServer {
             return tool_error(error);
         }
 
-        // Retrieve the change set
-        let change_set = match self.change_set_for(&args.change_set_id, &args.controller) {
-            Ok(set) => set,
+        let record = match self.record_for(&args.change_set_id, &args.controller).await {
+            Ok(record) => record,
             Err(result) => return *result,
         };
 
-        let preimage = match &change_set.preimage {
-            Some(p) => p,
-            None => {
-                return tool_error("change set has no pre-image; stage at least one change first");
-            }
+        let (mutations, preimage) = match Self::plan_of(&record) {
+            Ok(plan) => plan,
+            Err(result) => return *result,
         };
 
-        let diff = match diff_against_preimage(preimage, &change_set.mutations) {
-            Ok(d) => d,
+        let diff = match diff_against_preimage(&preimage, &mutations) {
+            Ok(diff) => diff,
             Err(e) => return tool_error(format!("failed to compute diff: {e}")),
         };
 
         let result = serde_json::json!({
-            "change_set_id": change_set.id,
+            "change_set_id": record.id,
+            "computed": diff.computed,
             "changes": diff.changes,
         });
 
@@ -954,28 +1098,24 @@ impl UnifiServer {
             return tool_error(error);
         }
 
-        // Retrieve the change set
-        let change_set = match self.change_set_for(&args.change_set_id, &args.controller) {
-            Ok(set) => set,
+        let record = match self.record_for(&args.change_set_id, &args.controller).await {
+            Ok(record) => record,
             Err(result) => return *result,
         };
 
-        let preimage = match &change_set.preimage {
-            Some(p) => p,
-            None => {
-                return tool_error("change set has no pre-image; stage at least one change first");
-            }
+        let (mutations, preimage) = match Self::plan_of(&record) {
+            Ok(plan) => plan,
+            Err(result) => return *result,
         };
 
-        // Validate locally
-        if let Err(e) = validate_locally(preimage, &change_set.mutations) {
+        if let Err(e) = validate_locally(&preimage, &mutations) {
             return tool_error(format!("local validation failed: {e}"));
         }
 
         // A zone this set deletes must not be left referenced by anything else
         // in the set. Checked first because it needs no controller round trip:
         // it compares the set against itself and against the pre-image.
-        if let Err(e) = check_zone_deletions(preimage, &change_set.mutations) {
+        if let Err(e) = check_zone_deletions(&preimage, &mutations) {
             return tool_error(format!("reference check failed: {e}"));
         }
 
@@ -987,7 +1127,7 @@ impl UnifiServer {
         // zone that did not exist. Fetch only when a staged body names a zone,
         // so a change set that touches no firewall does not start depending on
         // the firewall surface being reachable.
-        if !referenced_zone_ids(&change_set.mutations).is_empty() {
+        if !referenced_zone_ids(&mutations).is_empty() {
             let client = match self.client_for(&args.controller) {
                 Ok(client) => client,
                 Err(result) => return *result,
@@ -1005,8 +1145,7 @@ impl UnifiServer {
                 Ok(raw) => raw,
                 Err(e) => {
                     return tool_error(format!(
-                        "could not read the firewall zone list from controller '{}', so zone \
-                         references cannot be checked: {e}",
+                        "could not read the firewall zone list from controller '{}', so zone                          references cannot be checked: {e}",
                         args.controller
                     ));
                 }
@@ -1016,20 +1155,19 @@ impl UnifiServer {
                 Ok(zones) => zones,
                 Err(e) => {
                     return tool_error(format!(
-                        "could not read the firewall zone list from controller '{}', so zone \
-                         references cannot be checked: {e}",
+                        "could not read the firewall zone list from controller '{}', so zone                          references cannot be checked: {e}",
                         args.controller
                     ));
                 }
             };
 
-            if let Err(e) = check_zone_references(&zones, &change_set.mutations) {
+            if let Err(e) = check_zone_references(&zones, &mutations) {
                 return tool_error(format!("reference check failed: {e}"));
             }
         }
 
         let result = serde_json::json!({
-            "change_set_id": change_set.id,
+            "change_set_id": record.id,
             "valid": true,
             "note": "UniFi has no server-side dry-run validation; this is client-side only"
         });
@@ -1043,7 +1181,10 @@ impl UnifiServer {
 
     #[tool(
         name = "unifi_approve_change_set",
-        description = "Approves a change set for apply (requires two-person control)"
+        description = "Approves a change set for apply. Two-person control: the creating \
+                       token cannot approve its own set unless lab mode waives it, and a \
+                       waiver is recorded as a waiver rather than as an approval. Pass \
+                       expected_digest to bind the approval to the plan you read."
     )]
     async fn unifi_approve_change_set(
         &self,
@@ -1060,14 +1201,10 @@ impl UnifiServer {
             return tool_error(error);
         }
 
-        let approver = caller
-            .as_ref()
-            .map(|c| c.token_name.clone())
-            .unwrap_or_else(|| "unknown".to_owned());
+        let approver = Self::principal(caller.as_ref());
 
-        // Retrieve the change set
-        let mut change_set = match self.change_set_for(&args.change_set_id, &args.controller) {
-            Ok(set) => set,
+        let record = match self.record_for(&args.change_set_id, &args.controller).await {
+            Ok(record) => record,
             Err(result) => return *result,
         };
 
@@ -1076,29 +1213,86 @@ impl UnifiServer {
         // against it puts a signature in the audit trail for a decision nobody
         // could have reviewed. Observed live: a change set whose staging failed
         // was still approvable, and only apply refused it.
-        if change_set.mutations.is_empty() {
+        if record.actions.is_empty() {
             return tool_error("change set has nothing staged; there is nothing to approve");
         }
 
-        // Refuse if the approver is the creator (two-person control)
-        if change_set.creator == approver && change_set.approval_waiver.is_none() {
+        // And it must be a statement about something the approver could read.
+        // The preview is written at create and rewritten at every stage, so an
+        // absent one means a record this server did not write.
+        let Some(preview) = record.preview.clone() else {
             return tool_error(
-                "two-person control: the creating token cannot approve its own change set",
+                "approval refused: this change set has no stored preview, so there is \
+                 nothing to review. Create it again.",
             );
+        };
+
+        // An approver who names the digest they read is bound to that plan. Not
+        // naming one falls back to the stored digest, which makes the
+        // lifecycle's digest check a tautology -- it compares the stored value
+        // with itself -- so the argument is the only way an approval can
+        // actually attest to a specific plan rather than to whatever the record
+        // holds when the call lands.
+        if let Some(ref expected) = args.expected_digest
+            && expected != &record.digest
+        {
+            return tool_error(format!(
+                "approval refused: the plan has changed since you read it. You named \
+                 digest {expected}; the change set now holds {}. Read it again before \
+                 approving.",
+                record.digest
+            ));
         }
 
-        // Mark as approved, with the moment it happened.
-        change_set.approver = Some(approver);
-        change_set.approved_at = Some(unix_seconds_now());
+        // Two-person control when a second principal is present; the lab-mode
+        // waiver only when the owner is approving their own set. The waiver is
+        // a distinct call, not a flag on the approval, so the record says which
+        // of the two happened -- `approver: None` cannot tell "nobody has
+        // approved this" from "this was approved without review".
+        let outcome = if approver == record.owner {
+            if !self.lab_mode {
+                return tool_error(
+                    "two-person control: the creating token cannot approve its own change set",
+                );
+            }
+            self.coordinator
+                .waive_approval(
+                    args.change_set_id.clone(),
+                    args.controller.clone(),
+                    approver.clone(),
+                    record.digest.clone(),
+                )
+                .await
+        } else {
+            self.coordinator
+                .approve_change_set(
+                    args.change_set_id.clone(),
+                    args.controller.clone(),
+                    approver.clone(),
+                    record.digest.clone(),
+                )
+                .await
+        };
 
-        if let Err(e) = self.changeset_store.insert(change_set.clone()) {
-            return tool_error(format!("failed to update change set: {e}"));
-        }
+        let outcome = match outcome {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                return tool_error(format!(
+                    "approval refused ({}): {}",
+                    error.field(),
+                    error.message()
+                ));
+            }
+        };
 
         let result = serde_json::json!({
-            "change_set_id": change_set.id,
-            "approved_by": change_set.approver,
-            "approval_waiver": change_set.approval_waiver,
+            "change_set_id": outcome.change_set_id,
+            "state": outcome.state.as_str(),
+            "approved_by": outcome.approver,
+            "approval_waiver": outcome.approval_waiver,
+            "expires_at_unix": outcome.expires_at_unix,
+            "approved_digest": outcome.digest,
+            "preview": preview.artifact,
         });
 
         tool_result(
@@ -1127,65 +1321,65 @@ impl UnifiServer {
             return tool_error(error);
         }
 
-        // Retrieve the change set
-        let mut change_set = match self.change_set_for(&args.change_set_id, &args.controller) {
-            Ok(set) => set,
-            Err(result) => return *result,
-        };
-
-        // Check approval
-        // A change set that already ran is not a template. Re-applying one
-        // whose mutations include creates issues them again -- `preimage_matches`
-        // skips creates, so nothing downstream would catch the duplicate.
-        if let Some(ref outcome) = change_set.outcome {
-            return tool_error(format!(
-                "change set has already been applied (state: {:?}); \
-                 create a new change set rather than re-applying this one",
-                outcome.state
-            ));
-        }
-
-        if change_set.approver.is_none() && change_set.approval_waiver.is_none() {
-            return tool_error("change set has not been approved");
-        }
-
-        // An approval is a statement about a controller state at a moment.
-        // Without this the packaged deployment advertised a 300-second window
-        // via --approval-timeout-secs and honoured no window at all: a
-        // persisted approval stayed usable for as long as the state file did.
-        if change_set.approval_waiver.is_none() {
-            let approved_at = change_set.approved_at.unwrap_or(0);
-            let age = unix_seconds_now().saturating_sub(approved_at);
-            if age > self.approval_timeout_secs {
-                return tool_error(format!(
-                    "approval expired {}s ago (timeout {}s); re-approve before applying",
-                    age - self.approval_timeout_secs,
-                    self.approval_timeout_secs
-                ));
-            }
-        }
-
-        let preimage = match &change_set.preimage {
-            Some(p) => p,
-            None => return tool_error("change set has no pre-image"),
-        };
-
-        // Get the client
         let client = match self.client_for(&args.controller) {
             Ok(client) => client,
             Err(result) => return *result,
         };
 
-        // Apply the change set
-        let outcome = apply_sequentially(&client, preimage, &change_set.mutations).await;
+        // Claim first, and only then read the plan. The claim is the single
+        // legal route from `Approved` to `Applying`, and it does the check and
+        // the write under one lock -- so two concurrent applies cannot both
+        // observe `Approved` and both proceed, which the map-backed store
+        // allowed. It is also what enforces the approval window and refuses a
+        // set that has already run: an approval reaches `Applying` once and
+        // there is no route back.
+        //
+        // `ApplyHandle::None` because UniFi returns no task handle to re-probe.
+        // A crash mid-apply therefore leaves the record `Applying` rather than
+        // being read as `Failed` at the next start: the writes are not
+        // idempotent, a partial apply is a reachable outcome, and only the
+        // controller knows which of them landed. Detectable, not recoverable,
+        // and a human has to look -- which is the honest state, and keeps the
+        // approval from being spent twice.
+        let claimed = match self
+            .coordinator
+            .claim_change_set_for_apply(&args.change_set_id, &args.controller, ApplyHandle::None)
+            .await
+        {
+            Ok(record) => record,
+            Err(error) => {
+                return tool_error(format!(
+                    "apply refused ({}): {}",
+                    error.field(),
+                    error.message()
+                ));
+            }
+        };
 
-        // Store the outcome
-        change_set.outcome = Some(outcome.clone());
-        if let Err(e) = self.changeset_store.insert(change_set.clone()) {
-            return tool_error(format!("failed to update change set: {e}"));
-        }
+        // A claim has no route back to `Approved`, so a failure between here
+        // and the first write has to settle the record itself or it sits in
+        // `Applying` for good, with its approval neither spent nor spendable.
+        // Nothing has been written at this point, so `Failed` is accurate.
+        let (mutations, preimage) = match Self::plan_of(&claimed) {
+            Ok(plan) => plan,
+            Err(result) => {
+                let mut abandoned = claimed;
+                abandoned.state = ChangeSetState::Failed;
+                if let Err(error) = self.coordinator.update_change_set(abandoned).await {
+                    tracing::error!(
+                        change_set_id = %args.change_set_id,
+                        field = error.field(),
+                        message = error.message(),
+                        "a claimed change set could not be settled after its plan \
+                         failed to read; it will stay Applying"
+                    );
+                }
+                return *result;
+            }
+        };
 
-        // Build result
+        let outcome = apply_sequentially(&client, &preimage, &mutations).await;
+
         let state_str = match outcome.state {
             State::Applied => "applied",
             State::AppliedUnverified => "applied_unverified",
@@ -1194,8 +1388,60 @@ impl UnifiServer {
             State::RefusedStale => "refused_stale",
         };
 
+        // The breakdown goes to the audit trail, which is where an event
+        // belongs -- the state file holds state. It has no home on
+        // `ChangeSetRecord`, which is `deny_unknown_fields`, and the shared
+        // crate's `OperationRecord` was the wrong container: its non-terminal
+        // states make every later operation on the device refuse as
+        // unreconciled, which is right for a vendor whose commit either lands
+        // or does not, and would wedge this one -- a partial apply here is a
+        // routine outcome and there is no tool to clear it.
+        //
+        // Emitted before the state write, so the record of what happened
+        // survives even if recording the verdict fails.
+        tracing::info!(
+            target: "audit",
+            event = "unifi_change_set_applied",
+            change_set_id = %args.change_set_id,
+            controller = %args.controller,
+            principal = %Self::principal(caller.as_ref()),
+            outcome = state_str,
+            succeeded = outcome.succeeded.len(),
+            failed = outcome.failed.len(),
+            attempted_and_failed = outcome.attempted_and_failed.len(),
+            never_attempted = outcome.never_attempted.len(),
+            rollback_failures = outcome.rollback_failures.len(),
+            "change set applied"
+        );
+
+        // `Applied` when every write landed, and for an apply that landed but
+        // could not be re-read to confirm it: it did apply, and calling that
+        // `Failed` asserts an outcome nobody observed. The distinction between
+        // the two lives in the audit record above and in the result below.
+        // Everything else is `Failed`, a partial included -- a record claiming
+        // a change landed when only some of it did is worse than one an
+        // operator has to go and read.
+        let mut settled = claimed;
+        settled.state = if matches!(outcome.state, State::Applied | State::AppliedUnverified) {
+            ChangeSetState::Applied
+        } else {
+            ChangeSetState::Failed
+        };
+
+        if let Err(error) = self.coordinator.update_change_set(settled).await {
+            // The writes have already happened, so this is reported rather than
+            // returned as the outcome: the caller needs the apply result, and
+            // an unrecorded outcome is a separate fault.
+            tracing::error!(
+                change_set_id = %args.change_set_id,
+                field = error.field(),
+                message = error.message(),
+                "the apply outcome could not be recorded"
+            );
+        }
+
         let result = serde_json::json!({
-            "change_set_id": change_set.id,
+            "change_set_id": args.change_set_id,
             "state": state_str,
             "succeeded": outcome.succeeded.len(),
             "failed": outcome.failed.len(),
@@ -1230,43 +1476,34 @@ impl UnifiServer {
             return tool_error(error);
         }
 
-        // Retrieve the change set
-        let change_set = match self.change_set_for(&args.change_set_id, &args.controller) {
-            Ok(set) => set,
+        let record = match self.record_for(&args.change_set_id, &args.controller).await {
+            Ok(record) => record,
             Err(result) => return *result,
         };
 
-        let state_str = if let Some(ref outcome) = change_set.outcome {
-            match outcome.state {
-                State::Applied => "applied",
-                State::AppliedUnverified => "applied_unverified",
-                State::Partial => "partial",
-                State::PartialRollbackFailed => "partial_rollback_failed",
-                State::RefusedStale => "refused_stale",
-            }
-        } else if change_set.approver.is_some() || change_set.approval_waiver.is_some() {
-            "approved"
-        } else {
-            "pending"
-        };
+        let description = Self::description_of(&record).unwrap_or_default();
 
+        // The state is the lifecycle's, not a string derived from which fields
+        // happen to be populated. `approved` and `pending` used to be inferred
+        // from whether an approver was set, which cannot distinguish an expired
+        // approval or a cancelled set from a pending one.
         let result = serde_json::json!({
-            "change_set_id": change_set.id,
-            "controller": change_set.controller,
-            "description": change_set.description,
-            "creator": change_set.creator,
-            "approver": change_set.approver,
-            "approval_waiver": change_set.approval_waiver,
-            "state": state_str,
-            "mutation_count": change_set.mutations.len(),
-            "outcome": change_set.outcome.as_ref().map(|o| serde_json::json!({
-                "state": state_str,
-                "succeeded": o.succeeded.len(),
-                "failed": o.failed.len(),
-                "attempted_and_failed": o.attempted_and_failed.len(),
-                "never_attempted": o.never_attempted.len(),
-                "rollback_failures": o.rollback_failures,
-            })),
+            "change_set_id": record.id,
+            "controller": record.device,
+            "description": description,
+            "creator": record.owner,
+            "approver": record.approval.as_ref().and_then(|a| a.approver.clone()),
+            "approval_waiver": record
+                .approval
+                .as_ref()
+                .and_then(|a| a.waived.as_ref())
+                .map(|waiver| waiver.kind.as_str()),
+            "state": record.state.as_str(),
+            "mutation_count": record.actions.len(),
+            "expires_at_unix": record.expires_at_unix,
+            "plan_digest": record.digest,
+            "expected_preimage_fingerprint": record.expected_candidate_fingerprint,
+            "preview": record.preview.as_ref().map(|preview| preview.artifact.clone()),
         });
 
         tool_result(
@@ -1331,6 +1568,7 @@ impl ServerHandler for UnifiServer {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     #[test]
     fn write_tools_is_not_empty() {
@@ -1385,64 +1623,272 @@ mod tests {
         // Both directions pass — the sets are equal.
     }
 
-    #[tokio::test]
-    async fn change_set_survives_state_file_round_trip() {
-        use tempfile::NamedTempFile;
-
-        let temp = NamedTempFile::new().unwrap();
-        let path = temp.path().to_path_buf();
-
-        let set = ChangeSet {
-            approved_at: None,
-            id: "test-round-trip".to_owned(),
-            controller: "home".to_owned(),
-            description: "test".to_owned(),
-            creator: "alice".to_owned(),
+    /// Build a `Planned` record the way `unifi_create_change_set` does.
+    fn planned_record(owner: &str, controller: &str, ttl: u64) -> ChangeSetRecord {
+        let record = ChangeSetRecord {
+            id: crate::changeset_state::new_change_set_id(),
+            owner: owner.to_owned(),
+            device: controller.to_owned(),
+            expected_candidate_fingerprint: String::new(),
+            actions: Vec::new(),
+            digest: String::new(),
+            state: ChangeSetState::Planned,
             approver: None,
-            approval_waiver: None,
-            preimage: None,
-            mutations: Vec::new(),
-            outcome: None,
+            approval: None,
+            expires_at_unix: unix_seconds_now().saturating_add(ttl),
+            operation_id: None,
+            policy_signature: String::new(),
+            targets: Vec::new(),
+            preview: None,
+            task_id: None,
+            apply_without_handle: false,
         };
-
-        {
-            let store = ChangeSetStore::new(Some(path.clone())).unwrap();
-            store.insert(set.clone()).unwrap();
-        }
-
-        // Reload from file
-        let store2 = ChangeSetStore::new(Some(path)).unwrap();
-        let retrieved = store2.get("test-round-trip").unwrap();
-        assert!(retrieved.is_some());
-        assert_eq!(retrieved.unwrap().id, "test-round-trip");
+        let staged = vec![StagedMutation::create(
+            "firewall_policy",
+            serde_json::json!({ "name": "probe" }),
+        )];
+        UnifiServer::with_plan(
+            record,
+            &staged,
+            &Preimage::from_resources(Vec::new()),
+            "test",
+        )
+        .map_err(|_| "with_plan refused a freshly built record")
+        .expect("a freshly built record must plan")
     }
 
+    fn coordinator_at(path: Option<&std::path::Path>) -> Arc<ChangesetCoordinator> {
+        crate::changeset_state::build_coordinator(path, Duration::from_secs(300), true, None)
+            .expect("coordinator")
+    }
+
+    /// An approval that does not survive a restart is not an approval, and the
+    /// pre-image that went with it is what stands between a partial apply and
+    /// an unrecoverable one.
     #[tokio::test]
-    async fn lab_mode_records_both_waiver_fields() {
-        use tempfile::NamedTempFile;
-
-        let temp = NamedTempFile::new().unwrap();
+    async fn change_set_survives_state_file_round_trip() {
+        let temp = tempfile::NamedTempFile::new().expect("temp file");
         let path = temp.path().to_path_buf();
-        let store = ChangeSetStore::new(Some(path)).unwrap();
 
-        let set = ChangeSet {
-            approved_at: None,
-            id: "test-waiver".to_owned(),
-            controller: "home".to_owned(),
-            description: "test".to_owned(),
-            creator: "alice".to_owned(),
-            approver: None,
-            approval_waiver: Some("lab-mode".to_owned()),
-            preimage: None,
-            mutations: Vec::new(),
-            outcome: None,
+        let id = {
+            let coordinator = coordinator_at(Some(&path));
+            let record = planned_record("alice", "home", 300);
+            let id = record.id.clone();
+            coordinator.insert_change_set(record).await.expect("insert");
+            id
         };
 
-        store.insert(set.clone()).unwrap();
+        let reloaded = coordinator_at(Some(&path));
+        let record = reloaded
+            .change_set(&id, "home")
+            .await
+            .expect("the record must survive the restart");
+        assert_eq!(record.owner, "alice");
+        assert_eq!(record.state, ChangeSetState::Planned);
+        assert!(
+            record.preview.is_some(),
+            "the preview an approver reads must survive too"
+        );
+        assert_eq!(
+            UnifiServer::plan_of(&record)
+                .map_err(|_| "plan_of")
+                .expect("the plan must survive")
+                .0
+                .len(),
+            1
+        );
+    }
 
-        let retrieved = store.get("test-waiver").unwrap().unwrap();
-        assert_eq!(retrieved.approver, None);
-        assert_eq!(retrieved.approval_waiver, Some("lab-mode".to_owned()));
+    /// `approver: None` cannot tell "nobody has approved this" from "this was
+    /// approved without review", so a waiver has to be recorded as its own
+    /// fact. It is also the one thing lab mode changes about the lifecycle.
+    #[tokio::test]
+    async fn lab_mode_records_the_waiver_as_a_distinct_fact() {
+        let coordinator = coordinator_at(None);
+        let record = planned_record("alice", "home", 300);
+        let (id, digest) = (record.id.clone(), record.digest.clone());
+        coordinator.insert_change_set(record).await.expect("insert");
+
+        let outcome = coordinator
+            .waive_approval(id.clone(), "home".to_owned(), "alice".to_owned(), digest)
+            .await
+            .expect("lab mode waives the second principal");
+
+        assert_eq!(outcome.state, ChangeSetState::Approved);
+        assert_eq!(
+            outcome.approval_waiver.as_deref(),
+            Some("lab-mode"),
+            "a waived approval must say so rather than look unapproved"
+        );
+
+        let stored = coordinator.change_set(&id, "home").await.expect("stored");
+        assert!(
+            stored.approval.is_some(),
+            "the waiver must be recorded on the record, not only returned"
+        );
+    }
+
+    /// Without lab mode the same call is a self-approval and must be refused
+    /// by the lifecycle, not only by this server's own check.
+    #[tokio::test]
+    async fn a_waiver_is_refused_when_lab_mode_is_off() {
+        let coordinator =
+            crate::changeset_state::build_coordinator(None, Duration::from_secs(300), false, None)
+                .expect("coordinator");
+        let record = planned_record("alice", "home", 300);
+        let (id, digest) = (record.id.clone(), record.digest.clone());
+        coordinator.insert_change_set(record).await.expect("insert");
+
+        assert!(
+            coordinator
+                .waive_approval(id, "home".to_owned(), "alice".to_owned(), digest)
+                .await
+                .is_err(),
+            "a waiver outside lab mode is a self-approval"
+        );
+    }
+
+    /// The claim is the only legal route to `Applying`, and an unapproved set
+    /// must not reach it.
+    #[tokio::test]
+    async fn an_unapproved_change_set_cannot_be_claimed_for_apply() {
+        let coordinator = coordinator_at(None);
+        let record = planned_record("alice", "home", 300);
+        let id = record.id.clone();
+        coordinator.insert_change_set(record).await.expect("insert");
+
+        assert!(
+            coordinator
+                .claim_change_set_for_apply(&id, "home", ApplyHandle::None)
+                .await
+                .is_err(),
+            "a Planned change set has no approval to spend"
+        );
+    }
+
+    /// And an approval is spent once. The map-backed store let two concurrent
+    /// applies both observe `Approved` and both proceed.
+    #[tokio::test]
+    async fn an_approval_can_only_be_claimed_once() {
+        let coordinator = coordinator_at(None);
+        let record = planned_record("alice", "home", 300);
+        let (id, digest) = (record.id.clone(), record.digest.clone());
+        coordinator.insert_change_set(record).await.expect("insert");
+        coordinator
+            .approve_change_set(id.clone(), "home".to_owned(), "bob".to_owned(), digest)
+            .await
+            .expect("a second principal approves");
+
+        coordinator
+            .claim_change_set_for_apply(&id, "home", ApplyHandle::None)
+            .await
+            .expect("the first claim takes the approval");
+        assert!(
+            coordinator
+                .claim_change_set_for_apply(&id, "home", ApplyHandle::None)
+                .await
+                .is_err(),
+            "the second claim must find the approval spent"
+        );
+    }
+
+    /// An approval is a statement about a controller state at a moment. The
+    /// packaged deployment advertises a 300-second window; the lifecycle is
+    /// what now honours it.
+    #[tokio::test]
+    async fn an_expired_approval_cannot_be_claimed() {
+        let coordinator = coordinator_at(None);
+        let mut record = planned_record("alice", "home", 300);
+        let (id, digest) = (record.id.clone(), record.digest.clone());
+        record.expires_at_unix = unix_seconds_now().saturating_sub(1);
+        coordinator.insert_change_set(record).await.expect("insert");
+
+        // Approval itself is refused once the window has passed, which is the
+        // earlier of the two gates.
+        assert!(
+            coordinator
+                .approve_change_set(id.clone(), "home".to_owned(), "bob".to_owned(), digest)
+                .await
+                .is_err(),
+            "an expired change set must not be approvable"
+        );
+        assert!(
+            coordinator
+                .claim_change_set_for_apply(&id, "home", ApplyHandle::None)
+                .await
+                .is_err()
+        );
+    }
+
+    /// The window runs from creation, so approving does not restart it. That
+    /// is what makes `--approval-timeout-secs` bound the age of the pre-image
+    /// the plan was built against, and it is a shorter window than the code
+    /// this replaces enforced -- worth pinning rather than rediscovering.
+    #[tokio::test]
+    async fn approval_does_not_restart_the_window() {
+        let coordinator = coordinator_at(None);
+        let record = planned_record("alice", "home", 300);
+        let (id, digest) = (record.id.clone(), record.digest.clone());
+        let planned_deadline = record.expires_at_unix;
+        coordinator.insert_change_set(record).await.expect("insert");
+
+        coordinator
+            .approve_change_set(id.clone(), "home".to_owned(), "bob".to_owned(), digest)
+            .await
+            .expect("approve");
+
+        let approved = coordinator.change_set(&id, "home").await.expect("stored");
+        assert_eq!(
+            approved.expires_at_unix, planned_deadline,
+            "the deadline is stamped at creation and approval must not move it"
+        );
+    }
+
+    /// One pending change set per principal per controller. A second create is
+    /// refused until the first reaches an outcome, which is a behaviour change
+    /// from the map-backed store.
+    #[tokio::test]
+    async fn a_second_pending_change_set_on_one_controller_is_refused() {
+        let coordinator = coordinator_at(None);
+        coordinator
+            .insert_change_set(planned_record("alice", "home", 300))
+            .await
+            .expect("the first plan is accepted");
+
+        assert!(
+            coordinator
+                .insert_change_set(planned_record("alice", "home", 300))
+                .await
+                .is_err(),
+            "one pending change set per principal per controller"
+        );
+
+        // Another controller is a different plan, and another principal is a
+        // different queue.
+        coordinator
+            .insert_change_set(planned_record("alice", "office", 300))
+            .await
+            .expect("a different controller is a different plan");
+        coordinator
+            .insert_change_set(planned_record("bob", "home", 300))
+            .await
+            .expect("a different principal has their own");
+    }
+
+    /// A change set is addressed by `(id, controller)`. Naming another
+    /// controller must not reach it: its resource ids mean nothing there.
+    #[tokio::test]
+    async fn a_change_set_is_not_reachable_from_another_controller() {
+        let coordinator = coordinator_at(None);
+        let record = planned_record("alice", "home", 300);
+        let id = record.id.clone();
+        coordinator.insert_change_set(record).await.expect("insert");
+
+        assert!(coordinator.change_set(&id, "home").await.is_ok());
+        assert!(
+            coordinator.change_set(&id, "office").await.is_err(),
+            "a set planned against one controller must not be readable from another"
+        );
     }
 
     /// Guards against a handler being reduced to a stub again.

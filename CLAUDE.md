@@ -46,6 +46,27 @@ that `lab_mode` is `true`.** Two things that will mislead you if you skip that:
 gated, not missing — that distinction is the fastest way to tell a config problem from
 a capability gap.
 
+## Upgrading 981 past the change-set store swap
+
+The change-set state file changed shape when this server adopted
+`mecmcp-changeset`'s coordinator. 981 writes `/var/lib/unifimcp/changesets.json`, and a
+binary from before the swap wrote a bare `{"<id>": {...}}` map; the coordinator writes
+`{"version": n, "state": {...}}`.
+
+**The new binary refuses to start on the old file** and names the change sets in it.
+That is deliberate — not a bug to work around. Move the file aside and re-plan. The
+approvals cannot come across: an approval now binds to the digest of the preview its
+approver read, and the old records have no preview, so synthesising one would mint an
+approval over text nobody saw.
+
+Two things that will look like unrelated faults:
+
+- The coordinator reads the file through the workspace's hardened reader, so a group- or
+  world-readable file is a startup failure. The message carries the `chmod`. The old
+  store wrote 0600 but never required it, so a file touched by hand may not be.
+- Change-set ids are now 64 hex characters. A saved `cs-<uuid>` from before the swap is
+  refused by the id validator, not merely "not found".
+
 ## Related
 
 Packaging and the installer live in `packaging/`. TLS is terminated by the server

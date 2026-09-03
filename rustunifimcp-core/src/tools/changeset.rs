@@ -45,9 +45,11 @@ pub const DESCRIPTIONS: &[(&str, &str)] = &[
     (
         "unifi_approve_change_set",
         "Approves a change set for apply. Requires approval by a different principal \
-         than the one who created the set (two-person control). In lab mode, approval \
-         is automatically waived at creation time. The approval binds to the exact \
-         pre-image captured at staging.",
+         than the one who created the set (two-person control); in lab mode the owner \
+         may waive that, and the waiver is recorded as a waiver rather than as an \
+         approval. The approval binds to the digest of the plan and of the preview the \
+         approver read, so a change set that moves on afterwards cannot spend it. Pass \
+         `expected_digest` to bind the approval to the plan you actually read.",
     ),
     (
         "unifi_apply_change_set",
@@ -144,6 +146,14 @@ pub struct ApproveChangeSetArgs {
     pub controller: String,
     /// The change set ID to approve.
     pub change_set_id: String,
+    /// The plan digest the approver read, as `unifi_get_change_set` reports it.
+    ///
+    /// Optional, and supplying it is what makes the approval attest to a
+    /// specific plan: the approval is refused if the change set has moved on
+    /// since it was read. Omitting it approves whatever the record holds when
+    /// the call lands.
+    #[serde(default)]
+    pub expected_digest: Option<String>,
 }
 
 /// Arguments for `unifi_apply_change_set`.

@@ -16,6 +16,10 @@ use std::path::PathBuf;
 #[command(name = "rustunifimcp", version)]
 pub struct UnifiCli {
     /// Flags shared with the rest of the mechub MCP family.
+    ///
+    /// Carries the SSDF evidence flag group (`--ssdf-audit-*`), which this
+    /// server advertised and never consumed: `mecmcp-audit` was a declared
+    /// dependency imported nowhere, so the flags parsed and did nothing.
     #[command(flatten)]
     pub common: mecmcp_runtime::cli::Cli,
 
@@ -47,9 +51,18 @@ pub struct UnifiCli {
     #[arg(long = "state-file")]
     pub state_file: Option<PathBuf>,
 
-    /// How long an approval stays valid, in seconds.
+    /// How long a change set stays usable, in seconds.
     ///
-    /// Spelled `--approval-timeout-secs` on every mecmcp server.
+    /// Spelled `--approval-timeout-secs` on every mecmcp server, and it
+    /// configures the change-set coordinator's approval TTL -- which is what
+    /// actually expires an approval, rather than a window this server measured
+    /// itself.
+    ///
+    /// The window runs from **creation**, not from approval. So the default 300
+    /// seconds bounds the whole plan-review-apply round, and it bounds the age
+    /// of the pre-image the plan was built against, which is the point: a
+    /// pre-image captured half an hour ago is not evidence about the controller
+    /// now. Raise it if a review takes longer than the round it gates.
     #[arg(long = "approval-timeout-secs", default_value = "300")]
     pub approval_timeout_secs: u64,
 }

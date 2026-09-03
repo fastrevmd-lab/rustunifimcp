@@ -19,6 +19,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is held to the same `scripts/verify-fixtures-scrubbed.sh` gate the recorded sets must
   pass — `gate_passes_on_the_committed_synthetic_fixtures` runs it on every test run.
 
+- **SSDF evidence is wired** (#16). `mecmcp-audit` was a declared dependency imported
+  nowhere and the `--ssdf-audit-*` flags were already on the CLI via
+  `mecmcp_runtime::cli::Cli`, so they parsed and did nothing — this server emitted none
+  of the fleet's change records. With `--ssdf-audit-endpoint` configured the coordinator
+  now emits proposal, approval, apply-intent and result-receipt records. Off by default.
+
 ### Changed
 
 - **`DEFAULT_FIXTURE_VERSION` is now the synthetic set**, and the fixture-gated tests
@@ -38,12 +44,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the committed set carry 46 reservations to satisfy a test that is about the filter
   being active.
 
+- **The change-set store is now `mecmcp-changeset`'s coordinator** (#16). It was a
+  persisted `HashMap` with `insert` / `get` / `remove` and no state machine, so three
+  protections the rest of the fleet spent three mecmcp minors acquiring were absent
+  here: claim-before-apply (two concurrent applies could both observe `Approved` and
+  both proceed), the transition policy (any field could be written over any other), and
+  preview-bound approval (an approval referenced no preview at all). None of that is
+  reimplemented — `insert_change_set`, `approve_change_set` / `waive_approval`,
+  `claim_change_set_for_apply` and `update_change_set_from` replace the map, and
+  `--approval-timeout-secs` now configures the coordinator's approval TTL, which is
+  what actually expires an approval.
+- **`unifi_get_change_set` reports the lifecycle's state** rather than a string inferred
+  from which fields happen to be populated. `approved` and `pending` used to be derived
+  from whether an approver was set, which cannot distinguish an expired approval or a
+  cancelled set from a pending one. It also returns the plan digest, the pre-image
+  fingerprint, the approval expiry and the preview.
+- **A change set can no longer be staged into after approval.** Staging rewrites the
+  plan and the digest an approval binds to, so allowing it would let a reviewed plan be
+  swapped for an unreviewed one with the approval still attached.
+- **`unifi_apply_change_set` records `Applied` only when every write landed** (and for
+  an apply that landed but could not be re-read to confirm it, which did apply). A
+  partial apply is `Failed`: a record claiming a change landed when only some of it did
+  is worse than one an operator has to go and read.
+- **The per-mutation apply breakdown is now an audit event**
+  (`event = unifi_change_set_applied`) rather than a field on the stored change set. It
+  has no home on `ChangeSetRecord`, which is `deny_unknown_fields`, and the shared
+  crate's `OperationRecord` was the wrong container: its non-terminal states make every
+  later operation on the device refuse as unreconciled, which is right for a vendor
+  whose commit either lands or does not and would wedge this one, where a partial apply
+  is routine and no tool exists to clear it. The state file holds state; what happened
+  is an event.
+- Change-set ids are now 64 hex characters, which is what the shared lifecycle validates
+  against. The old `cs-<uuid>` form is refused by it.
+- **`unifi_approve_change_set` takes an optional `expected_digest`.** Supplying the plan
+  digest the approver read is what makes the approval attest to a specific plan: without
+  it the lifecycle's digest check compares the stored value with itself, and the approval
+  covers whatever the record holds when the call lands.
+
 - **`kind=firewall_policy` now returns the whole policy** from `unifi_get_resource`
   and `unifi_list_resources` (#11). The projection kept six summary fields and dropped
   `source`, `destination`, `protocol`, ports, `schedule` and `connection_state_type` —
   everything that makes a policy mean anything — so an existing policy could not be
   read and adapted into a new one. `FirewallPolicy` now carries the remaining fields
   verbatim and round-trips losslessly.
+
+### Removed
+
+- `mecmcp-job` and `mecmcp-policy` from `[workspace.dependencies]`. Declared, imported
+  nowhere, and no plausible use here. `mecmcp-audit` moves from the core crate, which
+  never imported it, to the binary, which is where the recorder is built.
 
 ### Fixed
 
@@ -71,6 +120,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   one of the seven took a `controller` argument and used it to pick the client without
   ever comparing it to the controller the set was created against, so a set planned
   against one controller could be validated — and applied — against another.
+
+### Upgrading
+
+**The change-set state file is not carried forward.** LXC 981 `prod-unifimcp` writes
+`/var/lib/unifimcp/changesets.json`; the new binary refuses to start on a file written by
+the old store and names the change sets in it. Move the file aside and re-plan them.
+
+They are deliberately not converted: an approval is now bound to the digest of the
+preview its approver read, and the old records have no preview, so carrying one across
+would mint an approval over text nobody saw — exactly what preview binding exists to
+prevent. Re-planning also re-reads the controller rather than trusting a pre-image of
+unknown age.
+
+Two behaviour changes that are easier to read here than to discover:
+
+- **`--approval-timeout-secs` now runs from creation, not from approval.** It configures
+  the coordinator's approval TTL, and the coordinator stamps the deadline when the
+  change set is created. The packaged default of 300 seconds therefore bounds the whole
+  plan-review-apply round. That also bounds the age of the pre-image the plan was built
+  against, which is the point, but it is a shorter window than the old code enforced.
+- **One pending change set per principal per controller.** A second
+  `unifi_create_change_set` on the same controller by the same token is refused until
+  the first reaches an outcome or is cancelled.
+
+Two smaller things about the state file. The coordinator reads it through the workspace's
+hardened reader, so a group- or world-readable file is a startup failure with a `chmod`
+in the message; the old store wrote 0600 but did not require it. And a **blank** file is
+now discarded rather than refused, because the coordinator cannot parse one and an
+interrupted first write produces one.
 
 ## [0.2.0] - 2026-09-01
 
