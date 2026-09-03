@@ -18,12 +18,13 @@ use rmcp::{
 };
 use rustunifimcp_core::{
     changeset::{
-        Preimage, StagedMutation, State, apply_sequentially, check_references,
-        diff_against_preimage, validate_locally,
+        Preimage, StagedMutation, State, ZoneIndex, apply_sequentially, check_references,
+        diff_against_preimage, referenced_zone_ids, validate_locally,
     },
     client::UnifiClient,
     error::UnifiError,
     inventory::ControllerRegistry,
+    model::ResourceKind,
     tools::{WRITE_TOOLS, admin, changeset, ops, read, workflow},
 };
 use std::collections::BTreeMap;
@@ -936,15 +937,53 @@ impl UnifiServer {
             return tool_error(format!("local validation failed: {e}"));
         }
 
-        // Check references - extract data from preimage
-        let data = if let Some(data_value) = preimage.get_resource("_all_") {
-            data_value
-        } else {
-            serde_json::json!([])
-        };
+        // Referential integrity is checked against the controller's live zone
+        // list, not the pre-image. The pre-image records nothing for a create,
+        // and it was being searched for a resource with `_id == "_all_"` that
+        // no controller ever returns -- so the zone index was empty for every
+        // `firewall_policy` create and each one was refused as referencing a
+        // zone that did not exist. Fetch only when a staged body names a zone,
+        // so a change set that touches no firewall does not start depending on
+        // the firewall surface being reachable.
+        if !referenced_zone_ids(&change_set.mutations).is_empty() {
+            let client = match self.client_for(&args.controller) {
+                Ok(client) => client,
+                Err(result) => return *result,
+            };
 
-        if let Err(e) = check_references(&data, &change_set.mutations) {
-            return tool_error(format!("reference check failed: {e}"));
+            let zone_args = read::ListResourcesArgs {
+                controller: args.controller.clone(),
+                kind: ResourceKind::FirewallZone,
+                site: None,
+                limit: None,
+                offset: None,
+            };
+
+            let raw = match read::list_resources(&client, &zone_args).await {
+                Ok(raw) => raw,
+                Err(e) => {
+                    return tool_error(format!(
+                        "could not read the firewall zone list from controller '{}', so zone \
+                         references cannot be checked: {e}",
+                        args.controller
+                    ));
+                }
+            };
+
+            let zones = match ZoneIndex::from_zone_list(&raw) {
+                Ok(zones) => zones,
+                Err(e) => {
+                    return tool_error(format!(
+                        "could not read the firewall zone list from controller '{}', so zone \
+                         references cannot be checked: {e}",
+                        args.controller
+                    ));
+                }
+            };
+
+            if let Err(e) = check_references(&zones, &change_set.mutations) {
+                return tool_error(format!("reference check failed: {e}"));
+            }
         }
 
         let result = serde_json::json!({

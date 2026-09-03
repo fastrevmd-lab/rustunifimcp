@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`unifi_validate_change_set` no longer refuses every zone-based firewall policy**
+  (#10). The reference check read its zone list from the change set's pre-image and
+  looked for a resource with `_id == "_all_"`, which no controller returns. A create
+  records no pre-image at all, so the zone index was empty for exactly the mutations
+  that needed checking and every `firewall_policy` create was rejected as referencing
+  a zone that did not exist. Validate now fetches the controller's live zone list, and
+  only when a staged body names a zone. Three further changes to the same check:
+  `destination.zone_id` is checked as well as `source.zone_id`; a zone named by its
+  `external_id` reports the `_id` to use instead of claiming the zone is absent; and a
+  zone list that cannot be read is a distinct error from a zone that is not there —
+  the new `UnifiError::ReferenceNotFound` renders without the "unexpected response
+  shape" prefix that made a lookup miss read like a parse failure.
+
 ## [0.2.0] - 2026-09-01
 
 This is a **minor version** because it adds the reproducible release path (Dockerfile

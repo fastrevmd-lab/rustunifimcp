@@ -16,7 +16,7 @@ pub use apply::{ControllerOps, Outcome, State, apply_sequentially};
 pub use diff::{Change, Diff, diff_against_preimage};
 pub use preimage::{Preimage, StagedMutation};
 pub use rollback::rollback_to_preimage;
-pub use validate::{check_references, validate_locally};
+pub use validate::{ZoneIndex, check_references, referenced_zone_ids, validate_locally};
 
 // mecmcp#335 landed in mecmcp-changeset v0.22.0: `Atomicity` and
 // `DeviceTransaction::atomicity()` are exported upstream, so this crate

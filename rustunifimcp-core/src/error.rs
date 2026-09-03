@@ -76,6 +76,17 @@ pub enum UnifiError {
     #[error("unexpected response shape: {0}")]
     Malformed(String),
 
+    /// A staged mutation names a resource the controller does not have.
+    ///
+    /// Deliberately separate from [`Self::Malformed`]. Reporting a reference
+    /// miss through `Malformed` prefixed it with "unexpected response shape",
+    /// which pointed the operator at their own identifier while the real fault
+    /// was that the reference check never read a zone list at all. The two
+    /// conditions want different operator responses, so they render
+    /// differently.
+    #[error("{0}")]
+    ReferenceNotFound(String),
+
     /// Transport, TLS, timeout, or rate-limit failure from `mecmcp-http`.
     ///
     /// The underlying error is classified and rendered without URLs, because
@@ -213,6 +224,7 @@ mod tests {
                 detail: "unauthorized".to_owned(),
             },
             UnifiError::Malformed("test error".to_owned()),
+            UnifiError::ReferenceNotFound("test reference".to_owned()),
             // Http variant with a URL-carrying error
             UnifiError::Http(mecmcp_http::HttpError::Timeout {
                 url: mecmcp_http::SafeUrl::from_unparsed("https://controller.example/api/test"),
