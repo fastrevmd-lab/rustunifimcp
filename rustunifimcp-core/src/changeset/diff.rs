@@ -75,19 +75,12 @@ pub fn diff_against_preimage(
 
 #[cfg(test)]
 mod tests {
-    use crate::testing::{DEFAULT_FIXTURE_VERSION, fixture, fixtures_available};
+    use crate::testing::{DEFAULT_FIXTURE_VERSION, fixture};
     use serde_json::json;
 
     /// An empty diff is not the same as a diff that was never computed.
     #[test]
     fn a_no_op_change_set_is_distinguishable_from_an_uncomputed_one() {
-        if !fixtures_available() {
-            eprintln!(
-                "SKIPPED: no fixtures. Run scripts/capture-fixtures.sh against a controller."
-            );
-            return;
-        }
-
         let preimage =
             super::Preimage::from_fixture(&fixture(DEFAULT_FIXTURE_VERSION, "networkconf"));
         let diff = super::diff_against_preimage(&preimage, &[]).expect("diffs");

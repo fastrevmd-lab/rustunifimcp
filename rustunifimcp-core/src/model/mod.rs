@@ -127,7 +127,7 @@ impl ResourceKind {
 mod tests {
     use super::ResourceKind;
     use crate::ApiSurface;
-    use crate::testing::{DEFAULT_FIXTURE_VERSION, fixture, fixtures_available};
+    use crate::testing::{DEFAULT_FIXTURE_VERSION, fixture};
 
     /// Every kind must declare a surface. A kind whose surface is wrong is how
     /// an undocumented route gets reached by a supported-only deployment.
@@ -157,12 +157,6 @@ mod tests {
 
     #[test]
     fn sites_parse_from_the_recorded_response() {
-        if !fixtures_available() {
-            eprintln!(
-                "SKIPPED: no fixtures. Run scripts/capture-fixtures.sh against a controller."
-            );
-            return;
-        }
         let raw = fixture(DEFAULT_FIXTURE_VERSION, "sites");
         let sites = crate::model::site::parse_sites(&raw).expect("sites parse");
         assert!(
@@ -173,12 +167,6 @@ mod tests {
 
     #[test]
     fn networks_parse_from_the_recorded_response() {
-        if !fixtures_available() {
-            eprintln!(
-                "SKIPPED: no fixtures. Run scripts/capture-fixtures.sh against a controller."
-            );
-            return;
-        }
         let raw = fixture(DEFAULT_FIXTURE_VERSION, "networkconf");
         let networks = crate::model::network::parse_networks(&raw).expect("networks parse");
         assert!(!networks.is_empty());

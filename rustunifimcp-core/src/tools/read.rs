@@ -706,38 +706,50 @@ mod tests {
     /// bypass: every kind must have a parser wired in parse_resource_list, or
     /// appear in an explicit commented list of kinds with no parser yet (there
     /// are none currently — all kinds have parsers).
+    ///
+    /// Runs over every fixture set present: the committed synthetic one, so CI
+    /// exercises it, plus any recorded controller versions, so a developer
+    /// holding a live capture still exercises the parsers against real data.
+    ///
+    /// A recorded version may legitimately have no fixture for a kind: the
+    /// capture script writes an `.absent` marker instead when the route 404s,
+    /// which is how the version matrix asserts drift as a fact. Those pairs
+    /// are skipped. The synthetic set carries every kind and is never absent,
+    /// so a missing synthetic fixture still fails here.
     #[test]
     fn every_resource_kind_has_a_parser_wired() {
         use crate::model::ResourceKind;
-        use crate::testing::{DEFAULT_FIXTURE_VERSION, fixture, fixtures_available};
+        use crate::testing::{SYNTHETIC_FIXTURE_VERSION, fixture, fixture_versions, is_absent};
 
-        if !fixtures_available() {
-            eprintln!(
-                "SKIPPED: no fixtures. Run scripts/capture-fixtures.sh against a controller."
-            );
-            return;
-        }
+        for version in fixture_versions() {
+            for kind in ResourceKind::ALL {
+                let fixture_name = match kind {
+                    ResourceKind::Station => "clients",
+                    ResourceKind::Device => "devices",
+                    ResourceKind::Network => "networkconf",
+                    ResourceKind::Wlan => "wlanconf",
+                    ResourceKind::PortProfile => "portconf",
+                    ResourceKind::DhcpReservation => "user",
+                    ResourceKind::FirewallGroup => "firewallgroup",
+                    ResourceKind::RadiusProfile => "radiusprofile",
+                    ResourceKind::FirewallPolicy => "policies",
+                    ResourceKind::FirewallZone => "zones",
+                    ResourceKind::TrafficRoute => "traffic_routes",
+                };
 
-        // For each kind, verify that parse_resource_list succeeds on the
-        // recorded fixture (proving the parser is wired).
-        for kind in ResourceKind::ALL {
-            let fixture_name = match kind {
-                ResourceKind::Station => "clients",
-                ResourceKind::Device => "devices",
-                ResourceKind::Network => "networkconf",
-                ResourceKind::Wlan => "wlanconf",
-                ResourceKind::PortProfile => "portconf",
-                ResourceKind::DhcpReservation => "user",
-                ResourceKind::FirewallGroup => "firewallgroup",
-                ResourceKind::RadiusProfile => "radiusprofile",
-                ResourceKind::FirewallPolicy => "policies",
-                ResourceKind::FirewallZone => "zones",
-                ResourceKind::TrafficRoute => "traffic_routes",
-            };
+                if is_absent(&version, fixture_name) {
+                    assert_ne!(
+                        version, SYNTHETIC_FIXTURE_VERSION,
+                        "the synthetic set records no endpoint as absent"
+                    );
+                    continue;
+                }
 
-            let raw = fixture(DEFAULT_FIXTURE_VERSION, fixture_name);
-            super::parse_resource_list(*kind, &raw)
-                .unwrap_or_else(|e| panic!("{kind:?} parser not wired or failed: {e}"));
+                let raw = fixture(&version, fixture_name);
+                super::parse_resource_list(*kind, &raw).unwrap_or_else(|e| {
+                    panic!("{kind:?} parser not wired or failed on {version}: {e}")
+                });
+            }
         }
     }
 
@@ -748,14 +760,7 @@ mod tests {
     /// so callers got all 260 user records instead of the 46 actual reservations.
     #[test]
     fn dhcp_reservation_list_is_filtered() {
-        use crate::testing::{DEFAULT_FIXTURE_VERSION, fixture, fixtures_available};
-
-        if !fixtures_available() {
-            eprintln!(
-                "SKIPPED: no fixtures. Run scripts/capture-fixtures.sh against a controller."
-            );
-            return;
-        }
+        use crate::testing::{DEFAULT_FIXTURE_VERSION, fixture};
 
         let raw = fixture(DEFAULT_FIXTURE_VERSION, "user");
         let total_users = crate::model::unwrap_enveloped_data(&raw)
@@ -771,11 +776,12 @@ mod tests {
             "parse_dhcp_reservations must filter: got {parsed_count}, expected < {total_users}"
         );
 
-        // The 10.5.67 fixture has 257 total users, 46 with use_fixedip.
-        // Verify the exact count to prove the filter worked.
-        assert_eq!(
-            parsed_count, 46,
-            "10.5.67 fixture should have exactly 46 reservations"
+        // And the filter must not swallow everything: a reservation list that
+        // is empty because the filter is wrong would also satisfy the check
+        // above.
+        assert!(
+            parsed_count > 0,
+            "the fixture has reservations; a zero count means the filter is wrong"
         );
     }
 }

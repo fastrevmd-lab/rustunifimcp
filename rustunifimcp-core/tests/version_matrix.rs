@@ -6,18 +6,16 @@
 //! 03:00.
 
 use rustunifimcp_core::model::ResourceKind;
-use rustunifimcp_core::testing::{fixtures_available, is_absent};
+use rustunifimcp_core::testing::{is_absent, recorded_fixtures_available};
 use rustunifimcp_core::version::{Availability, endpoint_availability};
 
-/// Every version directory under tests/fixtures/.
+/// Every recorded controller version under tests/fixtures/.
+///
+/// The committed synthetic set is deliberately not one. It is hand-written, so
+/// it is evidence about the parsers and nothing at all about which endpoints a
+/// real controller version serves -- which is the only question this file asks.
 fn recorded_versions() -> Vec<String> {
-    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures");
-    std::fs::read_dir(dir)
-        .expect("fixtures directory exists")
-        .filter_map(|entry| entry.ok())
-        .filter(|entry| entry.path().is_dir())
-        .map(|entry| entry.file_name().to_string_lossy().into_owned())
-        .collect()
+    rustunifimcp_core::testing::recorded_versions()
 }
 
 #[test]
@@ -33,8 +31,11 @@ fn at_least_two_controller_versions_are_recorded() {
 
 #[test]
 fn the_matrix_agrees_with_what_was_recorded() {
-    if !fixtures_available() {
-        eprintln!("SKIPPED: no fixtures. Run scripts/capture-fixtures.sh against a controller.");
+    if !recorded_fixtures_available() {
+        eprintln!(
+            "SKIPPED: no recorded fixtures. Only a live capture is evidence about a \
+             controller version; run scripts/capture-fixtures.sh against a controller."
+        );
         return;
     }
     for version in recorded_versions() {

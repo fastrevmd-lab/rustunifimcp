@@ -1,0 +1,14 @@
+{
+  "data": [
+    {
+      "_id": "000000000000000000000001",
+      "name": "Test Network",
+      "purpose": "corporate",
+      "ip_subnet": "192.0.2.0/24",
+      "vlan": 10,
+      "dhcpd_enabled": true,
+      "dhcpd_start": "192.0.2.100",
+      "dhcpd_stop": "192.0.2.200"
+    }
+  ]
+}

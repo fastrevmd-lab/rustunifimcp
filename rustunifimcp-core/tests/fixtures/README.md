@@ -1,18 +1,32 @@
 # UniFi Controller Fixtures
 
-**Fixtures are deliberately not committed.** They are captured from a live
-controller and contain scrubbed but still controller-specific data. A fresh
-clone has no fixtures and must regenerate them by running
-`scripts/capture-fixtures.sh` against a live controller.
+Two kinds of fixture live under this directory.
 
-This directory contains the scaffolding for JSON fixtures captured from live
-UniFi controllers for testing endpoint compatibility across controller versions.
+## Synthetic Fixtures
 
-## Directory Structure
+The **synthetic** set (`synthetic/`) is hand-written, committed, and present in
+every checkout. It is what the parser, workflow, and changeset tests read. The
+fixtures carry documentation-range addresses (192.0.2.x, 198.51.100.x,
+203.0.113.x, 2001:db8::/32), locally administered MACs (02:00:00:xx:xx:xx),
+zeroed coordinates, and 24-character lowercase hex structural IDs.
 
-Each subdirectory is named by controller version (e.g., `10.5.67/`), containing
-JSON responses from the capture endpoints defined in
-`scripts/capture-fixtures.sh`.
+The synthetic set exists because the recorded sets cannot be published:
+seventeen tests used to skip on a fresh clone, and CI reported `ok` while
+never running them. The scrub gate (`scripts/verify-fixtures-scrubbed.sh`)
+enforces that the synthetic set contains no sensitive data, and
+`tests/fixture_scrub_gate.rs` verifies the gate passes on the committed set.
+
+## Recorded Fixtures
+
+The **recorded** sets are captured per controller version by
+`scripts/capture-fixtures.sh`, carry real network data (scrubbed), and are
+gitignored. Each subdirectory is named by controller version (e.g., `10.5.67/`),
+containing JSON responses from the capture endpoints.
+
+Recorded sets are what `tests/version_matrix.rs` reads, because only a real
+capture is evidence about what a real controller version serves. A hand-written
+fixture proves nothing about drift, which is why the matrix skips the synthetic
+set rather than counting it as a version.
 
 ## Capturing a New Controller Version
 

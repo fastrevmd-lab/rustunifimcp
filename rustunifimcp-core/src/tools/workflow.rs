@@ -955,7 +955,7 @@ fn extract_top_applications(stats: &[serde_json::Value]) -> Vec<serde_json::Valu
 
 #[cfg(test)]
 mod tests {
-    use crate::testing::{DEFAULT_FIXTURE_VERSION, fixture, fixtures_available};
+    use crate::testing::{DEFAULT_FIXTURE_VERSION, fixture};
 
     /// Build a site health report from fixtures.
     ///
@@ -1006,13 +1006,6 @@ mod tests {
     /// than no report. Every device in the inventory must appear.
     #[test]
     fn the_health_report_accounts_for_every_device() {
-        if !fixtures_available() {
-            eprintln!(
-                "SKIPPED: no fixtures. Run scripts/capture-fixtures.sh against a controller."
-            );
-            return;
-        }
-
         let devices = fixture(DEFAULT_FIXTURE_VERSION, "devices");
         let health = fixture(DEFAULT_FIXTURE_VERSION, "health");
         let stats = fixture(DEFAULT_FIXTURE_VERSION, "stat_device");
@@ -1032,13 +1025,6 @@ mod tests {
     /// returning a partial answer that looks complete.
     #[test]
     fn a_report_missing_a_private_surface_is_marked_partial() {
-        if !fixtures_available() {
-            eprintln!(
-                "SKIPPED: no fixtures. Run scripts/capture-fixtures.sh against a controller."
-            );
-            return;
-        }
-
         let devices = fixture(DEFAULT_FIXTURE_VERSION, "devices");
         let report = build_site_health_without_private(&devices).expect("builds");
         assert!(
@@ -1051,13 +1037,6 @@ mod tests {
     /// Topology report must account for all devices.
     #[test]
     fn the_topology_report_includes_all_devices() {
-        if !fixtures_available() {
-            eprintln!(
-                "SKIPPED: no fixtures. Run scripts/capture-fixtures.sh against a controller."
-            );
-            return;
-        }
-
         let devices = fixture(DEFAULT_FIXTURE_VERSION, "devices");
         let topology = fixture(DEFAULT_FIXTURE_VERSION, "topology");
 
@@ -1086,13 +1065,6 @@ mod tests {
     /// Traffic flow report must include clients.
     #[test]
     fn the_traffic_flow_report_includes_clients() {
-        if !fixtures_available() {
-            eprintln!(
-                "SKIPPED: no fixtures. Run scripts/capture-fixtures.sh against a controller."
-            );
-            return;
-        }
-
         let clients = fixture(DEFAULT_FIXTURE_VERSION, "clients");
         let stats = fixture(DEFAULT_FIXTURE_VERSION, "stat_sta");
 
@@ -1120,20 +1092,13 @@ mod tests {
 
 #[cfg(test)]
 mod troubleshoot_tests {
-    use crate::testing::{DEFAULT_FIXTURE_VERSION, fixture, fixtures_available};
+    use crate::testing::{DEFAULT_FIXTURE_VERSION, fixture};
 
     /// The whole point is the correlation. A troubleshoot result that answers
     /// only from the station record is the legacy get_client_details with more
     /// steps.
     #[test]
     fn troubleshoot_correlates_every_source_it_claims_to() {
-        if !fixtures_available() {
-            eprintln!(
-                "SKIPPED: no fixtures. Run scripts/capture-fixtures.sh against a controller."
-            );
-            return;
-        }
-
         let stations = fixture(DEFAULT_FIXTURE_VERSION, "stat_sta");
         let devices = fixture(DEFAULT_FIXTURE_VERSION, "devices");
         let policies = fixture(DEFAULT_FIXTURE_VERSION, "policies");
@@ -1198,13 +1163,6 @@ mod troubleshoot_tests {
     /// A missing station is an error, not an empty success.
     #[test]
     fn missing_station_is_an_error() {
-        if !fixtures_available() {
-            eprintln!(
-                "SKIPPED: no fixtures. Run scripts/capture-fixtures.sh against a controller."
-            );
-            return;
-        }
-
         let stations = fixture(DEFAULT_FIXTURE_VERSION, "stat_sta");
         let devices = fixture(DEFAULT_FIXTURE_VERSION, "devices");
         let policies = fixture(DEFAULT_FIXTURE_VERSION, "policies");

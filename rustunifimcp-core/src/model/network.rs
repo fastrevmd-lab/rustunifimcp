@@ -184,24 +184,20 @@ pub fn parse_radius_profiles(val: &serde_json::Value) -> Result<Vec<RadiusProfil
 #[cfg(test)]
 mod tests {
     use super::parse_dhcp_reservations;
-    use crate::testing::{DEFAULT_FIXTURE_VERSION, fixture, fixtures_available};
+    use crate::testing::{DEFAULT_FIXTURE_VERSION, fixture};
 
     /// The `/rest/user` endpoint returns all known clients, not only those
     /// with a fixed-IP reservation. Verify that the parser filters to actual
     /// reservations (marked by `use_fixedip: true`).
     #[test]
     fn dhcp_reservations_are_filtered_from_all_users() {
-        if !fixtures_available() {
-            eprintln!("skipping: no fixtures");
-            return;
-        }
-
         let raw = fixture(DEFAULT_FIXTURE_VERSION, "user");
         let reservations = parse_dhcp_reservations(&raw).expect("parse");
 
-        // The 10.5.67 fixture holds 257 total user records, of which 46 have
-        // `use_fixedip: true`. Assert the parsed count is strictly less than
-        // the total, proving the filter is active.
+        // Asserted as a relationship rather than a count. The count was
+        // pinned to the 10.5.67 capture, which meant the committed synthetic
+        // set had to carry 46 reservations to satisfy a test that is really
+        // about the filter being active at all.
         let total_users = raw
             .get("data")
             .and_then(|d| d.as_array())
@@ -215,11 +211,11 @@ mod tests {
             total_users
         );
 
-        // The expected count for 10.5.67 specifically.
-        assert_eq!(
-            reservations.len(),
-            46,
-            "10.5.67 fixture has 46 reservations"
+        // And not zero: a filter that matched nothing would also be
+        // strictly fewer than the total.
+        assert!(
+            !reservations.is_empty(),
+            "the fixture has reservations; an empty result means the filter is wrong"
         );
     }
 }

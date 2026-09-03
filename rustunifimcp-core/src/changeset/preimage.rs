@@ -270,20 +270,13 @@ impl StagedMutation {
 
 #[cfg(test)]
 mod tests {
-    use crate::testing::{DEFAULT_FIXTURE_VERSION, fixture, fixtures_available};
+    use crate::testing::{DEFAULT_FIXTURE_VERSION, fixture};
 
     /// The pre-image is the only thing standing between a partial apply and an
     /// unrecoverable one. If a staged mutation touches a resource the pre-image
     /// does not cover, the change set must be refused before apply.
     #[test]
     fn a_mutation_outside_the_preimage_is_refused() {
-        if !fixtures_available() {
-            eprintln!(
-                "SKIPPED: no fixtures. Run scripts/capture-fixtures.sh against a controller."
-            );
-            return;
-        }
-
         let preimage =
             super::Preimage::from_fixture(&fixture(DEFAULT_FIXTURE_VERSION, "networkconf"));
         let staged =

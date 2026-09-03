@@ -1,0 +1,12 @@
+{
+  "data": [
+    {
+      "_id": "000000000000000000000801",
+      "name": "Test Address Group",
+      "group_type": "address-group",
+      "group_members": [
+        "192.0.2.0/24"
+      ]
+    }
+  ]
+}
