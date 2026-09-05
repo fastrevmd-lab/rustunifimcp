@@ -2225,7 +2225,7 @@ dependencies = [
 
 [[package]]
 name = "rustunifimcp"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -2254,7 +2254,7 @@ dependencies = [
 
 [[package]]
 name = "rustunifimcp-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "mecmcp-changeset",
  "mecmcp-http",

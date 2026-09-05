@@ -35,7 +35,7 @@ configuration and nothing else, which makes it the real test of whether
 
 **In production. The dependency on the legacy server is retired.**
 
-`rustunifimcp` v0.2.0 serves the full surface — reads, workflows, operational
+`rustunifimcp` v0.3.0 serves the full surface — reads, workflows, operational
 actions, and change control — from LXC 981 over TLS, under two-person control.
 The `unifi-mcp-legacy` registration is gone; nothing routes to the Python
 server any more.
