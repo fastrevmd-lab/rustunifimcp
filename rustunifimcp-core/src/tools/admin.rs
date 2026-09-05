@@ -6,6 +6,13 @@ use crate::inventory::{Controller, ControllerRegistry};
 use crate::tools::{TOOL_NAMES, WRITE_TOOLS};
 use serde_json::{Value, json};
 
+/// The pinned mecmcp version this binary was built against.
+///
+/// Reported by `unifimcp_status`. Must track the `tag = "vX.Y.Z"` on every
+/// `mecmcp-*` dependency in the workspace `Cargo.toml` — the regression test
+/// `mecmcp_version_tracks_the_workspace_pin` enforces this.
+const MECMCP_VERSION: &str = "0.23.1";
+
 /// Build a redacted view of one controller for list_controllers.
 ///
 /// The view names the endpoint, site, and surface posture, but never discloses
@@ -111,7 +118,7 @@ pub async fn unifimcp_status(
 
     Ok(json!({
         "server_version": env!("CARGO_PKG_VERSION"),
-        "mecmcp_version": "0.23.0",
+        "mecmcp_version": MECMCP_VERSION,
         "lab_mode": lab_mode,
         "tool_count": TOOL_NAMES.len(),
         "write_tool_count": WRITE_TOOLS.len(),
@@ -149,7 +156,7 @@ pub async fn unifi_add_controller(
 
 #[cfg(test)]
 mod tests {
-    use super::redacted_controller_view;
+    use super::{MECMCP_VERSION, redacted_controller_view};
     use crate::inventory::Controller;
 
     /// list_controllers must not disclose credential locations. Naming the file
@@ -190,5 +197,68 @@ mod tests {
         let view = redacted_controller_view("home", &controller);
         let rendered = serde_json::to_string(&view).expect("serializes");
         assert!(rendered.contains("allow_private_api"), "{rendered}");
+    }
+
+    /// `MECMCP_VERSION` must track the workspace manifest's `mecmcp-*` pins — all of them.
+    ///
+    /// Checking only the first pin would pass a half-finished re-pin: a bump that moves
+    /// `mecmcp-audit` and this const while leaving, say, `mecmcp-http` on the previous tag
+    /// builds a binary carrying two mecmcp versions, and `unifimcp_status` would report the
+    /// one that happened to be listed first. So every pin is collected and they must agree
+    /// with each other as well as with the const.
+    ///
+    /// When a mecmcp bump lands, this fails until `MECMCP_VERSION` at the top of admin.rs
+    /// matches the new `tag = "vX.Y.Z"`.
+    #[test]
+    fn mecmcp_version_tracks_every_workspace_pin() {
+        let manifest_path = concat!(env!("CARGO_MANIFEST_DIR"), "/../Cargo.toml");
+        let manifest_content =
+            std::fs::read_to_string(manifest_path).expect("workspace Cargo.toml must be readable");
+
+        let mut pins: Vec<(String, String)> = Vec::new();
+        for line in manifest_content.lines() {
+            let trimmed = line.trim_start();
+            if !trimmed.starts_with("mecmcp-") {
+                continue;
+            }
+            let name = trimmed
+                .split_whitespace()
+                .next()
+                .expect("a non-empty line has a first token")
+                .to_owned();
+
+            // A mecmcp dependency without a tag is the failure this guard exists to catch:
+            // the pin comment above these lines says the tag is what holds the version.
+            let tag_start = trimmed.find("tag = \"v").unwrap_or_else(|| {
+                panic!(
+                    "workspace Cargo.toml dependency `{name}` has no tag = \"vX.Y.Z\"; \
+                     every mecmcp-* dependency must be pinned by tag"
+                )
+            });
+            let value_start = tag_start + "tag = \"v".len();
+            let value_len = trimmed[value_start..]
+                .find('"')
+                .expect("tag value must be closed with a quote");
+            pins.push((
+                name,
+                trimmed[value_start..value_start + value_len].to_owned(),
+            ));
+        }
+
+        assert!(
+            !pins.is_empty(),
+            "workspace manifest must pin at least one mecmcp-* dependency by tag"
+        );
+
+        let mismatched: Vec<&(String, String)> =
+            pins.iter().filter(|(_, v)| v != MECMCP_VERSION).collect();
+        assert!(
+            mismatched.is_empty(),
+            "MECMCP_VERSION in rustunifimcp-core/src/tools/admin.rs is \"{MECMCP_VERSION}\", but \
+             these workspace Cargo.toml pins disagree: {mismatched:?}. Every mecmcp-* dependency \
+             must carry the same tag, and the const must match it — unifimcp_status reports this \
+             value, so a stale const tells an operator the wrong mecmcp is running. Update the \
+             const and any lagging pin together."
+        );
     }
 }
