@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-05
+
 ### Added
 
 - **A committed synthetic fixture set** at `rustunifimcp-core/tests/fixtures/synthetic/`
@@ -18,12 +20,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   documentation-range addresses, locally administered MACs and zeroed coordinates, and
   is held to the same `scripts/verify-fixtures-scrubbed.sh` gate the recorded sets must
   pass — `gate_passes_on_the_committed_synthetic_fixtures` runs it on every test run.
-
-- **SSDF evidence is wired** (#16). `mecmcp-audit` was a declared dependency imported
-  nowhere and the `--ssdf-audit-*` flags were already on the CLI via
-  `mecmcp_runtime::cli::Cli`, so they parsed and did nothing — this server emitted none
-  of the fleet's change records. With `--ssdf-audit-endpoint` configured the coordinator
-  now emits proposal, approval, apply-intent and result-receipt records. Off by default.
 
 - **SSDF evidence is wired** (#16). `mecmcp-audit` was a declared dependency imported
   nowhere and the `--ssdf-audit-*` flags were already on the CLI via
@@ -230,5 +226,6 @@ by fifteen hours. v0.2.0 closes that gap.
   must not be silently accepted — and was the only test for it. Enabled because
   `CanonicalEnvelope` in mecmcp 0.23.0 now carries `#[serde(deny_unknown_fields)]`.
 
-[unreleased]: https://github.com/fastrevmd-lab/rustunifimcp/compare/v0.2.0...HEAD
+[unreleased]: https://github.com/fastrevmd-lab/rustunifimcp/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/fastrevmd-lab/rustunifimcp/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/fastrevmd-lab/rustunifimcp/releases/tag/v0.2.0
