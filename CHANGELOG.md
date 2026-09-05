@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-09-05
+
+### Fixed
+
+- **Change-set state writes no longer kill the server under systemd's
+  `SystemCallFilter=~@privileged`** (#351 upstream). With 0.3.0's write path on
+  the mecmcp coordinator, a change-set state write made a `chown` syscall that
+  this server's own systemd unit denies via `SystemCallFilter=~@privileged`.
+  Because seccomp answers a denied syscall with SIGSYS rather than EPERM, the
+  process was killed mid-write and systemd restarted it. The client saw an empty
+  reply and the write never landed. The trigger was the second state write, so
+  `stage` succeeded and `approve` died. Fixed upstream in mecmcp v0.23.1, which
+  only calls `chown` when the replacement file's ownership actually differs from
+  the destination's. Re-pinned every `mecmcp-*` dependency from `v0.23.0` to
+  `v0.23.1`.
+
 ## [0.3.0] - 2026-09-05
 
 ### Added
@@ -226,6 +242,7 @@ by fifteen hours. v0.2.0 closes that gap.
   must not be silently accepted — and was the only test for it. Enabled because
   `CanonicalEnvelope` in mecmcp 0.23.0 now carries `#[serde(deny_unknown_fields)]`.
 
-[unreleased]: https://github.com/fastrevmd-lab/rustunifimcp/compare/v0.3.0...HEAD
+[unreleased]: https://github.com/fastrevmd-lab/rustunifimcp/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/fastrevmd-lab/rustunifimcp/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/fastrevmd-lab/rustunifimcp/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/fastrevmd-lab/rustunifimcp/releases/tag/v0.2.0

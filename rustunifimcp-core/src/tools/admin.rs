@@ -6,6 +6,13 @@ use crate::inventory::{Controller, ControllerRegistry};
 use crate::tools::{TOOL_NAMES, WRITE_TOOLS};
 use serde_json::{Value, json};
 
+/// The pinned mecmcp version this binary was built against.
+///
+/// Reported by `unifimcp_status`. Must track the `tag = "vX.Y.Z"` on every
+/// `mecmcp-*` dependency in the workspace `Cargo.toml` — the regression test
+/// `mecmcp_version_tracks_the_workspace_pin` enforces this.
+const MECMCP_VERSION: &str = "0.23.1";
+
 /// Build a redacted view of one controller for list_controllers.
 ///
 /// The view names the endpoint, site, and surface posture, but never discloses
@@ -111,7 +118,7 @@ pub async fn unifimcp_status(
 
     Ok(json!({
         "server_version": env!("CARGO_PKG_VERSION"),
-        "mecmcp_version": "0.23.0",
+        "mecmcp_version": MECMCP_VERSION,
         "lab_mode": lab_mode,
         "tool_count": TOOL_NAMES.len(),
         "write_tool_count": WRITE_TOOLS.len(),
@@ -149,7 +156,7 @@ pub async fn unifi_add_controller(
 
 #[cfg(test)]
 mod tests {
-    use super::redacted_controller_view;
+    use super::{MECMCP_VERSION, redacted_controller_view};
     use crate::inventory::Controller;
 
     /// list_controllers must not disclose credential locations. Naming the file
@@ -190,5 +197,40 @@ mod tests {
         let view = redacted_controller_view("home", &controller);
         let rendered = serde_json::to_string(&view).expect("serializes");
         assert!(rendered.contains("allow_private_api"), "{rendered}");
+    }
+
+    /// MECMCP_VERSION must track the workspace Cargo.toml's mecmcp-* dependency pins.
+    ///
+    /// When a mecmcp version bump lands, this test will fail. Update MECMCP_VERSION
+    /// at the top of admin.rs to match the new tag = "vX.Y.Z" from the workspace
+    /// manifest.
+    #[test]
+    fn mecmcp_version_tracks_the_workspace_pin() {
+        let manifest_path = concat!(env!("CARGO_MANIFEST_DIR"), "/../Cargo.toml");
+        let manifest_content =
+            std::fs::read_to_string(manifest_path).expect("workspace Cargo.toml must be readable");
+
+        // Find any mecmcp-* dependency line with a tag field
+        let tag_line = manifest_content
+            .lines()
+            .find(|line| line.contains("mecmcp-") && line.contains("tag = "))
+            .expect("workspace manifest must have at least one mecmcp-* dependency with a tag");
+
+        // Extract the version from tag = "vX.Y.Z"
+        let tag_start = tag_line
+            .find("tag = \"v")
+            .expect("tag field must be in the format tag = \"vX.Y.Z\"");
+        let version_start = tag_start + "tag = \"v".len();
+        let version_end = tag_line[version_start..]
+            .find('"')
+            .expect("tag value must be closed with a quote");
+        let pinned_version = &tag_line[version_start..version_start + version_end];
+
+        assert_eq!(
+            MECMCP_VERSION, pinned_version,
+            "MECMCP_VERSION in rustunifimcp-core/src/tools/admin.rs must match the workspace \
+             Cargo.toml's mecmcp dependency tag. Found tag = \"v{pinned_version}\" but \
+             MECMCP_VERSION is \"{MECMCP_VERSION}\". Update the const when re-pinning mecmcp."
+        );
     }
 }
