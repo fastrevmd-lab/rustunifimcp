@@ -39,8 +39,16 @@ StateDirectoryMode=0700
 ReadWritePaths=/var/lib/unifimcp
 
 # Seccomp filter and syscall restrictions
+# 2026-09-05: LXC 623 outage — a denied syscall raised SIGSYS and killed the server
+# mid-request (chown on approval write, kernel audit sig=31 syscall=92). mecmcp#351
+# fixed the chown call in v0.23.1, but without SystemCallErrorNumber a denied syscall
+# still kills the server. SystemCallErrorNumber=EPERM makes denials return an error
+# instead of killing the process. An EPERM denial is silent at the systemd layer —
+# the only place it can become visible is the application, which must not discard
+# the errno (let _ = chown(...) is what hid it in mecmcp#351).
 SystemCallFilter=@system-service
 SystemCallFilter=~@privileged @obsolete @mount @swap @reboot @module
+SystemCallErrorNumber=EPERM
 SystemCallArchitectures=native
 
 # Drop all capabilities

@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-09-06
+
+### Fixed
+
+- **Systemd unit now sets `SystemCallErrorNumber=EPERM`** so a denied syscall
+  returns an error instead of killing the server with SIGSYS. The shipped unit had
+  `SystemCallFilter=~@privileged` but no `SystemCallErrorNumber`, so systemd's
+  default applied and a denied syscall raised SIGSYS. On 2026-09-05 that killed
+  rustunifimcp mid-request on LXC 623 during a change-set approval write: the
+  client saw `curl: (52) Empty reply from server`, the journal recorded
+  `Main process exited, code=killed, status=31/SYS`, systemd restarted the service,
+  and the approval never landed. Kernel audit named it: `sig=31 ... syscall=92`
+  (chown). mecmcp#351 fixed the chown call in v0.23.1, but the unit is the other
+  half: `SystemCallErrorNumber=EPERM` makes denials return EPERM instead of
+  killing the server. An EPERM denial is silent at the systemd layer — the only
+  place it can become visible is the application, which must not discard the errno.
+  This is mecmcp#354's seccomp standard, now applied to all shipped units.
+
 ## [0.3.1] - 2026-09-05
 
 ### Fixed
@@ -242,7 +260,8 @@ by fifteen hours. v0.2.0 closes that gap.
   must not be silently accepted — and was the only test for it. Enabled because
   `CanonicalEnvelope` in mecmcp 0.23.0 now carries `#[serde(deny_unknown_fields)]`.
 
-[unreleased]: https://github.com/fastrevmd-lab/rustunifimcp/compare/v0.3.1...HEAD
+[unreleased]: https://github.com/fastrevmd-lab/rustunifimcp/compare/v0.3.2...HEAD
+[0.3.2]: https://github.com/fastrevmd-lab/rustunifimcp/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/fastrevmd-lab/rustunifimcp/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/fastrevmd-lab/rustunifimcp/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/fastrevmd-lab/rustunifimcp/releases/tag/v0.2.0
