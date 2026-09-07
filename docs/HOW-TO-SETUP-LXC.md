@@ -92,7 +92,7 @@ pct create 622 local:vztmpl/debian-13-standard_13.1-2_amd64.tar.zst \
     --cores 1 --memory 512 --swap 512 \
     --rootfs local-lvm:4 \
     --unprivileged 1 --features nesting=1 \
-    --net0 name=eth0,bridge=vmbr0,firewall=1,gw=192.168.1.1,ip=192.168.1.242/24,type=veth \
+    --net0 name=eth0,bridge=vmbr0,firewall=1,gw=192.0.2.1,ip=192.0.2.10/24,type=veth \
     --onboot 0 --ostype debian \
     --tags "disposable;test;twoperson"
 
@@ -177,7 +177,7 @@ ExecStart=/usr/local/bin/rustunifimcp \
     --port 30033 \
     --tokens-file /var/lib/unifimcp/tokens.json \
     --allow-insecure-bind \
-    --allowed-host 192.168.1.242 \
+    --allowed-host 192.0.2.10 \
     --allowed-host test-twoperson-unifi:30033 \
     --audit-format json \
     --audit-log-file /var/lib/unifimcp/audit.jsonl \
@@ -237,7 +237,7 @@ pid=$(pct exec 622 -- systemctl show -p MainPID --value rustunifimcp.service)
 pct exec 622 -- grep -E '^Seccomp' /proc/$pid/status                                    # Seccomp: 2
 
 # 4. it is serving, and refusing unauthenticated callers
-curl -s -o /dev/null -w '%{http_code}\n' -X POST http://192.168.1.242:30033/mcp \
+curl -s -o /dev/null -w '%{http_code}\n' -X POST http://192.0.2.10:30033/mcp \
      -H 'content-type: application/json' -d '{}'                                        # 401
 ```
 

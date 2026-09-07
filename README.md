@@ -48,9 +48,9 @@ separate decision for its owner.
 
 | Guest | Role | Endpoint |
 |---|---|---|
-| 981 `prod-unifimcp` | production, two-person, TLS | `https://prod-unifimcp.mechub.org:30033/mcp` |
-| 622 `test-twoperson-unifi` | rig, two-person | `http://test-twoperson-unifi.mechub.org:30033/mcp` |
-| 623 `test-labmode-unifi` | rig, `--lab-mode` | `http://test-labmode-unifi.mechub.org:30033/mcp` |
+| 981 `prod-unifimcp` | production, two-person, TLS | `https://prod-unifimcp.example.org:30033/mcp` |
+| 622 `test-twoperson-unifi` | rig, two-person | `http://test-twoperson-unifi.example.org:30033/mcp` |
+| 623 `test-labmode-unifi` | rig, `--lab-mode` | `http://test-labmode-unifi.example.org:30033/mcp` |
 
 Parity against the legacy surface is recorded in
 [`docs/PARITY-AUDIT.md`](docs/PARITY-AUDIT.md): of 33 legacy tools in the usage
