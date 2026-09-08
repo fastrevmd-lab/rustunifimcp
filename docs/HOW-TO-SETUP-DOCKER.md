@@ -131,6 +131,10 @@ docker run -d --name unifi-twoperson \
 The loopback publish (`-p 127.0.0.1:...`) binds only to localhost. Reaching the
 server from another host requires TLS instead of a wider publish.
 
+**Note:** A browser-based MCP client served from a different port sends its own
+origin (e.g., `http://localhost:6274`), not the server's address. Add that
+client's origin to `--allowed-origin` if you encounter 403.
+
 Configuration and keys are mounted read-only. UniFi has no candidate
 configuration and no server-side staging directory to manage, so only the token
 file is writable.
@@ -215,8 +219,9 @@ into a `docker run` command; the shapes are different.
 Binding anything other than loopback demands an explicit origin allow-list. This
 is a guard, not an inconvenience: a container published to a host port is
 reachable by any browser page that can resolve it, and the origin list is what
-stops one driving your controllers. Add `--allowed-origin` for each address a
-client will use.
+stops one driving your controllers. `--allowed-origin` lists the origins of
+browser applications that call this server; clients sending no Origin header
+(curl, non-browser MCP clients) are never matched against it.
 
 **Container exits immediately with no log output** — check `docker logs` on the
 stopped container: `docker ps -a --filter name=unifi-`. Startup validation
@@ -227,8 +232,12 @@ the time you look for it with plain `docker ps`.
 process is UID 65532 and does not own your files. Either `chown -R 65532:65532`
 them, or run with `--user "$(id -u):$(id -g)"` as shown above.
 
-**`421 Misdirected Request`** — the `Host` or `Origin` header the client sent
-does not match any entry in the `--allowed-host` / `--allowed-origin` lists. The
-server started cleanly and is listening, but the allow-list rejects the request.
-Verify that the lists carry the **published** port (the left-hand number in
-`-p 30045:30033`), not the internal one.
+**`421 Misdirected Request`** — the `Host` header the client sent does not match
+any entry in the `--allowed-host` list. Verify that `--allowed-host` carries the
+**published** port (the left-hand number in `-p 30045:30033`), not the internal
+one.
+
+**`403 Forbidden` with `"Origin '<origin>' is not allowed"`** — the calling
+browser page's origin is not in the `--allowed-origin` list. Add the origin of
+the browser application making the call. Non-browser clients (curl, CLI) send no
+Origin header and are unaffected.
