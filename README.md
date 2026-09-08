@@ -48,9 +48,9 @@ separate decision for its owner.
 
 | Guest | Role | Endpoint |
 |---|---|---|
-| 981 `prod-unifimcp` | production, two-person, TLS | `https://prod-unifimcp.mechub.org:30033/mcp` |
-| 622 `test-twoperson-unifi` | rig, two-person | `http://test-twoperson-unifi.mechub.org:30033/mcp` |
-| 623 `test-labmode-unifi` | rig, `--lab-mode` | `http://test-labmode-unifi.mechub.org:30033/mcp` |
+| 981 `prod-unifimcp` | production, two-person, TLS | `https://prod-unifimcp.example.org:30033/mcp` |
+| 622 `test-twoperson-unifi` | rig, two-person | `http://test-twoperson-unifi.example.org:30033/mcp` |
+| 623 `test-labmode-unifi` | rig, `--lab-mode` | `http://test-labmode-unifi.example.org:30033/mcp` |
 
 Parity against the legacy surface is recorded in
 [`docs/PARITY-AUDIT.md`](docs/PARITY-AUDIT.md): of 33 legacy tools in the usage
@@ -62,6 +62,8 @@ which cannot be exercised without disrupting a live switch port).
 | Document | What it is |
 |---|---|
 | [`PLAN.md`](PLAN.md) | The phase sequence and its two cutovers, at a glance |
+| [`docs/HOW-TO-SETUP-LXC.md`](docs/HOW-TO-SETUP-LXC.md) | How to build a `rustunifimcp` Proxmox LXC from scratch |
+| [`docs/HOW-TO-SETUP-DOCKER.md`](docs/HOW-TO-SETUP-DOCKER.md) | How to run `rustunifimcp` in Docker, two-person and lab mode |
 | [`docs/superpowers/specs/2026-08-26-rustunifimcp-cutover-design.md`](docs/superpowers/specs/2026-08-26-rustunifimcp-cutover-design.md) | Build and cutover design: deployment topology, controller trust, phase detail, risks |
 | [`docs/superpowers/specs/2026-07-24-rustunifimcp-design.md`](docs/superpowers/specs/2026-07-24-rustunifimcp-design.md) | The original design — still authoritative for tool surface, API tagging, and the change-control adaptation |
 
