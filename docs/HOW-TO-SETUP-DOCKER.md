@@ -100,14 +100,17 @@ Both are shown below. The second is what the examples here were verified with.
 
 ## 3. Run it — two-person mode
 
-Obtain the image digest with:
+Pin the image by digest. Pull first if not already present, then capture the
+resolved digest (RepoDigests is empty if the image has not been pulled):
 
 ```bash
-docker inspect ghcr.io/fastrevmd-lab/rustunifimcp:0.3.2 --format '{{index .RepoDigests 0}}'
-# ghcr.io/fastrevmd-lab/rustunifimcp@sha256:abc123...
+docker pull ghcr.io/fastrevmd-lab/rustunifimcp:0.3.2
+image=$(docker inspect ghcr.io/fastrevmd-lab/rustunifimcp:0.3.2 \
+    --format '{{index .RepoDigests 0}}')
 ```
 
-Then run, pinned by digest:
+Record the digest value wherever the deployment is tracked — it identifies the
+exact bytes. Then run:
 
 ```bash
 docker run -d --name unifi-twoperson \
@@ -116,7 +119,7 @@ docker run -d --name unifi-twoperson \
   -v "$PWD/etc/controllers.json:/etc/unifimcp/controllers.json:ro" \
   -v "$PWD/etc/api.key:/etc/unifimcp/api.key:ro" \
   -v "$PWD/state/tokens.json:/var/lib/unifimcp/tokens.json:ro" \
-  ghcr.io/fastrevmd-lab/rustunifimcp@sha256:abc123... `# 0.3.2` \
+  "$image" \
   --controllers-file /etc/unifimcp/controllers.json \
   --tokens-file /var/lib/unifimcp/tokens.json \
   --transport streamable-http --host 0.0.0.0 --port 30033 \
@@ -135,7 +138,7 @@ file is writable.
 ## 4. Run it — lab mode
 
 Identical but for `--lab-mode`, and a different published port so both can run
-side by side:
+side by side (the `$image` variable from step 3 is reused):
 
 ```bash
 docker run -d --name unifi-labmode \
@@ -144,7 +147,7 @@ docker run -d --name unifi-labmode \
   -v "$PWD/etc/controllers.json:/etc/unifimcp/controllers.json:ro" \
   -v "$PWD/etc/api.key:/etc/unifimcp/api.key:ro" \
   -v "$PWD/state/tokens.json:/var/lib/unifimcp/tokens.json:ro" \
-  ghcr.io/fastrevmd-lab/rustunifimcp@sha256:abc123... `# 0.3.2` \
+  "$image" \
   --controllers-file /etc/unifimcp/controllers.json \
   --tokens-file /var/lib/unifimcp/tokens.json \
   --transport streamable-http --host 0.0.0.0 --port 30033 \
