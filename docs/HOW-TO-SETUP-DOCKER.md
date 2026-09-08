@@ -100,14 +100,23 @@ Both are shown below. The second is what the examples here were verified with.
 
 ## 3. Run it — two-person mode
 
+Obtain the image digest with:
+
+```bash
+docker inspect ghcr.io/fastrevmd-lab/rustunifimcp:0.3.2 --format '{{index .RepoDigests 0}}'
+# ghcr.io/fastrevmd-lab/rustunifimcp@sha256:abc123...
+```
+
+Then run, pinned by digest:
+
 ```bash
 docker run -d --name unifi-twoperson \
   --user "$(id -u):$(id -g)" \
-  -p 30035:30033 \
+  -p 127.0.0.1:30035:30033 \
   -v "$PWD/etc/controllers.json:/etc/unifimcp/controllers.json:ro" \
   -v "$PWD/etc/api.key:/etc/unifimcp/api.key:ro" \
   -v "$PWD/state/tokens.json:/var/lib/unifimcp/tokens.json:ro" \
-  ghcr.io/fastrevmd-lab/rustunifimcp:0.3.2 \
+  ghcr.io/fastrevmd-lab/rustunifimcp@sha256:abc123... `# 0.3.2` \
   --controllers-file /etc/unifimcp/controllers.json \
   --tokens-file /var/lib/unifimcp/tokens.json \
   --transport streamable-http --host 0.0.0.0 --port 30033 \
@@ -115,6 +124,9 @@ docker run -d --name unifi-twoperson \
   --allowed-host 127.0.0.1:30035 --allowed-host localhost:30035 \
   --allowed-origin http://127.0.0.1:30035 --allowed-origin http://localhost:30035
 ```
+
+The loopback publish (`-p 127.0.0.1:...`) binds only to localhost. Reaching the
+server from another host requires TLS instead of a wider publish.
 
 Configuration and keys are mounted read-only. UniFi has no candidate
 configuration and no server-side staging directory to manage, so only the token
@@ -128,11 +140,11 @@ side by side:
 ```bash
 docker run -d --name unifi-labmode \
   --user "$(id -u):$(id -g)" \
-  -p 30045:30033 \
+  -p 127.0.0.1:30045:30033 \
   -v "$PWD/etc/controllers.json:/etc/unifimcp/controllers.json:ro" \
   -v "$PWD/etc/api.key:/etc/unifimcp/api.key:ro" \
   -v "$PWD/state/tokens.json:/var/lib/unifimcp/tokens.json:ro" \
-  ghcr.io/fastrevmd-lab/rustunifimcp:0.3.2 \
+  ghcr.io/fastrevmd-lab/rustunifimcp@sha256:abc123... `# 0.3.2` \
   --controllers-file /etc/unifimcp/controllers.json \
   --tokens-file /var/lib/unifimcp/tokens.json \
   --transport streamable-http --host 0.0.0.0 --port 30033 \
