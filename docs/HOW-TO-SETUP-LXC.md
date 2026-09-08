@@ -179,6 +179,7 @@ ExecStart=/usr/local/bin/rustunifimcp \
     --allow-insecure-bind \
     --allowed-host 192.0.2.10 \
     --allowed-host test-twoperson-unifi:30033 \
+    --allowed-origin http://console.example.org \
     --audit-format json \
     --audit-log-file /var/lib/unifimcp/audit.jsonl \
     --audit-journald
@@ -195,6 +196,22 @@ the drop-in exists rather than editing the base unit.
 
 Point `--allowed-host` at that rig's own address — it must track whatever
 clients actually dial, or requests are refused with 421.
+
+**`--allowed-origin` is different:** it lists trusted **browser application
+origins** that call this server (the `Origin:` header), not the server address
+itself. A browser console hosted at `http://console.example.org` sends
+`Origin: http://console.example.org`, so that is the value to allow. The two
+lists are configured independently and usually contain different values.
+**Non-browser clients** (curl, CLI MCP clients) send no `Origin` header and are
+unaffected by the allowlist.
+
+**The scheme must match the server's TLS configuration:** this plaintext lab rig
+takes `http://` origins (a browser blocks HTTPS→HTTP calls as active mixed
+content). An HTTPS console origin requires `--tls-cert` and `--tls-key`.
+
+An off-loopback listener (`--host 0.0.0.0` or a LAN address) requires at least
+one `--allowed-origin` to start, even if no browser clients will call it — use
+an example value like `http://console.example.org` to satisfy the requirement.
 
 Then:
 
@@ -307,6 +324,18 @@ because a drop-in is a site decision. `mkdir -p` it first.
 
 **Service active but every call returns 421** — `--allowed-host` does not match
 the address clients dial. Add the exact host and port they use.
+
+**Browser client calls return 403 with `"Origin '<origin>' is not allowed"`** —
+the calling browser page's origin is not in the `--allowed-origin` list. Add the
+origin of the browser application making the call (e.g.,
+`http://console.example.org` for this plaintext rig). Non-browser clients (curl,
+CLI) send no `Origin` header and are unaffected.
+
+**Service fails to start with `"requires at least one --allowed-origin"`** — an
+off-loopback listener (`--host 0.0.0.0` or a LAN address) has no
+`--allowed-origin`. Add at least one browser application origin (e.g.,
+`http://console.example.org` for this plaintext rig), even if no browser clients
+will call it.
 
 **`Fatal: invalid socket address syntax`** — the shipped unit's placeholders
 were not substituted. Verify `systemctl cat rustunifimcp.service | grep -c '@[A-Z_]*@'`

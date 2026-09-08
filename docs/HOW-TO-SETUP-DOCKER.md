@@ -98,16 +98,30 @@ files stay owned by you and nothing needs `sudo`:
 
 Both are shown below. The second is what the examples here were verified with.
 
-## 3. Run it — two-person mode
+## 3. Pin the image by digest
+
+Pull first if not already present, then capture the resolved digest (RepoDigests
+is empty if the image has not been pulled):
+
+```bash
+docker pull ghcr.io/fastrevmd-lab/rustunifimcp:0.3.2
+image=$(docker inspect ghcr.io/fastrevmd-lab/rustunifimcp:0.3.2 \
+    --format '{{index .RepoDigests 0}}')
+```
+
+Record the digest value wherever the deployment is tracked — it identifies the
+exact bytes.
+
+## 4. Run it — two-person mode
 
 ```bash
 docker run -d --name unifi-twoperson \
   --user "$(id -u):$(id -g)" \
-  -p 30035:30033 \
+  -p 127.0.0.1:30035:30033 \
   -v "$PWD/etc/controllers.json:/etc/unifimcp/controllers.json:ro" \
   -v "$PWD/etc/api.key:/etc/unifimcp/api.key:ro" \
   -v "$PWD/state/tokens.json:/var/lib/unifimcp/tokens.json:ro" \
-  ghcr.io/fastrevmd-lab/rustunifimcp:0.3.2 \
+  "$image" \
   --controllers-file /etc/unifimcp/controllers.json \
   --tokens-file /var/lib/unifimcp/tokens.json \
   --transport streamable-http --host 0.0.0.0 --port 30033 \
@@ -116,11 +130,20 @@ docker run -d --name unifi-twoperson \
   --allowed-origin http://127.0.0.1:30035 --allowed-origin http://localhost:30035
 ```
 
+The loopback publish (`-p 127.0.0.1:...`) binds only to localhost. Reaching the
+server from another host requires BOTH a non-loopback publish (e.g., `-p 30035:30033`)
+AND TLS (with the allow-lists updated to the externally dialled authority), or a
+TLS-terminating reverse proxy in front of the loopback endpoint.
+
+**Note:** A browser-based MCP client served from a different port sends its own
+origin (e.g., `http://localhost:6274`), not the server's address. Add that
+client's origin to `--allowed-origin` if you encounter 403.
+
 Configuration and keys are mounted read-only. UniFi has no candidate
 configuration and no server-side staging directory to manage, so only the token
 file is writable.
 
-## 4. Run it — lab mode
+## 5. Run it — lab mode
 
 Identical but for `--lab-mode`, and a different published port so both can run
 side by side:
@@ -128,11 +151,11 @@ side by side:
 ```bash
 docker run -d --name unifi-labmode \
   --user "$(id -u):$(id -g)" \
-  -p 30045:30033 \
+  -p 127.0.0.1:30045:30033 \
   -v "$PWD/etc/controllers.json:/etc/unifimcp/controllers.json:ro" \
   -v "$PWD/etc/api.key:/etc/unifimcp/api.key:ro" \
   -v "$PWD/state/tokens.json:/var/lib/unifimcp/tokens.json:ro" \
-  ghcr.io/fastrevmd-lab/rustunifimcp:0.3.2 \
+  "$image" \
   --controllers-file /etc/unifimcp/controllers.json \
   --tokens-file /var/lib/unifimcp/tokens.json \
   --transport streamable-http --host 0.0.0.0 --port 30033 \
@@ -150,7 +173,7 @@ talking to 30045. So those flags carry the *published* port, not the internal
 one. Get this wrong and the server starts cleanly and then refuses every request
 with `421`.
 
-## 5. Verify
+## 6. Verify
 
 ```bash
 docker ps --filter name=unifi- --format '{{.Names}} {{.Status}}'
@@ -171,7 +194,7 @@ Confirm the mode is what you intended:
 docker logs unifi-labmode 2>&1 | grep -i 'lab mode'
 ```
 
-## 6. Stop
+## 7. Stop
 
 ```bash
 docker stop unifi-twoperson unifi-labmode
@@ -196,12 +219,14 @@ into a `docker run` command; the shapes are different.
 
 ## Troubleshooting
 
-**`Error: non-loopback bind '0.0.0.0' requires at least one --allowed-origin (the accepted browser Origin, e.g. https://server.example.org:8443)`**
-Binding anything other than loopback demands an explicit origin allow-list. This
-is a guard, not an inconvenience: a container published to a host port is
-reachable by any browser page that can resolve it, and the origin list is what
-stops one driving your controllers. Add `--allowed-origin` for each address a
-client will use.
+**`Fatal: failed to serve HTTP router`** — the actual cause is usually a missing
+`--allowed-origin` on an off-loopback listener (`--host 0.0.0.0` or a LAN
+address). Binding anything other than loopback demands an explicit origin
+allow-list. The unhelpful error message is a known gap (fastrevmd-lab/mecmcp#358).
+`--allowed-origin` lists the origins of browser applications that call this
+server; clients sending no Origin header (curl, non-browser MCP clients) are
+never matched against it. Note that this server validates its inventory before
+its arguments, so a config error will mask an argument error.
 
 **Container exits immediately with no log output** — check `docker logs` on the
 stopped container: `docker ps -a --filter name=unifi-`. Startup validation
@@ -212,8 +237,12 @@ the time you look for it with plain `docker ps`.
 process is UID 65532 and does not own your files. Either `chown -R 65532:65532`
 them, or run with `--user "$(id -u):$(id -g)"` as shown above.
 
-**`421 Misdirected Request`** — the `Host` or `Origin` header the client sent
-does not match any entry in the `--allowed-host` / `--allowed-origin` lists. The
-server started cleanly and is listening, but the allow-list rejects the request.
-Verify that the lists carry the **published** port (the left-hand number in
-`-p 30045:30033`), not the internal one.
+**`421 Misdirected Request`** — the `Host` header the client sent does not match
+any entry in the `--allowed-host` list. Verify that `--allowed-host` carries the
+**published** port (the left-hand number in `-p 30045:30033`), not the internal
+one.
+
+**`403 Forbidden` with `"Origin '<origin>' is not allowed"`** — the calling
+browser page's origin is not in the `--allowed-origin` list. Add the origin of
+the browser application making the call. Non-browser clients (curl, CLI) send no
+Origin header and are unaffected.
