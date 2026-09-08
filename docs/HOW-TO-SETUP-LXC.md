@@ -179,6 +179,8 @@ ExecStart=/usr/local/bin/rustunifimcp \
     --allow-insecure-bind \
     --allowed-host 192.0.2.10 \
     --allowed-host test-twoperson-unifi:30033 \
+    --allowed-origin http://192.0.2.10:30033 \
+    --allowed-origin http://test-twoperson-unifi:30033 \
     --audit-format json \
     --audit-log-file /var/lib/unifimcp/audit.jsonl \
     --audit-journald
@@ -194,7 +196,11 @@ run plain HTTP with `--allow-insecure-bind` — that mismatch is precisely why
 the drop-in exists rather than editing the base unit.
 
 Point `--allowed-host` at that rig's own address — it must track whatever
-clients actually dial, or requests are refused with 421.
+clients actually dial, or requests are refused with 421. **`--allowed-origin`
+must move in lockstep:** each `--allowed-host` needs a corresponding
+`--allowed-origin`, and the scheme must match the listener (`http://` for
+plaintext with `--allow-insecure-bind`, `https://` for TLS). An off-loopback
+listener with `--allowed-host` but no `--allowed-origin` refuses to start.
 
 Then:
 
@@ -307,6 +313,12 @@ because a drop-in is a site decision. `mkdir -p` it first.
 
 **Service active but every call returns 421** — `--allowed-host` does not match
 the address clients dial. Add the exact host and port they use.
+
+**Service fails to start with `"requires at least one --allowed-origin"`** — an
+off-loopback listener (`--host 0.0.0.0` or a LAN address) has `--allowed-host`
+but no `--allowed-origin`. Add one `--allowed-origin` for each `--allowed-host`,
+with the scheme matching the listener: `http://` for plaintext
+(`--allow-insecure-bind`), `https://` for TLS.
 
 **`Fatal: invalid socket address syntax`** — the shipped unit's placeholders
 were not substituted. Verify `systemctl cat rustunifimcp.service | grep -c '@[A-Z_]*@'`
