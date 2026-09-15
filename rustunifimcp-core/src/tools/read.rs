@@ -23,10 +23,13 @@ pub struct ListResourcesArgs {
     /// Site identifier; defaults to the controller's configured site.
     #[serde(default)]
     pub site: Option<String>,
-    /// Maximum items to return.
+    /// Maximum items to return. Defaults to 200.
+    ///
+    /// A response holding exactly this many items may not be the whole
+    /// collection — advance `offset` by `limit` to read the next page.
     #[serde(default)]
     pub limit: Option<u32>,
-    /// Offset into the result set.
+    /// Offset into the result set. Defaults to 0.
     #[serde(default)]
     pub offset: Option<u64>,
 }
@@ -210,7 +213,43 @@ pub async fn list_resources(
         )
         .await?;
 
-    parse_resource_list(args.kind, &raw)
+    let parsed = parse_resource_list(args.kind, &raw)?;
+
+    Ok(apply_page_if_upstream_ignored_it(surface, &page, parsed))
+}
+
+/// Applies `offset`/`limit` locally on the surfaces that discard them.
+///
+/// `offset` and `limit` are sent as query parameters, but only the Integration
+/// API acts on them. The two private surfaces accept the pair and return the
+/// whole collection, so `limit` read as "maximum items to return" while
+/// returning 230 firewall policies for `limit=1` — 226 KB, enough to overflow
+/// an MCP client's tool-result budget with the very call made to avoid doing
+/// so. See rustunifimcp#36.
+///
+/// The surface check is not defensive coding; it is required. `Supported` has
+/// been verified to honour both parameters — `kind=device, limit=1` returns one
+/// device, and adding `offset=1` returns a *different* one — so slicing its
+/// response again would skip `offset` items on every call and silently drop
+/// real results. Paging is applied here only where the controller did not
+/// already do it.
+///
+/// A non-array response is returned untouched: it is either an error shape or a
+/// parser result this function has no business reinterpreting.
+fn apply_page_if_upstream_ignored_it(
+    surface: ApiSurface,
+    page: &mecmcp_openapi::Page,
+    parsed: serde_json::Value,
+) -> serde_json::Value {
+    if surface == ApiSurface::Supported {
+        return parsed;
+    }
+    let serde_json::Value::Array(items) = parsed else {
+        return parsed;
+    };
+    let from = usize::try_from(page.from).unwrap_or(usize::MAX);
+    let size = usize::try_from(page.size).unwrap_or(usize::MAX);
+    serde_json::Value::Array(items.into_iter().skip(from).take(size).collect())
 }
 
 /// Parses a single-resource response through the appropriate model parser.
@@ -783,5 +822,89 @@ mod tests {
             parsed_count > 0,
             "the fixture has reservations; a zero count means the filter is wrong"
         );
+    }
+
+    use super::apply_page_if_upstream_ignored_it;
+    use crate::ApiSurface;
+
+    /// Builds a page the way `list_resources` does.
+    fn page(from: u64, size: u64) -> mecmcp_openapi::Page {
+        mecmcp_openapi::page(from, size, mecmcp_openapi::PageLimits::default()).expect("valid page")
+    }
+
+    fn array(n: usize) -> serde_json::Value {
+        serde_json::Value::Array(
+            (0..n)
+                .map(|i| serde_json::json!({ "n": i }))
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    fn ids(value: &serde_json::Value) -> Vec<u64> {
+        value
+            .as_array()
+            .expect("array")
+            .iter()
+            .map(|item| item["n"].as_u64().expect("n"))
+            .collect()
+    }
+
+    /// The reported defect: 230 firewall policies came back for `limit=1`.
+    ///
+    /// The fixture must be LARGER than the limit. A fixture that already fits
+    /// under it would pass without the truncation ever running, which is how a
+    /// paging bug survives a green test suite.
+    #[test]
+    fn private_v2_collection_is_truncated_to_the_limit() {
+        let out = apply_page_if_upstream_ignored_it(ApiSurface::PrivateV2, &page(0, 1), array(230));
+        assert_eq!(ids(&out), vec![0], "limit=1 must yield exactly one item");
+    }
+
+    #[test]
+    fn private_v1_collection_is_truncated_to_the_limit() {
+        let out = apply_page_if_upstream_ignored_it(ApiSurface::PrivateV1, &page(0, 5), array(31));
+        assert_eq!(ids(&out), vec![0, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn offset_selects_a_later_window() {
+        let out = apply_page_if_upstream_ignored_it(ApiSurface::PrivateV1, &page(3, 2), array(10));
+        assert_eq!(ids(&out), vec![3, 4], "offset must skip, not just truncate");
+    }
+
+    /// The guard against double-applying the page.
+    ///
+    /// The Integration API honours `offset` and `limit` itself — verified
+    /// against a live controller: `kind=device, limit=1` returns one device and
+    /// `offset=1` returns a different one. Its response is therefore ALREADY
+    /// the requested window. Slicing it again with the same offset would skip
+    /// `offset` items that were never there and return nothing, turning a
+    /// correct page into an empty result.
+    #[test]
+    fn supported_surface_is_never_re_paged() {
+        let already_paged = array(1);
+        let out = apply_page_if_upstream_ignored_it(
+            ApiSurface::Supported,
+            &page(1, 1),
+            already_paged.clone(),
+        );
+        assert_eq!(
+            out, already_paged,
+            "the Integration API already applied the page; re-slicing drops real results"
+        );
+    }
+
+    #[test]
+    fn a_short_collection_is_returned_whole() {
+        let out = apply_page_if_upstream_ignored_it(ApiSurface::PrivateV1, &page(0, 200), array(3));
+        assert_eq!(ids(&out), vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn a_non_array_payload_is_passed_through_untouched() {
+        let object = serde_json::json!({ "error": "not a collection" });
+        let out =
+            apply_page_if_upstream_ignored_it(ApiSurface::PrivateV2, &page(0, 1), object.clone());
+        assert_eq!(out, object);
     }
 }
