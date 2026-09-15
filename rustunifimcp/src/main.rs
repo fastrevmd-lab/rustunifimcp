@@ -391,6 +391,23 @@ async fn run_inner() -> Result<()> {
         );
     }
 
+    // Validate the listener arguments before anything reads a file.
+    //
+    // This server used to skip the shared validator entirely. The listener
+    // still refused the bind -- `mecmcp_transport::serve_router` owns that
+    // check -- but the refusal surfaced as `Fatal: failed to serve HTTP
+    // router`, with the reason discarded. An operator had no path from that
+    // string to "add --allowed-origin".
+    //
+    // Position matters as much as the call. Every other file this binary opens
+    // is read below, so validating here means an argument mistake is reported
+    // as an argument mistake. Previously the controllers file and the token
+    // file were both parsed first, so a wrong file mode or a malformed token
+    // store masked the CLI error entirely -- the opposite order from the rest
+    // of the family. See mecmcp#358.
+    mecmcp_runtime::cli_validate::validate(&cli.common)
+        .map_err(|refusal| anyhow::anyhow!("{refusal}"))?;
+
     if cli.lab_mode() {
         tracing::warn!(
             target: "audit",
