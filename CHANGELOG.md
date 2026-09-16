@@ -7,6 +7,85 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-16
+
+### Security
+
+- **rustls 0.23.45, closing RUSTSEC-2026-0285** (#35) — TLS 1.3 handshake messages 
+  accepted across encryption-level boundaries, CVSS 5.3. The advisory describes a 
+  server vulnerability where incoming TLS 1.3 handshake messages could be accepted 
+  and processed in the wrong encryption state, potentially exposing the server to 
+  state confusion attacks. This is the primary reason for this release. The fix 
+  was backported to the 0.23 series in rustls 0.23.45, which this server now pins.
+
+### Changed
+
+- **`unifi_list_resources` now honours `limit` and `offset`** (#39, closes #36) — 
+  previously the documented bound was ignored on the PrivateV1 and PrivateV2 surfaces, 
+  so `limit=1` returned all 230 firewall policies (226 KB) instead of 1. This is an 
+  observable change in tool behaviour and the reason for the minor version bump. The 
+  paging is applied per surface: the Integration API already honoured both parameters 
+  and still does, so its responses are unchanged. Only calls to the Private API with 
+  a `limit` parameter will see different results.
+
+- **Listener arguments are now validated before any file is read** (#38) — this server 
+  never called the shared validator that checks bind-address safety and TLS 
+  configuration coherence, so an unsafe bind was refused with 
+  `Fatal: failed to serve HTTP router` and the actual error discarded. It now names 
+  the offending flag. This also changes error ordering: an argument mistake is no 
+  longer masked by a config-file mistake — the CLI is validated first and the server 
+  exits early if the bind configuration would fail.
+
+### Updated dependencies
+
+- **rmcp 3.4.0** (#37) — the `ServerInfo` type was renamed to `ServerConfig`, which 
+  better describes its purpose as configuration rather than runtime information. This 
+  server's `rmcp::Server<RustUnifiMcp, ServerConfig>` initialization is updated 
+  accordingly. No wire-format or behavioural change.
+
+- **distroless/cc-debian13 base image digest bumps** (#32) — the container image's 
+  runtime base was updated from digest `9b615ff` to `4594d59`. This brings in 
+  Debian security updates for the distroless-packaged libc and system libraries. 
+  No application-level changes.
+
+- **rust build image digest bump** (#30) — the build stage's base image was updated 
+  from digest `17d1ba8` to `bce1476`. This brings in Rust toolchain and system 
+  library updates from the upstream `rust:latest` image.
+
+- **uuid 1.26.0 → 1.26.1** (#34) — patch version bump for the uuid crate.
+
+- **rustls 0.23.43 → 0.23.44** (#31) — an intermediate rustls version bump before 
+  the 0.23.45 security fix. This was a non-security patch release in the 0.23 series.
+
+- **rmcp 3.1.4 → 3.2.0** (#28) — a minor version bump in the rmcp framework with no 
+  breaking changes to this server's integration surface.
+
+- **tokio-rustls 0.26.4 → 0.26.5** (#27) — patch version bump for the tokio-rustls 
+  TLS adapter.
+
+### Added
+
+- **Docker ecosystem is now tracked by dependabot** (#29) — the `.github/dependabot.yml` 
+  configuration now includes Dockerfile base-image updates alongside Cargo.toml and 
+  GitHub Actions. Digest-pinned images in the Dockerfile will now receive automated 
+  update PRs when their upstreams publish new versions.
+
+### Fixed
+
+- **LXC setup documentation now includes the missing `--allowed-origin` flag** (#26) — 
+  the systemd service drop-in example in `docs/HOW-TO-SETUP-LXC.md` was missing this 
+  required argument, which would cause the server to reject cross-origin requests from 
+  Claude Code clients. The drop-in now correctly documents the flag.
+
+### Documentation
+
+- **New LXC setup guide** (#25) — `docs/HOW-TO-SETUP-LXC.md` was added, providing a 
+  complete walkthrough for building and deploying a rustunifimcp LXC container from 
+  scratch. This complements the existing Docker setup guide and is the deployment 
+  method used in the mechub homelab's production LXC 981.
+
+
+
 ## [0.3.2] - 2026-09-06
 
 ### Fixed
