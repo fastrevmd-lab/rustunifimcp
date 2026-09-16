@@ -43,12 +43,12 @@ the old binary has been replaced — an outage, not a build failure.
 Take the binary from the release image, which CI builds against the right glibc:
 
 ```bash
-docker create --name ux ghcr.io/fastrevmd-lab/rustunifimcp:0.3.2
+docker create --name ux ghcr.io/fastrevmd-lab/rustunifimcp:0.4.0
 docker cp ux:/usr/local/bin/rustunifimcp ./rustunifimcp
 docker rm ux
 ```
 
-No docker? `skopeo copy docker://ghcr.io/fastrevmd-lab/rustunifimcp:0.3.2 dir:/tmp/img`
+No docker? `skopeo copy docker://ghcr.io/fastrevmd-lab/rustunifimcp:0.4.0 dir:/tmp/img`
 then find the layer containing `usr/local/bin/rustunifimcp` and untar it.
 
 ## 2. Assemble the install package
@@ -75,7 +75,7 @@ cd /path/to/rustunifimcp
 mkdir -p /tmp/pkg-stage
 cp rustunifimcp /tmp/pkg-stage/
 cp -r packaging /tmp/pkg-stage/
-tar czf rustunifimcp_0.3.2.tar.gz -C /tmp/pkg-stage .
+tar czf rustunifimcp_0.4.0.tar.gz -C /tmp/pkg-stage .
 ```
 
 The files land at the extraction root. The installer is `#!/bin/sh` and may not
@@ -105,7 +105,7 @@ guest as safe to destroy, and the fleet's own safety rules key on it.
 ## 4. Install
 
 ```bash
-pct push 622 rustunifimcp_0.3.2.tar.gz /tmp/pkg.tar.gz
+pct push 622 rustunifimcp_0.4.0.tar.gz /tmp/pkg.tar.gz
 pct exec 622 -- bash -lc 'cd /tmp && tar xzf pkg.tar.gz && sh packaging/lxc/install.sh'
 ```
 
@@ -153,9 +153,9 @@ both learned the hard way:
    which must be **`0`**.
 
 2. **Never restore an old backup unit wholesale either.** Units predating
-   v0.3.2 have no `SystemCallErrorNumber`, so restoring one silently reverts
+   v0.4.0 have no `SystemCallErrorNumber`, so restoring one silently reverts
    the SIGSYS fix — the service still runs and looks healthy, and a denied
-   syscall kills it mid-request. Keep the newly installed v0.3.2 unit and put
+   syscall kills it mid-request. Keep the newly installed v0.4.0 unit and put
    site configuration in a drop-in.
 
 `install.sh` does **not** create the drop-in directory:
@@ -264,7 +264,7 @@ enforced. A `000` means nothing is listening on that address or port.
 Checking `SystemCallErrorNumber` matters. On 2026-09-05 a denied `chown`
 (kernel audit `sig=31 syscall=92`) killed this server mid-request during a
 change-set approval write — the client saw an empty reply, systemd restarted
-it, and the approval was lost. v0.3.2 is the release that adds the directive,
+it, and the approval was lost. v0.4.0 is the release that adds the directive,
 and this check is how an operator proves it is present. Without it, a denied
 syscall raises SIGSYS and kills the process mid-request instead of returning
 `EPERM`.
@@ -308,7 +308,7 @@ working — the secrets are hashed and cannot be recovered, so re-minting means
 reconfiguring every client that talks to this rig.
 
 **Restore only the credentials and the drop-in, never the old base unit.** Units
-predating v0.3.2 have no `SystemCallErrorNumber`, so restoring one silently
+predating v0.4.0 have no `SystemCallErrorNumber`, so restoring one silently
 reverts the SIGSYS fix.
 
 ## Troubleshooting
