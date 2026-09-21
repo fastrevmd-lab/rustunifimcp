@@ -77,7 +77,7 @@ and a test must assert the list.
 
 Inherited from `mecmcp` and non-negotiable per phase:
 
-- Edition 2024, MSRV 1.88
+- Edition 2024, MSRV 1.89
 - `missing_docs = "warn"`, `unsafe_code = "forbid"`, `clippy::all = "warn"`
   (priority −1), `dbg_macro = "deny"`, `todo = "deny"`, `unwrap_used = "warn"`
 - `[profile.release]` present from the first release
