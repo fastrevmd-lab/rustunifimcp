@@ -41,7 +41,7 @@ RUN touch rustunifimcp/src/main.rs rustunifimcp-core/src/lib.rs && \
 
 # Runtime stage: Distroless Debian 13 with nonroot user
 # Pinned to the amd64 digest resolved on 2026-08-24.
-FROM gcr.io/distroless/cc-debian13@sha256:4594d59540d1948417f6ca2829ddd9294493a7c68b7528f4dd459de7f203a750
+FROM gcr.io/distroless/cc-debian13:nonroot@sha256:54df941ed0d06a1bd95ef5e0ce391fd8d9f94b64782dc9a60062727849ee3f97
 
 # Run as nonroot user (UID 65532)
 USER 65532:65532
@@ -60,4 +60,14 @@ LABEL org.opencontainers.image.description="UniFi Network MCP server"
 LABEL org.opencontainers.image.source="https://github.com/fastrevmd-lab/rustunifimcp"
 LABEL org.opencontainers.image.licenses="MIT"
 
-ENTRYPOINT ["/usr/local/bin/rustunifimcp"]
+# ENTRYPOINT carries what must always hold: config paths and anything security-
+# relevant. CMD carries only what an operator is expected to replace: bind
+# address, port, and mode flags. Docker replaces CMD when the caller supplies
+# arguments, so security-relevant defaults must stay in ENTRYPOINT.
+ENTRYPOINT ["/usr/local/bin/rustunifimcp", \
+    "--controllers-file", "/etc/unifimcp/controllers.json", \
+    "--tokens-file", "/var/lib/unifimcp/tokens.json", \
+    "--state-file", "/var/lib/unifimcp/changesets.json"]
+CMD ["--transport", "streamable-http", \
+    "--host", "127.0.0.1", \
+    "--port", "30033"]
