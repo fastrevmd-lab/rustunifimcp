@@ -22,8 +22,9 @@ use rmcp::{
 use rustunifimcp_core::{
     changeset::{
         Preimage, StagedMutation, State, UnifiTransaction, ZoneIndex, actions_for,
-        apply_sequentially, check_zone_deletions, check_zone_references, diff_against_preimage,
-        fingerprint_of, mutations_of, preimage_of, referenced_zone_ids, validate_locally,
+        apply_sequentially, check_writable_fields, check_zone_deletions, check_zone_references,
+        diff_against_preimage, fingerprint_of, mutations_of, preimage_of, referenced_zone_ids,
+        validate_locally,
     },
     client::UnifiClient,
     error::UnifiError,
@@ -1215,6 +1216,15 @@ impl UnifiServer {
             });
         }
 
+        // Checked over the whole plan, not only the new mutations, and before
+        // the pre-image is captured: a mutation naming a read-only kind or a
+        // disallowed field must never enter a change set a human could
+        // approve, so it is refused here rather than left for
+        // unifi_validate_change_set, which a caller can skip entirely.
+        if let Err(e) = check_writable_fields(&mutations) {
+            return tool_error(format!("staged mutation refused: {e}"));
+        }
+
         // Re-captured over the whole plan, not only the new mutations: the
         // fingerprint stands in for a candidate UniFi does not have, so it has
         // to describe the state the plan as a whole was built against.
@@ -1403,6 +1413,15 @@ impl UnifiServer {
 
         if let Err(e) = validate_locally(&preimage, &mutations) {
             return tool_error(format!("local validation failed: {e}"));
+        }
+
+        // Schema constraints: a read-only kind or a disallowed field. Staging
+        // already refuses these, but a change set can outlive a server
+        // restart (it round-trips through --state-file), so a plan built
+        // before this check existed must still be caught by the tool whose
+        // description already promises "schema constraints".
+        if let Err(e) = check_writable_fields(&mutations) {
+            return tool_error(format!("schema constraints failed: {e}"));
         }
 
         // A zone this set deletes must not be left referenced by anything else

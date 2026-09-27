@@ -11,6 +11,135 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::preimage::{Preimage, StagedMutation};
 
+/// The top-level body fields a staged create or update may set, by resource
+/// kind. `None` means the kind may not be written at all.
+///
+/// UniFi has no server-side schema check on the private surfaces this server
+/// writes to: a staged body reaches [`crate::client::UnifiClient::apply_mutation`]
+/// close to verbatim (a Private v1 create or update sends `body` as-is; a
+/// Private v2 update overlays it onto the live resource). Without this list,
+/// [`check_writable_fields`] is the only thing standing between "the fields
+/// this server actually understands for a resource" and "any JSON a caller or
+/// a model hallucinated" — including controller-managed fields like `_id`,
+/// which is why no entry here includes it.
+///
+/// Grounded in what this server already recognises: every kind's named
+/// fields, taken from its read model in [`crate::model`], appear here. Two
+/// exceptions are deliberate:
+///
+/// - `station` and `device` allow nothing: they are served from the
+///   Integration API ([`ApiSurface::Supported`]), which has no verified write
+///   route this server can drive (`client.rs` already refused `kind ==
+///   "device"` for updates alone; this closes the same gap for creates and
+///   deletes, and extends it to `station`). Device and client state changes
+///   go through `unifi_device_action` / `unifi_client_action`, not a generic
+///   body write.
+/// - `firewall_policy` is wider than its named struct fields:
+///   [`crate::model::firewall::FirewallPolicy`] deliberately keeps every field
+///   the controller returns (`source`, `destination`, `protocol`, `schedule`,
+///   ...) because a policy missing them is not a policy any more, and the
+///   supported authoring loop is "read a working policy, change one field,
+///   stage it back". The extra names below are exactly the ones that policy's
+///   own round-trip test fixture carries.
+fn writable_fields(kind: ResourceKind) -> Option<&'static [&'static str]> {
+    match kind {
+        ResourceKind::Station | ResourceKind::Device => None,
+        ResourceKind::Network => Some(&[
+            "name",
+            "purpose",
+            "ip_subnet",
+            "vlan",
+            "dhcpd_enabled",
+            "dhcpd_start",
+            "dhcpd_stop",
+            "wan_dns1",
+            "wan_dns2",
+            "wan_ipv6_dns1",
+            "wan_ipv6_dns2",
+        ]),
+        ResourceKind::Wlan => Some(&["name", "enabled", "security", "wlan_band", "is_guest"]),
+        ResourceKind::PortProfile => Some(&["name", "forward", "native_networkconf_id"]),
+        ResourceKind::DhcpReservation => {
+            Some(&["mac", "last_ip", "fixed_ip", "hostname", "use_fixedip"])
+        }
+        ResourceKind::FirewallGroup => Some(&["name", "group_type", "group_members"]),
+        ResourceKind::RadiusProfile => Some(&["name", "external_id"]),
+        ResourceKind::FirewallZone => Some(&["name", "default_zone", "network_ids", "external_id"]),
+        ResourceKind::FirewallPolicy => Some(&[
+            "name",
+            "action",
+            "enabled",
+            "index",
+            "predefined",
+            "source",
+            "destination",
+            "protocol",
+            "schedule",
+            "connection_state_type",
+            "connection_states",
+            "ip_version",
+            "logging",
+        ]),
+        ResourceKind::TrafficRoute => Some(&["name"]),
+    }
+}
+
+/// Refuse a staged mutation naming a kind this server will not write, or
+/// setting a body field its kind does not allow.
+///
+/// Runs on the mutation list alone — no preimage or controller round trip is
+/// needed — so it can run at staging time, before a bad mutation ever enters
+/// a change set a human might approve. `Delete` and `Restore` carry no body
+/// to check fields on; `Delete` is still refused for a read-only kind, and
+/// `Restore` addresses the whole controller rather than a kind.
+///
+/// # Errors
+///
+/// Returns [`UnifiError::WriteRefused`] naming the kind or field that was
+/// refused.
+pub fn check_writable_fields(mutations: &[StagedMutation]) -> Result<(), UnifiError> {
+    for mutation in mutations {
+        let (kind, body) = match mutation {
+            StagedMutation::Create { kind, body } | StagedMutation::Update { kind, body, .. } => {
+                (kind, Some(body))
+            }
+            StagedMutation::Delete { kind, .. } => (kind, None),
+            StagedMutation::Restore { .. } => continue,
+        };
+
+        let resource_kind: ResourceKind = serde_json::from_value(Value::String(kind.clone()))
+            .map_err(|e| {
+                UnifiError::WriteRefused(format!("invalid resource kind '{kind}': {e}"))
+            })?;
+
+        let Some(allowed) = writable_fields(resource_kind) else {
+            return Err(UnifiError::WriteRefused(format!(
+                "staged {} names kind '{kind}', which this server refuses to write: no \
+                 supported write route exists for it through unifi_stage_change. Device and \
+                 client state changes go through unifi_device_action or unifi_client_action.",
+                mutation.preview()
+            )));
+        };
+
+        let Some(body) = body else { continue };
+        let Some(object) = body.as_object() else {
+            continue;
+        };
+
+        for field in object.keys() {
+            if !allowed.contains(&field.as_str()) {
+                return Err(UnifiError::WriteRefused(format!(
+                    "staged {} sets field '{field}', which is not writable for kind '{kind}'; \
+                     allowed fields are: {}",
+                    mutation.preview(),
+                    allowed.join(", ")
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Validate that all staged mutations are covered by the pre-image.
 ///
 /// # Errors
@@ -755,5 +884,129 @@ mod tests {
             referenced_zone_ids(&[staged]),
             vec!["aaaaaaaaaaaaaaaaaaaaaaaa"]
         );
+    }
+}
+
+#[cfg(test)]
+mod writable_fields_tests {
+    use super::check_writable_fields;
+    use crate::changeset::StagedMutation;
+    use serde_json::json;
+
+    /// A field this server does not recognise for the kind must be refused,
+    /// not forwarded to the controller.
+    #[test]
+    fn a_disallowed_field_is_refused() {
+        let staged = StagedMutation::create(
+            "network",
+            json!({ "name": "corp", "definitely_not_a_real_field": true }),
+        );
+        let error =
+            check_writable_fields(&[staged]).expect_err("an unrecognised field must be refused");
+        let rendered = error.to_string();
+        assert!(
+            rendered.contains("definitely_not_a_real_field"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("network"), "{rendered}");
+    }
+
+    /// A body naming only allowed fields must pass.
+    #[test]
+    fn only_allowed_fields_passes() {
+        let staged = StagedMutation::create(
+            "network",
+            json!({ "name": "corp", "vlan": 20, "purpose": "corporate" }),
+        );
+        assert!(check_writable_fields(&[staged]).is_ok());
+    }
+
+    /// `station` is a read/observability kind served from the Integration
+    /// API; there is no verified write route for it. Staging a create must
+    /// be refused before it ever reaches a change set.
+    #[test]
+    fn a_write_to_a_read_only_kind_is_refused() {
+        let staged = StagedMutation::create("station", json!({ "name": "someones-laptop" }));
+        let error = check_writable_fields(&[staged])
+            .expect_err("a write to a read-only kind must be refused");
+        assert!(error.to_string().contains("station"), "{error}");
+    }
+
+    /// `device` carries the same refusal as `station` — this is the gap
+    /// `client.rs` used to close only for updates (`kind == "device"`).
+    /// Creates and deletes must be refused the same way, and earlier: at
+    /// staging, not at apply.
+    #[test]
+    fn a_device_update_is_refused() {
+        let staged = StagedMutation::update("device", "abc123", json!({ "name": "renamed-ap" }));
+        let error =
+            check_writable_fields(&[staged]).expect_err("device writes have no verified route");
+        assert!(error.to_string().contains("device"), "{error}");
+    }
+
+    /// Deletes carry no body, but a read-only kind must still be refused —
+    /// deleting is a write too.
+    #[test]
+    fn a_delete_of_a_read_only_kind_is_refused() {
+        let staged = StagedMutation::delete("device", "abc123");
+        assert!(check_writable_fields(&[staged]).is_err());
+    }
+
+    /// A restore addresses the whole controller, not a kind, so it is not
+    /// checked here — [`crate::changeset::apply::ControllerOps`] refuses it
+    /// unconditionally at apply.
+    #[test]
+    fn a_restore_is_not_checked() {
+        let staged = StagedMutation::restore("backup-1");
+        assert!(check_writable_fields(&[staged]).is_ok());
+    }
+
+    /// `firewall_policy` deliberately allows the wider set of fields its
+    /// round-trip test fixture carries, because the authoring loop is "read a
+    /// working policy, change one field, stage it back."
+    #[test]
+    fn a_firewall_policy_update_keeps_its_full_field_set() {
+        let staged = StagedMutation::update(
+            "firewall_policy",
+            "aaaaaaaaaaaaaaaaaaaaaaaa",
+            json!({
+                "name": "Phones to DMZ web (https)",
+                "action": "ALLOW",
+                "enabled": true,
+                "index": 10000,
+                "predefined": false,
+                "protocol": "tcp",
+                "ip_version": "BOTH",
+                "logging": false,
+                "connection_state_type": "ALL",
+                "connection_states": [],
+                "schedule": { "mode": "ALWAYS" },
+                "source": { "zone_id": "b", "matching_target": "ANY" },
+                "destination": { "zone_id": "c", "matching_target": "IP" }
+            }),
+        );
+        assert!(check_writable_fields(&[staged]).is_ok());
+    }
+
+    /// Controller-managed identity fields must never be settable through a
+    /// staged body, for any kind — a body that names them is trying to
+    /// reassign identity, not configure the resource.
+    #[test]
+    fn no_kind_allows_setting_the_controller_managed_id() {
+        let staged = StagedMutation::update(
+            "network",
+            "aaaaaaaaaaaaaaaaaaaaaaaa",
+            json!({ "name": "corp", "_id": "attacker-chosen" }),
+        );
+        let error = check_writable_fields(&[staged]).expect_err("_id must never be writable");
+        assert!(error.to_string().contains("_id"), "{error}");
+    }
+
+    /// An unknown kind string is refused with a clear reason rather than a
+    /// panic or a silent pass.
+    #[test]
+    fn an_unknown_kind_is_refused() {
+        let staged = StagedMutation::create("not_a_real_kind", json!({}));
+        assert!(check_writable_fields(&[staged]).is_err());
     }
 }
