@@ -1,0 +1,54 @@
+name: Bug report
+description: Report something that isn't working as expected
+title: "bug: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug. If this is a security vulnerability, please use "Report a vulnerability" below instead — do not file it here.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: rustunifimcp version (or commit SHA) you're using
+      placeholder: "0.4.0"
+    validations:
+      required: true
+  - type: input
+    id: controller-version
+    attributes:
+      label: UniFi controller version
+      description: UniFi Network application/controller version, if relevant
+      placeholder: "9.x"
+    validations:
+      required: false
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you expect, and what happened instead?
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Minimal CLI invocation or MCP tool call that reproduces the issue. Please sanitize any controller output — no real hostnames, credentials, serials, or MAC addresses.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Deployment mode (two-person / `--lab-mode`), transport (stdio / streamable-http), OS
+    validations:
+      required: false
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log output
+      description: Sanitized `tracing` output or error text, if any
+      render: shell
+    validations:
+      required: false
