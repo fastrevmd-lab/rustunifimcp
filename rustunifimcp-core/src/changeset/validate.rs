@@ -41,6 +41,15 @@ use super::preimage::{Preimage, StagedMutation};
 ///   supported authoring loop is "read a working policy, change one field,
 ///   stage it back". The extra names below are exactly the ones that policy's
 ///   own round-trip test fixture carries.
+///
+///   `predefined` stays in this list for the same reason, not by omission:
+///   it is a named field on [`crate::model::firewall::FirewallPolicy`] (not
+///   part of its `rest` flatten), so every policy this server hands back
+///   carries it, and the round-trip loop resubmits it verbatim. Dropping it
+///   from the allowlist would not just block re-flagging a policy as
+///   predefined -- an edit no caller is expected to make -- it would refuse
+///   the read-edit-restage loop for every `firewall_policy` update, since the
+///   body would always carry a field the allowlist no longer names.
 fn writable_fields(kind: ResourceKind) -> Option<&'static [&'static str]> {
     match kind {
         ResourceKind::Station | ResourceKind::Device => None,
@@ -123,7 +132,11 @@ pub fn check_writable_fields(mutations: &[StagedMutation]) -> Result<(), UnifiEr
 
         let Some(body) = body else { continue };
         let Some(object) = body.as_object() else {
-            continue;
+            return Err(UnifiError::WriteRefused(format!(
+                "staged {} for kind '{kind}' has a non-object body ({body}); the body \
+                 must be a JSON object naming only writable fields",
+                mutation.preview()
+            )));
         };
 
         for field in object.keys() {
@@ -891,7 +904,7 @@ mod tests {
 mod writable_fields_tests {
     use super::check_writable_fields;
     use crate::changeset::StagedMutation;
-    use serde_json::json;
+    use serde_json::{Value, json};
 
     /// A field this server does not recognise for the kind must be refused,
     /// not forwarded to the controller.
@@ -1007,6 +1020,39 @@ mod writable_fields_tests {
     #[test]
     fn an_unknown_kind_is_refused() {
         let staged = StagedMutation::create("not_a_real_kind", json!({}));
+        assert!(check_writable_fields(&[staged]).is_err());
+    }
+
+    /// `MutationSpec` accepts any JSON as a body, and the field loop used to
+    /// `continue` past a non-object body -- an empty allowlist scan finds no
+    /// disallowed field in `[]`, `null`, a string, or a number, so all four
+    /// passed with no fields checked at all. A non-object body must be
+    /// refused outright, the same way an unrecognised field is.
+    #[test]
+    fn a_null_body_is_refused() {
+        let staged = StagedMutation::update("network", "aaaaaaaaaaaaaaaaaaaaaaaa", Value::Null);
+        assert!(check_writable_fields(&[staged]).is_err());
+    }
+
+    #[test]
+    fn an_array_body_is_refused() {
+        let staged = StagedMutation::update(
+            "network",
+            "aaaaaaaaaaaaaaaaaaaaaaaa",
+            json!(["not", "a", "map"]),
+        );
+        assert!(check_writable_fields(&[staged]).is_err());
+    }
+
+    #[test]
+    fn a_string_body_is_refused() {
+        let staged = StagedMutation::create("network", json!("just a string"));
+        assert!(check_writable_fields(&[staged]).is_err());
+    }
+
+    #[test]
+    fn a_number_body_is_refused() {
+        let staged = StagedMutation::create("network", json!(42));
         assert!(check_writable_fields(&[staged]).is_err());
     }
 }

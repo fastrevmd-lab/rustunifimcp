@@ -131,6 +131,16 @@ fn audit_flags_create_the_file_and_an_action_writes_a_record() {
 /// must make startup fail rather than run unaudited. `mecmcp_audit::init_tracing`
 /// already refuses via `?`; this pins that the refusal reaches the process
 /// exit code and is not swallowed anywhere in `main`'s call chain.
+///
+/// `run()` always closes stdin, so a build that starts serving over stdio
+/// with no audit failure at all *also* exits non-zero here: `service.waiting()`
+/// sees immediate EOF and returns `Fatal: connection closed`, which alone
+/// satisfies "fails" and "prints Fatal:" with no audit refusal in sight. That
+/// is exactly the false pass this test had against the pre-M10 `main.rs`,
+/// which never called `init_audit` at all. So beyond "it failed", this
+/// asserts the failure names audit specifically, and that stderr never shows
+/// `serve_stdio`'s "Starting MCP stdio service" line -- proving the process
+/// never got past `init_audit` to reach serving.
 #[test]
 fn an_unwritable_audit_path_fails_startup() {
     let controllers = controllers_file();
@@ -161,5 +171,15 @@ fn an_unwritable_audit_path_fails_startup() {
     assert!(
         stderr.contains("Fatal:"),
         "the refusal must reach the operator on stderr, got:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("audit"),
+        "the refusal must name audit, not just fail for some other reason, got:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("Starting MCP stdio service"),
+        "startup must fail before serving begins, not on the closed-stdin \
+         `connection closed` a build with no audit wiring at all would also \
+         hit; got:\n{stderr}"
     );
 }

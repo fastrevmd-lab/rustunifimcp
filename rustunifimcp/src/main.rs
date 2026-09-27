@@ -160,7 +160,7 @@ fn init_audit(args: &mecmcp_runtime::cli::Cli) -> Result<()> {
         redaction,
         journald: args.audit_journald,
     })
-    .context("initializing audit tracing")?;
+    .map_err(|e| anyhow::anyhow!("initializing audit tracing: {e}"))?;
     Ok(())
 }
 
