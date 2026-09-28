@@ -518,13 +518,7 @@ async fn run_inner() -> Result<()> {
     .map_err(|e| anyhow::anyhow!("failed to initialize the change-set coordinator: {e}"))?;
 
     // Build server.
-    let server = UnifiServer::new(
-        Arc::clone(&registry),
-        cli.lab_mode(),
-        coordinator,
-        recorder,
-        audit_sink.clone(),
-    )?;
+    let server = UnifiServer::new(Arc::clone(&registry), cli.lab_mode(), coordinator, recorder)?;
 
     // Determine transport.
     let served = match cli.common.transport {
@@ -1074,8 +1068,7 @@ mod tests {
         .unwrap();
 
         // Build a server for the reload handler.
-        let server =
-            UnifiServer::new(Arc::clone(&registry), false, coordinator, None, None).unwrap();
+        let server = UnifiServer::new(Arc::clone(&registry), false, coordinator, None).unwrap();
 
         // Should install successfully without a token store.
         let result = install_sighup_reload(registry, Some(server), None, None);
@@ -1127,8 +1120,7 @@ mod tests {
             None,
         )
         .unwrap();
-        let server =
-            UnifiServer::new(Arc::clone(&registry), false, coordinator, None, None).unwrap();
+        let server = UnifiServer::new(Arc::clone(&registry), false, coordinator, None).unwrap();
 
         let token_store = Arc::new(mecmcp_auth::TokenStoreFile::load(tokens_file.path()).unwrap());
 
@@ -1208,8 +1200,7 @@ mod tests {
             None,
         )
         .unwrap();
-        let server =
-            UnifiServer::new(Arc::clone(&registry), false, coordinator, None, None).unwrap();
+        let server = UnifiServer::new(Arc::clone(&registry), false, coordinator, None).unwrap();
 
         // Initial state: no controllers, no clients
         assert_eq!(registry.names().len(), 0);
