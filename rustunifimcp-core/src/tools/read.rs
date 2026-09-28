@@ -82,6 +82,17 @@ pub struct QueryStatsArgs {
     /// End of the time window (Unix timestamp in seconds).
     #[serde(default)]
     pub end: Option<i64>,
+    /// Offset into the result set. Defaults to 0.
+    ///
+    /// The private stats surface returns its whole collection regardless of
+    /// what is asked for, so the window named here is applied locally, after
+    /// the fetch. A response holding exactly `limit` items may not be the
+    /// whole collection -- advance `offset` by `limit` to read the next page.
+    #[serde(default)]
+    pub offset: Option<u64>,
+    /// Maximum items to return. Defaults to 200.
+    #[serde(default)]
+    pub limit: Option<u32>,
 }
 
 /// Arguments to `unifi_search`.
@@ -396,12 +407,16 @@ pub async fn get_resource(
 
 /// Query statistics for a subject.
 ///
-/// Statistics are served from the Private v1 API surface.
+/// Statistics are served from the Private v1 API surface, which returns its
+/// whole collection regardless of `offset`/`limit`, so the page named in
+/// `args` is applied locally, after the fetch -- see
+/// [`crate::tools::pagination`].
 ///
 /// # Errors
 ///
 /// Returns [`UnifiError::SurfaceRequiresConfig`] if the controller has not
-/// opted into private API access.
+/// opted into private API access, or [`UnifiError::Malformed`] if `offset`/
+/// `limit` are invalid.
 pub async fn query_stats(
     client: &UnifiClient,
     args: &QueryStatsArgs,
@@ -430,14 +445,109 @@ pub async fn query_stats(
 
     let query_refs: Vec<(&str, &str)> = query.iter().map(|(k, v)| (*k, v.as_str())).collect();
 
-    client
+    let raw = client
         .get(
             ApiSurface::PrivateV1,
             endpoint,
             &[("site", site)],
             &query_refs,
         )
-        .await
+        .await?;
+
+    let data = crate::model::unwrap_enveloped_data(&raw)?.clone();
+    let page = crate::tools::pagination::paginate(data, args.offset, args.limit)?;
+
+    Ok(serde_json::json!({
+        "data": page.items,
+        "offset": page.offset,
+        "limit": page.limit,
+        "total": page.total,
+    }))
+}
+
+/// Items scanned per leg before `search` gives up and returns what it has.
+///
+/// Bounded so a search against a huge site cannot turn into an unbounded
+/// scan; generous enough that a real UniFi deployment -- at most a few
+/// thousand clients or devices per site -- is scanned in full.
+const SEARCH_SCAN_CAP: usize = 5000;
+
+/// Page size used when scanning a leg for search matches.
+const SEARCH_PAGE_SIZE: u32 = 200;
+
+/// One page of a collection `search` scans.
+///
+/// Exists so the scan-and-filter loop in [`scan_and_filter`] is testable
+/// against a canned in-memory collection instead of a live controller. The
+/// defect this fixes -- `unifi_search` matching only the first `limit` items
+/// on the whole site -- was invisible to any test that fed [`filter_by_query`]
+/// an already-truncated slice, because that function has always filtered
+/// correctly over whatever it is given. The bug was in how much it was given.
+trait PagedSource {
+    /// Fetch one page, in the same "asked for `limit`, may return fewer"
+    /// contract the Integration API honours.
+    async fn fetch_page(
+        &self,
+        offset: u64,
+        limit: u32,
+    ) -> Result<Vec<serde_json::Value>, UnifiError>;
+}
+
+/// A `PagedSource` over one Integration API collection endpoint.
+struct IntegrationLeg<'a> {
+    client: &'a UnifiClient,
+    path: &'a str,
+    site_uuid: &'a str,
+}
+
+impl PagedSource for IntegrationLeg<'_> {
+    async fn fetch_page(
+        &self,
+        offset: u64,
+        limit: u32,
+    ) -> Result<Vec<serde_json::Value>, UnifiError> {
+        let raw = self
+            .client
+            .get(
+                ApiSurface::Supported,
+                self.path,
+                &[("site", self.site_uuid)],
+                &[
+                    ("offset", &offset.to_string()),
+                    ("limit", &limit.to_string()),
+                ],
+            )
+            .await?;
+        Ok(crate::model::unwrap_enveloped_data(&raw)?.clone())
+    }
+}
+
+/// Scan a whole collection, page by page, and filter it by `query`.
+///
+/// Scans the whole collection -- bounded by [`SEARCH_SCAN_CAP`] -- before
+/// filtering, rather than filtering only the first page and calling it a
+/// search. A caller looking for a client past the first [`SEARCH_PAGE_SIZE`]
+/// clients on a large site must get a match, not a silent empty leg: the
+/// Integration API honours `offset`/`limit` itself, so a search that sent
+/// `limit=10` upstream and filtered only that page was searching the first
+/// ten clients on the site, not the site.
+async fn scan_and_filter<S: PagedSource>(
+    source: &S,
+    query: &str,
+    limit: usize,
+) -> Result<Vec<serde_json::Value>, UnifiError> {
+    let mut all = Vec::new();
+    let mut offset = 0u64;
+    loop {
+        let page = source.fetch_page(offset, SEARCH_PAGE_SIZE).await?;
+        let page_len = page.len();
+        all.extend(page);
+        if page_len < SEARCH_PAGE_SIZE as usize || all.len() >= SEARCH_SCAN_CAP {
+            break;
+        }
+        offset += u64::from(SEARCH_PAGE_SIZE);
+    }
+    Ok(filter_by_query(&all, query, limit))
 }
 
 /// Search across stations, devices, and sites.
@@ -470,20 +580,20 @@ pub async fn search(
     let mut devices_results = Vec::new();
     let mut sites_results = Vec::new();
 
-    // Search stations (clients) via Integration API
-    match client
-        .get(
-            ApiSurface::Supported,
-            "/proxy/network/integration/v1/sites/{site}/clients",
-            &[("site", &site_uuid)],
-            &[("limit", &limit.to_string())],
-        )
-        .await
+    // Search stations (clients) via Integration API, scanning the whole
+    // collection rather than only the first page.
+    match scan_and_filter(
+        &IntegrationLeg {
+            client,
+            path: "/proxy/network/integration/v1/sites/{site}/clients",
+            site_uuid: &site_uuid,
+        },
+        &args.query,
+        limit as usize,
+    )
+    .await
     {
-        Ok(stations) => {
-            let stations_data = crate::model::unwrap_enveloped_data(&stations)?;
-            stations_results = filter_by_query(stations_data, &args.query, limit as usize);
-        }
+        Ok(results) => stations_results = results,
         Err(UnifiError::SurfaceRequiresConfig { .. }) => {
             omitted.push("stations: controller has Integration API disabled".to_owned());
         }
@@ -493,20 +603,20 @@ pub async fn search(
         Err(e) => return Err(e),
     }
 
-    // Search devices via Integration API
-    match client
-        .get(
-            ApiSurface::Supported,
-            "/proxy/network/integration/v1/sites/{site}/devices",
-            &[("site", &site_uuid)],
-            &[("limit", &limit.to_string())],
-        )
-        .await
+    // Search devices via Integration API, scanning the whole collection
+    // rather than only the first page.
+    match scan_and_filter(
+        &IntegrationLeg {
+            client,
+            path: "/proxy/network/integration/v1/sites/{site}/devices",
+            site_uuid: &site_uuid,
+        },
+        &args.query,
+        limit as usize,
+    )
+    .await
     {
-        Ok(devices) => {
-            let devices_data = crate::model::unwrap_enveloped_data(&devices)?;
-            devices_results = filter_by_query(devices_data, &args.query, limit as usize);
-        }
+        Ok(results) => devices_results = results,
         Err(UnifiError::SurfaceRequiresConfig { .. }) => {
             omitted.push("devices: controller has Integration API disabled".to_owned());
         }
@@ -704,6 +814,15 @@ mod tests {
         assert_eq!(parsed.limit, Some(5));
     }
 
+    /// `unifi_query_stats` must accept the pagination cursor it documents.
+    #[test]
+    fn query_stats_args_parses_the_pagination_cursor() {
+        let raw = r#"{"controller":"home","subject":"device","offset":40,"limit":20}"#;
+        let parsed: super::QueryStatsArgs = serde_json::from_str(raw).expect("valid args");
+        assert_eq!(parsed.offset, Some(40));
+        assert_eq!(parsed.limit, Some(20));
+    }
+
     /// Search result shape must include partial and omitted fields.
     #[test]
     fn search_result_carries_partial_metadata() {
@@ -725,6 +844,97 @@ mod tests {
         if let Some(arr) = omitted {
             assert_eq!(arr.len(), 1);
         }
+    }
+
+    /// A fake [`super::PagedSource`] over an in-memory collection, paging it
+    /// the way the Integration API does: honours `offset`/`limit` for real,
+    /// so it can stand in for a live controller in [`scan_and_filter`] tests.
+    struct FakeSource {
+        items: Vec<serde_json::Value>,
+    }
+
+    impl super::PagedSource for FakeSource {
+        async fn fetch_page(
+            &self,
+            offset: u64,
+            limit: u32,
+        ) -> Result<Vec<serde_json::Value>, UnifiError> {
+            let start = usize::try_from(offset)
+                .unwrap_or(usize::MAX)
+                .min(self.items.len());
+            let end = start.saturating_add(limit as usize).min(self.items.len());
+            Ok(self.items[start..end].to_vec())
+        }
+    }
+
+    /// The reported defect: `unifi_search` matched only the first page of a
+    /// leg's collection, so a match past item 10 -- or past
+    /// `super::SEARCH_PAGE_SIZE` on a large site -- was never found.
+    ///
+    /// The fixture holds more items than one page, with every match sitting
+    /// in the second page, so this fails against the old code (which asked
+    /// upstream for exactly `limit` items and filtered only those) and passes
+    /// against `scan_and_filter`, which scans the whole collection first.
+    #[tokio::test]
+    async fn search_finds_matches_past_the_first_page() {
+        let page_size = super::SEARCH_PAGE_SIZE as usize;
+        let total = page_size * 2 + 50;
+
+        let items: Vec<serde_json::Value> = (0..total)
+            .map(|i| {
+                // Every match lives in the second page or later, well past
+                // where the old, unpaginated fetch ever looked.
+                let name = if i >= page_size {
+                    format!("special-widget-{i}")
+                } else {
+                    format!("ordinary-device-{i}")
+                };
+                serde_json::json!({ "name": name })
+            })
+            .collect();
+        let matching_count = total - page_size;
+
+        let source = FakeSource { items };
+
+        // limit above the number of matches: every match must come back.
+        let results = super::scan_and_filter(&source, "special-widget", matching_count + 10)
+            .await
+            .expect("scan succeeds");
+        assert_eq!(
+            results.len(),
+            matching_count,
+            "not every match past the first page was found"
+        );
+
+        // limit below the number of matches: capped, but not empty.
+        let capped = super::scan_and_filter(&source, "special-widget", 10)
+            .await
+            .expect("scan succeeds");
+        assert_eq!(capped.len(), 10, "limit must still bound the output");
+        for item in &capped {
+            assert!(
+                item["name"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("special-widget"),
+                "a non-matching item leaked through: {item}"
+            );
+        }
+    }
+
+    /// A leg with nothing beyond one page must not scan forever, and must
+    /// still find matches within that single page.
+    #[tokio::test]
+    async fn search_stops_after_one_short_page() {
+        let items: Vec<serde_json::Value> = (0..5)
+            .map(|i| serde_json::json!({ "name": format!("widget-{i}") }))
+            .collect();
+        let source = FakeSource { items };
+
+        let results = super::scan_and_filter(&source, "widget", 100)
+            .await
+            .expect("scan succeeds");
+        assert_eq!(results.len(), 5);
     }
 
     /// The all-legs-refused error message must be recognizable.
