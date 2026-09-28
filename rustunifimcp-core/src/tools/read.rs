@@ -522,6 +522,18 @@ impl PagedSource for IntegrationLeg<'_> {
     }
 }
 
+/// The result of scanning one leg: the matches found, and whether
+/// [`SEARCH_SCAN_CAP`] cut the scan short before the whole collection was
+/// seen.
+struct ScanResult {
+    /// Matches found within the items actually scanned.
+    items: Vec<serde_json::Value>,
+    /// `true` if the scan stopped at [`SEARCH_SCAN_CAP`] rather than running
+    /// out of pages -- meaning items past the cap were never looked at, and a
+    /// caller cannot conclude their query has no more matches on this leg.
+    capped: bool,
+}
+
 /// Scan a whole collection, page by page, and filter it by `query`.
 ///
 /// Scans the whole collection -- bounded by [`SEARCH_SCAN_CAP`] -- before
@@ -535,19 +547,27 @@ async fn scan_and_filter<S: PagedSource>(
     source: &S,
     query: &str,
     limit: usize,
-) -> Result<Vec<serde_json::Value>, UnifiError> {
+) -> Result<ScanResult, UnifiError> {
     let mut all = Vec::new();
     let mut offset = 0u64;
+    let mut capped = false;
     loop {
         let page = source.fetch_page(offset, SEARCH_PAGE_SIZE).await?;
         let page_len = page.len();
         all.extend(page);
-        if page_len < SEARCH_PAGE_SIZE as usize || all.len() >= SEARCH_SCAN_CAP {
+        if all.len() >= SEARCH_SCAN_CAP {
+            capped = page_len >= SEARCH_PAGE_SIZE as usize;
+            break;
+        }
+        if page_len < SEARCH_PAGE_SIZE as usize {
             break;
         }
         offset += u64::from(SEARCH_PAGE_SIZE);
     }
-    Ok(filter_by_query(&all, query, limit))
+    Ok(ScanResult {
+        items: filter_by_query(&all, query, limit),
+        capped,
+    })
 }
 
 /// Search across stations, devices, and sites.
@@ -576,6 +596,10 @@ pub async fn search(
     };
 
     let mut omitted = Vec::new();
+    // Legs refused outright (permission/config), not merely capped. A capped
+    // leg still searched (and matched over) thousands of items, so it must
+    // not count toward "nothing was searched" below.
+    let mut refused_legs = 0u8;
     let mut stations_results = Vec::new();
     let mut devices_results = Vec::new();
     let mut sites_results = Vec::new();
@@ -593,12 +617,22 @@ pub async fn search(
     )
     .await
     {
-        Ok(results) => stations_results = results,
+        Ok(result) => {
+            stations_results = result.items;
+            if result.capped {
+                omitted.push(format!(
+                    "stations: scanned first {SEARCH_SCAN_CAP} of \u{2265}{SEARCH_SCAN_CAP}; \
+                     refine the query"
+                ));
+            }
+        }
         Err(UnifiError::SurfaceRequiresConfig { .. }) => {
             omitted.push("stations: controller has Integration API disabled".to_owned());
+            refused_legs += 1;
         }
         Err(UnifiError::SurfaceRequiresScope { .. }) => {
             omitted.push("stations: token lacks required scope".to_owned());
+            refused_legs += 1;
         }
         Err(e) => return Err(e),
     }
@@ -616,12 +650,22 @@ pub async fn search(
     )
     .await
     {
-        Ok(results) => devices_results = results,
+        Ok(result) => {
+            devices_results = result.items;
+            if result.capped {
+                omitted.push(format!(
+                    "devices: scanned first {SEARCH_SCAN_CAP} of \u{2265}{SEARCH_SCAN_CAP}; \
+                     refine the query"
+                ));
+            }
+        }
         Err(UnifiError::SurfaceRequiresConfig { .. }) => {
             omitted.push("devices: controller has Integration API disabled".to_owned());
+            refused_legs += 1;
         }
         Err(UnifiError::SurfaceRequiresScope { .. }) => {
             omitted.push("devices: token lacks required scope".to_owned());
+            refused_legs += 1;
         }
         Err(e) => return Err(e),
     }
@@ -642,15 +686,19 @@ pub async fn search(
         }
         Err(UnifiError::SurfaceRequiresConfig { .. }) => {
             omitted.push("sites: controller has allow_private_api disabled".to_owned());
+            refused_legs += 1;
         }
         Err(UnifiError::SurfaceRequiresScope { .. }) => {
             omitted.push("sites: token lacks required scope".to_owned());
+            refused_legs += 1;
         }
         Err(e) => return Err(e),
     }
 
-    // If all legs were refused, that's an error
-    if omitted.len() == 3 {
+    // If all legs were refused, that's an error. A capped leg is not a
+    // refusal -- it searched (and matched over) thousands of items -- so it
+    // must not count here.
+    if refused_legs == 3 {
         return Err(UnifiError::Malformed(
             "all search legs refused: nothing was searched".to_owned(),
         ));
@@ -897,21 +945,22 @@ mod tests {
         let source = FakeSource { items };
 
         // limit above the number of matches: every match must come back.
-        let results = super::scan_and_filter(&source, "special-widget", matching_count + 10)
+        let scan = super::scan_and_filter(&source, "special-widget", matching_count + 10)
             .await
             .expect("scan succeeds");
         assert_eq!(
-            results.len(),
+            scan.items.len(),
             matching_count,
             "not every match past the first page was found"
         );
+        assert!(!scan.capped, "the whole collection fit under the cap");
 
         // limit below the number of matches: capped, but not empty.
-        let capped = super::scan_and_filter(&source, "special-widget", 10)
+        let limited = super::scan_and_filter(&source, "special-widget", 10)
             .await
             .expect("scan succeeds");
-        assert_eq!(capped.len(), 10, "limit must still bound the output");
-        for item in &capped {
+        assert_eq!(limited.items.len(), 10, "limit must still bound the output");
+        for item in &limited.items {
             assert!(
                 item["name"]
                     .as_str()
@@ -931,10 +980,60 @@ mod tests {
             .collect();
         let source = FakeSource { items };
 
-        let results = super::scan_and_filter(&source, "widget", 100)
+        let scan = super::scan_and_filter(&source, "widget", 100)
             .await
             .expect("scan succeeds");
-        assert_eq!(results.len(), 5);
+        assert_eq!(scan.items.len(), 5);
+        assert!(
+            !scan.capped,
+            "a short final page means the collection is exhausted"
+        );
+    }
+
+    /// Percy review F3 (MEC-549): hitting `SEARCH_SCAN_CAP` used to be silent
+    /// -- `search` reported `partial: false` on a site with more items than
+    /// the cap, even though it never looked at the rest. A leg whose scan
+    /// stops at the cap on a still-full page must say so.
+    #[tokio::test]
+    async fn a_scan_that_hits_the_cap_reports_itself_as_capped() {
+        let total = super::SEARCH_SCAN_CAP + 1;
+        let items: Vec<serde_json::Value> = (0..total)
+            .map(|i| serde_json::json!({ "name": format!("widget-{i}") }))
+            .collect();
+        let source = FakeSource { items };
+
+        let scan = super::scan_and_filter(&source, "widget", total)
+            .await
+            .expect("scan succeeds");
+        assert!(
+            scan.capped,
+            "a collection larger than SEARCH_SCAN_CAP must report itself as capped"
+        );
+        assert!(
+            scan.items.len() <= super::SEARCH_SCAN_CAP,
+            "the scan must not exceed the cap"
+        );
+    }
+
+    /// A collection whose scan ends on a short final page is not capped even
+    /// when there happen to be more matches than the caller's `limit`: the
+    /// source ran out of items on its own, distinct from the scan giving up
+    /// at [`super::SEARCH_SCAN_CAP`].
+    #[tokio::test]
+    async fn ending_on_a_short_page_below_the_cap_is_not_capped() {
+        let total = super::SEARCH_SCAN_CAP - 1;
+        let items: Vec<serde_json::Value> = (0..total)
+            .map(|i| serde_json::json!({ "name": format!("widget-{i}") }))
+            .collect();
+        let source = FakeSource { items };
+
+        let scan = super::scan_and_filter(&source, "widget", total)
+            .await
+            .expect("scan succeeds");
+        assert!(
+            !scan.capped,
+            "the collection was exhausted below the cap via a short final page"
+        );
     }
 
     /// The all-legs-refused error message must be recognizable.
