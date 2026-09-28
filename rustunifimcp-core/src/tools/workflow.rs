@@ -20,6 +20,17 @@ pub struct SiteHealthReportArgs {
     /// Site identifier; defaults to the controller's configured site.
     #[serde(default)]
     pub site: Option<String>,
+    /// Offset into `devices`. Defaults to 0.
+    ///
+    /// The report joins several surfaces before it has a device list to page,
+    /// so this is applied to the joined result, not to any one upstream
+    /// call. A response holding exactly `limit` devices may not be the whole
+    /// site -- advance `offset` by `limit` to read the next page.
+    #[serde(default)]
+    pub offset: Option<u64>,
+    /// Maximum devices to return. Defaults to 200.
+    #[serde(default)]
+    pub limit: Option<u32>,
 }
 
 /// Site health report response.
@@ -33,6 +44,12 @@ pub struct SiteHealthReport {
     pub partial: bool,
     /// What was omitted and why, one entry per omission.
     pub omitted: Vec<String>,
+    /// Offset `devices` was windowed from.
+    pub offset: u64,
+    /// The page size actually applied to `devices`.
+    pub limit: u32,
+    /// The number of devices in the site, before paging.
+    pub total: usize,
 }
 
 /// Arguments to `unifi_topology_report`.
@@ -44,6 +61,17 @@ pub struct TopologyReportArgs {
     /// Site identifier; defaults to the controller's configured site.
     #[serde(default)]
     pub site: Option<String>,
+    /// Offset into `devices`. Defaults to 0.
+    ///
+    /// Applied to the joined result: a response holding exactly `limit`
+    /// devices may not be the whole site -- advance `offset` by `limit` to
+    /// read the next page. `edges` and `networks` are not paged; on a large
+    /// site, expect them to dominate the response size.
+    #[serde(default)]
+    pub offset: Option<u64>,
+    /// Maximum devices to return. Defaults to 200.
+    #[serde(default)]
+    pub limit: Option<u32>,
 }
 
 /// Topology report response.
@@ -59,6 +87,12 @@ pub struct TopologyReport {
     pub partial: bool,
     /// What was omitted and why, one entry per omission.
     pub omitted: Vec<String>,
+    /// Offset `devices` was windowed from.
+    pub offset: u64,
+    /// The page size actually applied to `devices`.
+    pub limit: u32,
+    /// The number of devices in the site, before paging.
+    pub total: usize,
 }
 
 /// Arguments to `unifi_traffic_flow_report`.
@@ -76,6 +110,17 @@ pub struct TrafficFlowReportArgs {
     /// End of the time window (Unix timestamp in seconds).
     #[serde(default)]
     pub end: Option<i64>,
+    /// Offset into `clients`. Defaults to 0.
+    ///
+    /// Applied to the joined result: a response holding exactly `limit`
+    /// clients may not be the whole site -- advance `offset` by `limit` to
+    /// read the next page. `top_applications` is not paged; it is already
+    /// bounded to the top 10.
+    #[serde(default)]
+    pub offset: Option<u64>,
+    /// Maximum clients to return. Defaults to 200.
+    #[serde(default)]
+    pub limit: Option<u32>,
 }
 
 /// Traffic flow report response.
@@ -89,6 +134,12 @@ pub struct TrafficFlowReport {
     pub partial: bool,
     /// What was omitted and why, one entry per omission.
     pub omitted: Vec<String>,
+    /// Offset `clients` was windowed from.
+    pub offset: u64,
+    /// The page size actually applied to `clients`.
+    pub limit: u32,
+    /// The number of clients in the site, before paging.
+    pub total: usize,
 }
 
 /// Arguments to `unifi_firewall_audit`.
@@ -259,12 +310,17 @@ pub async fn site_health_report(
         devices_result
     };
 
+    let page = crate::tools::pagination::paginate(devices, args.offset, args.limit)?;
+
     let partial = !omitted.is_empty();
     Ok(SiteHealthReport {
-        devices,
+        devices: page.items,
         health: health_result,
         partial,
         omitted,
+        offset: page.offset,
+        limit: page.limit,
+        total: page.total,
     })
 }
 
@@ -371,13 +427,18 @@ pub async fn topology_report(
         ));
     }
 
+    let page = crate::tools::pagination::paginate(devices_result, args.offset, args.limit)?;
+
     let partial = !omitted.is_empty();
     Ok(TopologyReport {
         edges: edges_result,
-        devices: devices_result,
+        devices: page.items,
         networks: networks_result,
         partial,
         omitted,
+        offset: page.offset,
+        limit: page.limit,
+        total: page.total,
     })
 }
 
@@ -473,12 +534,17 @@ pub async fn traffic_flow_report(
         ));
     }
 
+    let page = crate::tools::pagination::paginate(clients_result, args.offset, args.limit)?;
+
     let partial = !omitted.is_empty();
     Ok(TrafficFlowReport {
-        clients: clients_result,
+        clients: page.items,
         top_applications: top_apps_result,
         partial,
         omitted,
+        offset: page.offset,
+        limit: page.limit,
+        total: page.total,
     })
 }
 
@@ -973,12 +1039,16 @@ mod tests {
             .map_err(|e| format!("unwrapping stats: {e}"))?;
 
         let devices = super::join_devices_with_stats(devices_data, stats_data);
+        let total = devices.len();
 
         Ok(super::SiteHealthReport {
             devices,
             health: serde_json::Value::Array(health_data.to_vec()),
             partial: false,
             omitted: Vec::new(),
+            offset: 0,
+            limit: crate::tools::pagination::DEFAULT_PAGE_SIZE,
+            total,
         })
     }
 
@@ -990,6 +1060,7 @@ mod tests {
     ) -> Result<super::SiteHealthReport, String> {
         let devices_data = crate::model::unwrap_enveloped_data(devices)
             .map_err(|e| format!("unwrapping devices: {e}"))?;
+        let total = devices_data.len();
 
         Ok(super::SiteHealthReport {
             devices: devices_data.to_vec(),
@@ -999,6 +1070,9 @@ mod tests {
                 "health: controller has allow_private_api disabled".to_owned(),
                 "device_stats: controller has allow_private_api disabled".to_owned(),
             ],
+            offset: 0,
+            limit: crate::tools::pagination::DEFAULT_PAGE_SIZE,
+            total,
         })
     }
 
@@ -1018,6 +1092,43 @@ mod tests {
             report.devices.len(),
             device_count,
             "the join dropped devices"
+        );
+    }
+
+    /// The report's device list must actually page: a caller asking for
+    /// fewer devices than the site has must get exactly that many, plus the
+    /// true site-wide total, not the whole joined list truncated for display
+    /// only.
+    ///
+    /// Uses a synthetic device list rather than the committed fixture, which
+    /// holds only one device -- too few to page over.
+    #[test]
+    fn the_health_report_pages_its_device_list() {
+        let full_count = 5;
+        let joined: Vec<serde_json::Value> = (0..full_count)
+            .map(|i| serde_json::json!({ "id": format!("device-{i}") }))
+            .collect();
+
+        let page =
+            crate::tools::pagination::paginate(joined, Some(0), Some(1)).expect("valid page");
+        let report = super::SiteHealthReport {
+            devices: page.items,
+            health: serde_json::Value::Null,
+            partial: false,
+            omitted: Vec::new(),
+            offset: page.offset,
+            limit: page.limit,
+            total: page.total,
+        };
+
+        assert_eq!(
+            report.devices.len(),
+            1,
+            "limit=1 must yield exactly one device"
+        );
+        assert_eq!(
+            report.total, full_count,
+            "total must report the whole site, not the page"
         );
     }
 
@@ -1052,6 +1163,9 @@ mod tests {
             networks: Vec::new(),
             partial: false,
             omitted: Vec::new(),
+            offset: 0,
+            limit: crate::tools::pagination::DEFAULT_PAGE_SIZE,
+            total: devices_data.len(),
         };
 
         let device_count = devices["data"].as_array().map_or(0, Vec::len);
@@ -1079,6 +1193,9 @@ mod tests {
             top_applications: top_apps,
             partial: false,
             omitted: Vec::new(),
+            offset: 0,
+            limit: crate::tools::pagination::DEFAULT_PAGE_SIZE,
+            total: joined.len(),
         };
 
         let client_count = clients["data"].as_array().map_or(0, Vec::len);
