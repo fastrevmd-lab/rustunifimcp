@@ -3,8 +3,8 @@
 # Install as /etc/logrotate.d/rustunifimcp-audit (root:root, mode 0644).
 # Enable the sink by passing --audit-log-file (or RMCP_AUDIT_LOG_FILE). The
 # path below matches the packaged systemd unit:
-# - user:group = unifimcp:unifimcp (systemd StateDirectory=unifimcp)
-# - path = /var/lib/unifimcp/audit.jsonl (writable under ProtectSystem=strict)
+#   - user:group = unifimcp:unifimcp (systemd StateDirectory=unifimcp)
+#   - path = /var/lib/unifimcp/audit.jsonl (writable under ProtectSystem=strict)
 # Adjust paths/retention to your policy.
 #
 # rename-mode rotation is used:
