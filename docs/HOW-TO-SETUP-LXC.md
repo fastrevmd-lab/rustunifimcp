@@ -236,6 +236,8 @@ The secret is printed **once** and stored hashed. Two things worth knowing:
 - `--tools '*'` is a wildcard that resolves to *read-only tools only*. Write
   tools must be named explicitly, so a wildcard token calling
   `create_unifi_change_set` gets `insufficient_scope`. That is deliberate.
+- For a token that will call `unifi_approve_change_set`, add `--actor-type
+  human`; agent and unattributed callers are refused.
 
 ## 8. Verify
 

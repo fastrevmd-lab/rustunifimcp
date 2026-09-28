@@ -5,7 +5,7 @@ use clap::Parser;
 use mecmcp_audit::AuditFileSink;
 use mecmcp_auth::NoGrant;
 use mecmcp_runtime::cli::{Command, TokenAction};
-use mecmcp_transport::{LimitsConfig, serve_router};
+use mecmcp_transport::serve_router;
 use rmcp::ServiceExt;
 use rustunifimcp::cli::{TokenCli, TokenCommand, UnifiCli};
 use rustunifimcp::http_transport::build_http_router;
@@ -732,14 +732,19 @@ async fn serve_http(
         audit_sink,
     )?;
 
+    let limits = cli.limits.to_limits_config();
+    limits
+        .validate()
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
+
     let shutdown = CancellationToken::new();
     let router = build_http_router(
         handler,
         token_store,
         cli.common.allowed_host.clone(),
         cli.common.allowed_origin.clone(),
-        LimitsConfig::default(),
-        false, // metrics
+        limits,
+        cli.enable_metrics,
         cli.common.allow_insecure_bind,
         shutdown.clone(),
     )?;
