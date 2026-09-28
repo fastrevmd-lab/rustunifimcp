@@ -6,6 +6,37 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+- **Re-pinned the `mecmcp-*` crates from `v0.23.1` to `v0.24.1`** (MEC-504).
+  Brings in mecmcp#390 (the human-approver gate: `ChangesetCoordinator::approve_change_set`
+  now takes an `approver_actor_type: mecmcp_audit::ActorType` and refuses
+  anything but `Human`), mecmcp#377 (`/healthz` and `/readyz`, unauthenticated
+  and always mounted), mecmcp#387 (`mecmcp-http`'s configured private CA now
+  replaces the public root store instead of adding to it, and
+  `mecmcp-transport`'s `test_harness`/`test_client` moved behind a `test-util`
+  feature), and MEC-347 (`LimitsConfig::default()` now rate-limits by default:
+  50 requests/second and a burst of 100 per IP, 20/s and a burst of 40 per
+  token).
+- **`unifi_approve_change_set` now passes the caller's server-verified actor
+  type through to mecmcp's `ChangesetCoordinator::approve_change_set`.** A
+  change set cannot be approved by a caller whose token declares
+  `actor_type: agent`, or by an unattributed (stdio) caller — only a
+  distinct `actor_type: human` principal can approve.
+  **Upgrading:** every token minted before this release has `actor_type:
+  unknown` and can no longer approve change sets. Re-mint each approver's
+  token with `rustunifimcp token add ... --actor-type human`; other tokens
+  are unaffected. See [README § Change control](README.md#change-control).
+- **Per-IP and per-token rate limiting is now on by default over HTTP**, and
+  every `LimitsConfig` field is exposed as a CLI flag (`--max-requests-per-second-per-ip`
+  and friends — see `rustunifimcp --help`) instead of being hardcoded to
+  `LimitsConfig::default()`.
+- **Added `--enable-metrics`** to expose a Prometheus `/metrics` endpoint
+  (streamable-http only, off by default). As of `mecmcp-transport` 0.24.0,
+  `/metrics` is additionally restricted to loopback callers regardless of
+  this flag.
+- **`/healthz` and `/readyz`** are now served unauthenticated on every HTTP
+  deployment, mounted by `mecmcp-transport`'s router assembly. This server
+  wires in no readiness checks of its own, so `/readyz` reports ready
+  whenever the process is up.
 - Raised MSRV to 1.89
 - **`unifi_stage_change` now enforces a per-kind writable-field allowlist** (M11) —
   a staged `create`/`update` body may only set the fields this server's read model

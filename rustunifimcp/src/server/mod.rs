@@ -339,6 +339,27 @@ impl UnifiServer {
         caller.map_or_else(|| "unknown".to_owned(), |ctx| ctx.token_name.clone())
     }
 
+    /// Map a caller's server-verified `mecmcp_auth::ActorType` to the
+    /// `mecmcp_audit::ActorType` mecmcp's `approve_change_set` requires.
+    ///
+    /// `None` -- no authenticated caller context, i.e. the stdio transport --
+    /// maps to `Unknown` rather than `Human`. Inventing `Human` for an
+    /// unattributed caller would let stdio silently satisfy the human-approver
+    /// gate; `Unknown` is the honest fact, and `approve_change_set` refuses it
+    /// exactly like it refuses `Agent`.
+    fn approver_actor_type(
+        caller: Option<&mecmcp_auth::CallerCtx<NoGrant>>,
+    ) -> mecmcp_audit::ActorType {
+        match caller {
+            Some(ctx) => match ctx.actor_type {
+                mecmcp_auth::ActorType::Human => mecmcp_audit::ActorType::Human,
+                mecmcp_auth::ActorType::Agent => mecmcp_audit::ActorType::Agent,
+                mecmcp_auth::ActorType::Unknown => mecmcp_audit::ActorType::Unknown,
+            },
+            None => mecmcp_audit::ActorType::Unknown,
+        }
+    }
+
     /// Fetch a change set, refusing a controller that does not own it.
     ///
     /// The coordinator addresses a change set by `(id, device)` and refuses a
@@ -1651,6 +1672,13 @@ impl UnifiServer {
         // so an approval must not run while a plan is half-published.
         let _approving = self.plan_lock.lock().await;
 
+        // Truthful, not permissive: a stdio caller carries no verified token
+        // entry, so its actor type is unknown rather than assumed human. mecmcp's
+        // `approve_change_set` refuses anything but `Human` (the house rule that
+        // a human approves), which is exactly the outcome an unattributed caller
+        // should get.
+        let approver_actor_type = Self::approver_actor_type(caller.as_ref());
+
         let outcome = if approver == record.owner {
             if !self.lab_mode {
                 return tool_error(
@@ -1672,6 +1700,7 @@ impl UnifiServer {
                     args.controller.clone(),
                     approver.clone(),
                     record.digest.clone(),
+                    approver_actor_type,
                 )
                 .await
         };
@@ -2246,6 +2275,67 @@ mod tests {
         );
     }
 
+    /// MEC-504: a stdio caller (no verified token entry) must map to
+    /// `Unknown`, never `Human`. `Human` is what mecmcp's
+    /// `approve_change_set` requires, so inventing it for an unattributed
+    /// caller would let stdio silently satisfy the human-approver gate.
+    #[test]
+    fn approver_actor_type_maps_stdio_to_unknown_not_human() {
+        assert_eq!(
+            UnifiServer::approver_actor_type(None),
+            mecmcp_audit::ActorType::Unknown
+        );
+    }
+
+    /// A token minted with `actor_type: agent` must carry `Agent` through to
+    /// the coordinator, not `Human` — an agent-held token must not be able to
+    /// approve its own change set by riding through this mapping.
+    #[test]
+    fn approver_actor_type_carries_agent_through_not_human() {
+        let caller = mecmcp_auth::CallerCtx::<NoGrant> {
+            token_name: "agent-token".to_owned(),
+            devices: mecmcp_auth::ScopeSet::Wildcard,
+            tools: mecmcp_auth::ScopeSet::Wildcard,
+            grant: None,
+            provider: None,
+            provider_tier: None,
+            on_behalf_of: None,
+            actor_type: mecmcp_auth::ActorType::Agent,
+            client_name: None,
+            model_id: None,
+            session_id: None,
+            request_id: uuid::Uuid::new_v4(),
+        };
+        assert_eq!(
+            UnifiServer::approver_actor_type(Some(&caller)),
+            mecmcp_audit::ActorType::Agent
+        );
+    }
+
+    /// A token minted with `actor_type: human` must carry `Human` through —
+    /// the one case `approve_change_set` actually accepts.
+    #[test]
+    fn approver_actor_type_carries_human_through() {
+        let caller = mecmcp_auth::CallerCtx::<NoGrant> {
+            token_name: "human-token".to_owned(),
+            devices: mecmcp_auth::ScopeSet::Wildcard,
+            tools: mecmcp_auth::ScopeSet::Wildcard,
+            grant: None,
+            provider: None,
+            provider_tier: None,
+            on_behalf_of: None,
+            actor_type: mecmcp_auth::ActorType::Human,
+            client_name: None,
+            model_id: None,
+            session_id: None,
+            request_id: uuid::Uuid::new_v4(),
+        };
+        assert_eq!(
+            UnifiServer::approver_actor_type(Some(&caller)),
+            mecmcp_audit::ActorType::Human
+        );
+    }
+
     /// The router and the registry must agree, in both directions.
     ///
     /// A name in `TOOL_NAMES` the server does not serve is a promise it cannot
@@ -2443,7 +2533,13 @@ mod tests {
         let (id, digest) = (record.id.clone(), record.digest.clone());
         coordinator.insert_change_set(record).await.expect("insert");
         coordinator
-            .approve_change_set(id.clone(), "home".to_owned(), "bob".to_owned(), digest)
+            .approve_change_set(
+                id.clone(),
+                "home".to_owned(),
+                "bob".to_owned(),
+                digest,
+                mecmcp_audit::ActorType::Human,
+            )
             .await
             .expect("a second principal approves");
 
@@ -2475,7 +2571,13 @@ mod tests {
         // earlier of the two gates.
         assert!(
             coordinator
-                .approve_change_set(id.clone(), "home".to_owned(), "bob".to_owned(), digest)
+                .approve_change_set(
+                    id.clone(),
+                    "home".to_owned(),
+                    "bob".to_owned(),
+                    digest,
+                    mecmcp_audit::ActorType::Human
+                )
                 .await
                 .is_err(),
             "an expired change set must not be approvable"
@@ -2520,7 +2622,13 @@ mod tests {
 
         assert!(
             coordinator
-                .approve_change_set(id, "home".to_owned(), "bob".to_owned(), stale)
+                .approve_change_set(
+                    id,
+                    "home".to_owned(),
+                    "bob".to_owned(),
+                    stale,
+                    mecmcp_audit::ActorType::Human
+                )
                 .await
                 .is_err(),
             "an approval naming the old digest must not bind to the new plan"
@@ -2558,7 +2666,13 @@ mod tests {
         record.expires_at_unix = unix_seconds_now().saturating_add(2);
         coordinator.insert_change_set(record).await.expect("insert");
         coordinator
-            .approve_change_set(id.clone(), "home".to_owned(), "bob".to_owned(), digest)
+            .approve_change_set(
+                id.clone(),
+                "home".to_owned(),
+                "bob".to_owned(),
+                digest,
+                mecmcp_audit::ActorType::Human,
+            )
             .await
             .expect("approved inside the window");
 
@@ -2641,7 +2755,13 @@ mod tests {
         coordinator.insert_change_set(record).await.expect("insert");
 
         coordinator
-            .approve_change_set(id.clone(), "home".to_owned(), "bob".to_owned(), digest)
+            .approve_change_set(
+                id.clone(),
+                "home".to_owned(),
+                "bob".to_owned(),
+                digest,
+                mecmcp_audit::ActorType::Human,
+            )
             .await
             .expect("approve");
 
@@ -2856,7 +2976,13 @@ mod tests {
         let (id, digest) = (record.id.clone(), record.digest.clone());
         coordinator.insert_change_set(record).await.expect("insert");
         coordinator
-            .approve_change_set(id.clone(), "home".to_owned(), "bob".to_owned(), digest)
+            .approve_change_set(
+                id.clone(),
+                "home".to_owned(),
+                "bob".to_owned(),
+                digest,
+                mecmcp_audit::ActorType::Human,
+            )
             .await
             .expect("a second principal approves");
 
