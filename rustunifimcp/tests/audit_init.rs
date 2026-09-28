@@ -183,3 +183,102 @@ fn an_unwritable_audit_path_fails_startup() {
          hit; got:\n{stderr}"
     );
 }
+
+/// SIGHUP must reopen the audit file in place so a `rename`-mode logrotate
+/// (see `packaging/logrotate/rustunifimcp-audit`) is lossless: the record
+/// logrotate's `postrotate` script provokes must land in the new inode at the
+/// original path, not the renamed one the old descriptor still points at.
+///
+/// This drives the real binary rather than calling `perform_sighup_reload`
+/// directly, because an `AuditFileSink` can only be constructed through
+/// `mecmcp_audit::init_tracing`'s process-global subscriber, and that isn't
+/// something a unit test can fabricate without a test-only constructor this
+/// crate does not own.
+#[cfg(unix)]
+#[test]
+fn sighup_reopens_the_audit_file_for_lossless_rotation() {
+    let controllers = controllers_file();
+    let audit_dir = tempfile::tempdir().expect("audit dir");
+    let audit_path = audit_dir.path().join("audit.jsonl");
+    let rotated_path = audit_dir.path().join("audit.jsonl.1");
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_rustunifimcp"))
+        .args([
+            "--controllers-file",
+            controllers.path().to_str().expect("utf-8 path"),
+            "--lab-mode",
+            "--audit-format",
+            "json",
+            "--audit-log-file",
+            audit_path.to_str().expect("utf-8 path"),
+        ])
+        // Left open (not `Stdio::null()`) so the stdio transport keeps
+        // waiting instead of seeing immediate EOF and exiting before the
+        // signal can be delivered.
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn rustunifimcp");
+
+    poll_until(Duration::from_secs(10), || {
+        std::fs::read_to_string(&audit_path).is_ok_and(|body| !body.is_empty())
+    });
+
+    let pre_rotation = std::fs::read_to_string(&audit_path).expect("read audit file");
+    assert!(
+        pre_rotation.contains("lab mode"),
+        "expected the startup lab-mode record before rotation, got: {pre_rotation}"
+    );
+
+    // Simulate logrotate's rename step: move the live file aside.
+    std::fs::rename(&audit_path, &rotated_path).expect("rename audit file");
+
+    // Simulate logrotate's postrotate step: signal the server.
+    let status = Command::new("kill")
+        .args(["-HUP", &child.id().to_string()])
+        .status()
+        .expect("send SIGHUP");
+    assert!(status.success(), "kill -HUP must succeed");
+
+    poll_until(Duration::from_secs(10), || audit_path.exists());
+    poll_until(Duration::from_secs(10), || {
+        std::fs::read_to_string(&audit_path).is_ok_and(|body| body.contains("audit file reopened"))
+    });
+
+    let post_rotation = std::fs::read_to_string(&audit_path).expect("read reopened audit file");
+    assert!(
+        post_rotation.contains("audit file reopened"),
+        "the reopened file must carry the record written after reopen, got: {post_rotation}"
+    );
+
+    let rotated_final = std::fs::read_to_string(&rotated_path).expect("read rotated audit file");
+    assert!(
+        rotated_final.contains("lab mode"),
+        "the rotated file must keep the pre-rotation record intact"
+    );
+    assert!(
+        !rotated_final.contains("audit file reopened"),
+        "a post-rotation record must not land in the renamed file -- that is \
+         exactly the data loss this SIGHUP wiring exists to prevent, got: {rotated_final}"
+    );
+
+    // Let the process exit cleanly: close stdin so the stdio transport sees
+    // EOF, then reap it (bounded, as `run()` above does).
+    drop(child.stdin.take());
+    let _ = wait_with_timeout(child, Duration::from_secs(10));
+}
+
+fn poll_until(timeout: Duration, mut condition: impl FnMut() -> bool) {
+    let start = std::time::Instant::now();
+    loop {
+        if condition() {
+            return;
+        }
+        assert!(
+            start.elapsed() <= timeout,
+            "condition did not become true within {timeout:?}"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}

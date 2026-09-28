@@ -12,3 +12,12 @@ chown root:unifimcp /etc/unifimcp/api.key
 ```
 
 For production deployments, follow the installer's output instructions.
+
+## Audit log rotation
+
+`packaging/lxc/install.sh` does not install `packaging/logrotate/rustunifimcp-audit`.
+If you enable the audit file sink (`--audit-log-file`), copy the fragment in by hand:
+
+```bash
+install -m 0644 -o root -g root packaging/logrotate/rustunifimcp-audit /etc/logrotate.d/rustunifimcp-audit
+```

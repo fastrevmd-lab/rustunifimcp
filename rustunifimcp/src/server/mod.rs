@@ -1,6 +1,5 @@
 //! The MCP server handler.
 
-use mecmcp_audit::AuditFileSink;
 use mecmcp_auth::NoGrant;
 use mecmcp_changeset::{
     ApplyHandle, ChangeSetRecord, ChangeSetState, ChangesetCoordinator, PreviewRecord,
@@ -88,12 +87,6 @@ pub struct UnifiServer {
     /// two apply records belong to paths this server drives, so it needs the
     /// recorder too.
     evidence: Option<Arc<mecmcp_audit::recorder::EvidenceRecorder>>,
-    /// Audit file sink, when the JSON audit log file is configured.
-    ///
-    /// Cloned into the sighup reload handler so the same file can be reopened
-    /// in place for lossless rotation (rename + signal, not copytruncate).
-    #[allow(dead_code)]
-    audit_sink: Option<Arc<AuditFileSink>>,
     /// Serialises changing a plan against approving one.
     ///
     /// The recorder keys its diff hash by change-set id, and the coordinator
@@ -143,7 +136,6 @@ impl UnifiServer {
         lab_mode: bool,
         coordinator: Arc<ChangesetCoordinator>,
         evidence: Option<Arc<mecmcp_audit::recorder::EvidenceRecorder>>,
-        audit_sink: Option<Arc<AuditFileSink>>,
     ) -> Result<Self, UnifiError> {
         let clients = Self::build_clients(&registry)?;
         Ok(Self {
@@ -153,7 +145,6 @@ impl UnifiServer {
             coordinator,
             drafts: Arc::new(std::sync::RwLock::new(BTreeMap::new())),
             evidence,
-            audit_sink,
             plan_lock: Arc::new(tokio::sync::Mutex::new(())),
             tool_router: Self::unifi_tool_router(),
         })
@@ -2683,7 +2674,7 @@ mod tests {
             .await
             .expect("a second principal approves");
 
-        let server = UnifiServer::new(controller_registry(), true, coordinator.clone(), None, None)
+        let server = UnifiServer::new(controller_registry(), true, coordinator.clone(), None)
             .expect("server");
 
         let refused = call(
