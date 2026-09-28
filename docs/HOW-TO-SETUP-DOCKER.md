@@ -71,6 +71,10 @@ The secret prints **once** and is stored hashed. `--tools '*'` resolves to
 **read-only tools only**; write tools must be named explicitly, so a wildcard
 token calling a change-set tool gets `insufficient_scope`. That is deliberate.
 
+If this token will call `unifi_approve_change_set`, add `--actor-type
+human`: the server refuses approvals from any token whose actor type is
+`agent` or unset.
+
 Then lock the modes down:
 
 ```bash

@@ -35,6 +35,12 @@ uuid.workspace = true
 rcgen.workspace = true
 rmcp = { workspace = true, features = ["client"] }
 tempfile = "3"
+# Test-only: the HTTP integration test drives the real router with
+# `mecmcp_transport::test_harness::serve_on_loopback`. mecmcp 0.24.0 (#387)
+# moved that behind this feature and dropped its `ureq` dependency from the
+# normal (non-test-util) dependency graph.
+mecmcp-transport = { workspace = true, features = ["test-util"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 
 [lints]
 workspace = true

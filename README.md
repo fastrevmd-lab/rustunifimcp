@@ -96,10 +96,26 @@ commit. The change-set lifecycle is implemented with client-side pre-image
 capture, local validation, sequential apply, and best-effort rollback — and the
 tool descriptions say so. An operator approving a UniFi change set is not
 getting commit-confirmed semantics, and the server does not pretend otherwise.
+`unifi_approve_change_set` requires a human approver: the server passes the
+caller's token `actor_type` through to mecmcp, which refuses any approval
+from an `agent` or unattributed (stdio) caller — only `actor_type: human`
+can approve. Mint the approver's token with `rustunifimcp token add ...
+--actor-type human`. `actor_type` is a claim the operator makes at mint
+time, not something the server proves; a token tagged `human` but handed to
+an LLM agent defeats the gate.
 
 **Multi-controller.** Controllers live in an inventory registry rather than
 environment variables, so one instance can front several and a token can be
 scoped to a subset.
+
+**HTTP defaults are metered, not open.** Per-IP and per-token request rates,
+concurrent session counts, and body-size limits are all enforced by default
+(`LimitsConfig::default()`); every limit is also a CLI flag (see
+`rustunifimcp --help`), so an operator can tune them without a fork. An
+unauthenticated `/healthz` (process up) and `/readyz` (no dependency checks
+configured, so "ready" tracks "up") are always mounted. `/metrics` is off by
+default (`--enable-metrics`) and, when enabled, restricted to loopback
+callers.
 
 ## License
 
