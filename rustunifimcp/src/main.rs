@@ -2,6 +2,7 @@
 
 use anyhow::{Context as _, Result, bail};
 use clap::Parser;
+use mecmcp_audit::AuditFileSink;
 use mecmcp_auth::NoGrant;
 use mecmcp_runtime::cli::{Command, TokenAction};
 use mecmcp_transport::{LimitsConfig, serve_router};
@@ -134,6 +135,9 @@ fn init_token_audit() {
 /// sink, and optional journald — configured from the shared `--audit-*`
 /// flags, the same way every sibling mecmcp server wires them.
 ///
+/// The returned `AuditFileSink` can be used to reopen the file on SIGHUP
+/// for log rotation.
+///
 /// # Errors
 ///
 /// Returns an error when `--audit-redact` does not parse, or when
@@ -142,7 +146,9 @@ fn init_token_audit() {
 /// logged and ignored, because a server that starts anyway is a server that
 /// runs with no audit trail while believing -- and telling nobody -- that it
 /// has one.
-fn init_audit(args: &mecmcp_runtime::cli::Cli) -> Result<()> {
+fn init_audit(
+    args: &mecmcp_runtime::cli::Cli,
+) -> Result<Option<Arc<AuditFileSink>>, anyhow::Error> {
     let redaction = if args.audit_redact.trim().is_empty() {
         None
     } else {
@@ -154,14 +160,18 @@ fn init_audit(args: &mecmcp_runtime::cli::Cli) -> Result<()> {
             .map_err(|error| anyhow::anyhow!("invalid --audit-redact: {error}"))?,
         )
     };
-    mecmcp_audit::init_tracing(&mecmcp_audit::AuditConfig {
+    let audit_config = mecmcp_audit::AuditConfig {
         format: mecmcp_audit::AuditFormat::parse(&args.audit_format),
         audit_log_file: args.audit_log_file.clone(),
         redaction,
         journald: args.audit_journald,
-    })
-    .map_err(|e| anyhow::anyhow!("initializing audit tracing: {e}"))?;
-    Ok(())
+    };
+
+    match mecmcp_audit::init_tracing(&audit_config) {
+        Ok(Some(sink)) => Ok(Some(Arc::new(sink))),
+        Ok(None) => Ok(None),
+        Err(e) => Err(anyhow::anyhow!("initializing audit tracing: {e}")),
+    }
 }
 
 /// A token-mutation audit record, built before the mutation and emitted after.
@@ -441,7 +451,7 @@ async fn run_inner() -> Result<()> {
     // than starting with a configured audit file it could not open, and `?`
     // here means this server does the same rather than swallowing that error
     // and running unaudited.
-    init_audit(&cli.common)?;
+    let audit_sink = init_audit(&cli.common)?;
 
     if cli.lab_mode() {
         tracing::warn!(
@@ -515,10 +525,12 @@ async fn run_inner() -> Result<()> {
         mecmcp_runtime::cli::Transport::Stdio => {
             // SIGHUP reloads the inventory and rebuilds clients.
             // Clone the server for the reload handler; serve_stdio consumes the original.
-            install_sighup_reload(registry, Some(server.clone()), None)?;
+            install_sighup_reload(registry, Some(server.clone()), None, audit_sink)?;
             serve_stdio(server).await
         }
-        mecmcp_runtime::cli::Transport::StreamableHttp => serve_http(server, &cli, registry).await,
+        mecmcp_runtime::cli::Transport::StreamableHttp => {
+            serve_http(server, &cli, registry, audit_sink).await
+        }
     };
 
     // Dropping the service stops its worker but deliberately does not flush:
@@ -570,6 +582,7 @@ fn load_listener_tls(args: &mecmcp_runtime::cli::Cli) -> Result<Option<Arc<rustl
 /// - Controller inventory is reloaded from disk
 /// - HTTP clients are rebuilt from the new inventory
 /// - Token store is reloaded (HTTP mode only)
+/// - Audit file is reopened if configured (for log rotation)
 ///
 /// A reload failure logs at `warn` and retains the previous configuration rather
 /// than terminating the running server.
@@ -577,72 +590,112 @@ fn load_listener_tls(args: &mecmcp_runtime::cli::Cli) -> Result<Option<Arc<rustl
 /// # Errors
 ///
 /// Returns error if the signal handler could not be registered.
-fn install_sighup_reload(
-    registry: Arc<rustunifimcp_core::inventory::ControllerRegistry>,
-    server: Option<UnifiServer>,
-    token_store: Option<Arc<mecmcp_auth::TokenStoreFile<mecmcp_auth::NoGrant>>>,
-) -> std::io::Result<()> {
-    mecmcp_runtime::signals::install_hup_handler(move || {
-        // Reload controller inventory.
-        let registry_reloaded = match registry.reload() {
+/// One SIGHUP reload pass: reload the inventory, rebuild clients on success,
+/// reload the token store, and reopen the audit file. Pulled out of the
+/// closure `install_sighup_reload` hands to the signal handler so the
+/// reopen branch is reachable without going through signal delivery.
+fn perform_sighup_reload(
+    registry: &rustunifimcp_core::inventory::ControllerRegistry,
+    server: Option<&UnifiServer>,
+    token_store: Option<&mecmcp_auth::TokenStoreFile<mecmcp_auth::NoGrant>>,
+    audit_sink: Option<&AuditFileSink>,
+) {
+    // Reload controller inventory.
+    let registry_reloaded = match registry.reload() {
+        Ok(count) => {
+            tracing::info!(
+                target: "audit",
+                controllers = count,
+                "controller inventory reloaded"
+            );
+            true
+        }
+        Err(error) => {
+            tracing::warn!(
+                target: "audit",
+                %error,
+                "controller inventory reload failed; retaining previous snapshot"
+            );
+            false
+        }
+    };
+
+    // Rebuild clients if inventory reload succeeded.
+    if registry_reloaded && let Some(srv) = server {
+        match srv.rebuild_clients() {
             Ok(count) => {
                 tracing::info!(
                     target: "audit",
-                    controllers = count,
-                    "controller inventory reloaded"
+                    clients = count,
+                    "HTTP clients rebuilt from reloaded inventory"
                 );
-                true
             }
             Err(error) => {
                 tracing::warn!(
                     target: "audit",
                     %error,
-                    "controller inventory reload failed; retaining previous snapshot"
+                    "client rebuild failed; retaining previous clients"
                 );
-                false
-            }
-        };
-
-        // Rebuild clients if inventory reload succeeded.
-        if registry_reloaded && let Some(ref srv) = server {
-            match srv.rebuild_clients() {
-                Ok(count) => {
-                    tracing::info!(
-                        target: "audit",
-                        clients = count,
-                        "HTTP clients rebuilt from reloaded inventory"
-                    );
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        target: "audit",
-                        %error,
-                        "client rebuild failed; retaining previous clients"
-                    );
-                }
             }
         }
+    }
 
-        // Reload token store if present (HTTP mode only).
-        if let Some(ref store) = token_store {
-            match store.reload() {
-                Ok(()) => {
-                    let count = store.store().len();
-                    tracing::info!(
-                        target: "audit",
-                        tokens = count,
-                        "token store reloaded"
-                    );
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        target: "audit",
-                        %error,
-                        "token store reload failed; retaining previous snapshot"
-                    );
-                }
+    // Reload token store if present (HTTP mode only).
+    if let Some(store) = token_store {
+        match store.reload() {
+            Ok(()) => {
+                let count = store.store().len();
+                tracing::info!(
+                    target: "audit",
+                    tokens = count,
+                    "token store reloaded"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    target: "audit",
+                    %error,
+                    "token store reload failed; retaining previous snapshot"
+                );
             }
         }
+    }
+
+    // Reopen audit file if configured (for lossless log rotation).
+    if let Some(sink) = audit_sink {
+        match sink.reopen() {
+            Ok(()) => {
+                tracing::info!(
+                    target: "audit",
+                    path = %sink.path().display(),
+                    "audit file reopened"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    target: "audit",
+                    %error,
+                    path = %sink.path().display(),
+                    "audit file reopen failed"
+                );
+            }
+        }
+    }
+}
+
+fn install_sighup_reload(
+    registry: Arc<rustunifimcp_core::inventory::ControllerRegistry>,
+    server: Option<UnifiServer>,
+    token_store: Option<Arc<mecmcp_auth::TokenStoreFile<mecmcp_auth::NoGrant>>>,
+    audit_sink: Option<Arc<AuditFileSink>>,
+) -> std::io::Result<()> {
+    mecmcp_runtime::signals::install_hup_handler(move || {
+        perform_sighup_reload(
+            &registry,
+            server.as_ref(),
+            token_store.as_deref(),
+            audit_sink.as_deref(),
+        );
     })
 }
 
@@ -661,6 +714,7 @@ async fn serve_http(
     handler: UnifiServer,
     cli: &UnifiCli,
     registry: Arc<rustunifimcp_core::inventory::ControllerRegistry>,
+    audit_sink: Option<Arc<AuditFileSink>>,
 ) -> Result<()> {
     // Load token store if provided.
     let token_store = if let Some(ref path) = cli.common.tokens_file {
@@ -671,7 +725,12 @@ async fn serve_http(
 
     // Install SIGHUP handler that reloads inventory, rebuilds clients, and reloads token store.
     // Clone the handler for the reload callback; build_http_router consumes the original.
-    install_sighup_reload(registry, Some(handler.clone()), token_store.clone())?;
+    install_sighup_reload(
+        registry,
+        Some(handler.clone()),
+        token_store.clone(),
+        audit_sink,
+    )?;
 
     let shutdown = CancellationToken::new();
     let router = build_http_router(
@@ -1012,7 +1071,7 @@ mod tests {
         let server = UnifiServer::new(Arc::clone(&registry), false, coordinator, None).unwrap();
 
         // Should install successfully without a token store.
-        let result = install_sighup_reload(registry, Some(server), None);
+        let result = install_sighup_reload(registry, Some(server), None, None);
         assert!(result.is_ok());
     }
 
@@ -1066,7 +1125,7 @@ mod tests {
         let token_store = Arc::new(mecmcp_auth::TokenStoreFile::load(tokens_file.path()).unwrap());
 
         // Should install successfully with a token store.
-        let result = install_sighup_reload(registry, Some(server), Some(token_store));
+        let result = install_sighup_reload(registry, Some(server), Some(token_store), None);
         assert!(result.is_ok());
     }
 
