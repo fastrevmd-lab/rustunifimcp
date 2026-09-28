@@ -130,6 +130,40 @@ fn init_token_audit() {
         .try_init();
 }
 
+/// Install the server's audit subscriber: stderr, an optional audit-file
+/// sink, and optional journald — configured from the shared `--audit-*`
+/// flags, the same way every sibling mecmcp server wires them.
+///
+/// # Errors
+///
+/// Returns an error when `--audit-redact` does not parse, or when
+/// `mecmcp_audit::init_tracing` could not open a configured audit file or
+/// construct the journald layer. Both are propagated with `?` rather than
+/// logged and ignored, because a server that starts anyway is a server that
+/// runs with no audit trail while believing -- and telling nobody -- that it
+/// has one.
+fn init_audit(args: &mecmcp_runtime::cli::Cli) -> Result<()> {
+    let redaction = if args.audit_redact.trim().is_empty() {
+        None
+    } else {
+        Some(
+            mecmcp_audit::AuditRedaction::parse(
+                &args.audit_redact,
+                args.audit_hmac_key_file.as_deref(),
+            )
+            .map_err(|error| anyhow::anyhow!("invalid --audit-redact: {error}"))?,
+        )
+    };
+    mecmcp_audit::init_tracing(&mecmcp_audit::AuditConfig {
+        format: mecmcp_audit::AuditFormat::parse(&args.audit_format),
+        audit_log_file: args.audit_log_file.clone(),
+        redaction,
+        journald: args.audit_journald,
+    })
+    .map_err(|e| anyhow::anyhow!("initializing audit tracing: {e}"))?;
+    Ok(())
+}
+
 /// A token-mutation audit record, built before the mutation and emitted after.
 ///
 /// The scope has to be captured up front because [`TokenAction`] is consumed by
@@ -369,14 +403,6 @@ async fn run_inner() -> Result<()> {
         return outcome;
     }
 
-    // Initialize tracing.
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .init();
-
     let mut cli = UnifiCli::parse();
 
     if let Some(Command::Token { .. }) = cli.common.command.take() {
@@ -407,6 +433,15 @@ async fn run_inner() -> Result<()> {
     // of the family. See mecmcp#358.
     mecmcp_runtime::cli_validate::validate(&cli.common)
         .map_err(|refusal| anyhow::anyhow!("{refusal}"))?;
+
+    // The systemd unit passes --audit-format/--audit-log-file/--audit-journald
+    // unconditionally, and until now nothing here consumed them: the server
+    // parsed the flags and ran with no audit subscriber and no audit file,
+    // silently. Fail closed instead -- `init_audit` itself refuses rather
+    // than starting with a configured audit file it could not open, and `?`
+    // here means this server does the same rather than swallowing that error
+    // and running unaudited.
+    init_audit(&cli.common)?;
 
     if cli.lab_mode() {
         tracing::warn!(
