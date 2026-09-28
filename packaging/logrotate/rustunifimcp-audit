@@ -1,0 +1,34 @@
+# logrotate fragment for the rustunifimcp JSON audit sink.
+#
+# Install as /etc/logrotate.d/rustunifimcp-audit (root:root, mode 0644).
+# Enable the sink by passing --audit-log-file (or RMCP_AUDIT_LOG_FILE). The
+# path below matches the packaged systemd unit,
+# which run as unifimcp:unifimcp with StateDirectory=unifimcp (/var/lib/unifimcp writable under
+# ProtectSystem=strict). Adjust paths/retention to your policy.
+#
+# rename-mode rotation is used:
+#   The server holds a single long-lived append (O_APPEND) file descriptor for
+#   the audit sink and reopens it on SIGHUP. This enables lossless rotation
+#   (rename + signal) without data loss. The server implements sighup reload
+#   that calls reopen() on the audit file handle.
+#
+#   When receiving SIGHUP after renaming the audit file:
+#   1. The server closes its old file descriptor
+#   2. It reopens the same path, getting a new inodefd
+#   3. Subsequent writes go to the new, empty file
+#   4. The rotated file (audit.jsonl.1, audit.jsonl.2, etc.) is preserved intact
+#
+#   This is superior to copytruncate mode, which has an inherent race window
+#   where audit events written between copy and truncate can be lost.
+
+/var/lib/unifimcp/audit.jsonl {
+    daily
+    rotate 14
+    maxsize 100M
+    missingok
+    notifempty
+    compress
+    delaycompress
+    create 0640 unifimcp unifimcp
+    su unifimcp unifimcp
+}
