@@ -286,10 +286,14 @@ pub async fn device_action(
         "mac": args.device
     });
 
-    let path = format!("/proxy/network/api/s/{}/cmd/devmgr", site);
-
     client
-        .post(crate::ApiSurface::PrivateV1, &path, &[], &[], &body)
+        .post(
+            crate::ApiSurface::PrivateV1,
+            "/proxy/network/api/s/{site}/cmd/devmgr",
+            &[("site", site)],
+            &[],
+            &body,
+        )
         .await
 }
 
@@ -337,10 +341,14 @@ pub async fn client_action(
         "mac": args.client
     });
 
-    let path = format!("/proxy/network/api/s/{}/cmd/stamgr", site);
-
     client
-        .post(crate::ApiSurface::PrivateV1, &path, &[], &[], &body)
+        .post(
+            crate::ApiSurface::PrivateV1,
+            "/proxy/network/api/s/{site}/cmd/stamgr",
+            &[("site", site)],
+            &[],
+            &body,
+        )
         .await
 }
 
@@ -480,6 +488,47 @@ mod tests {
             err_msg.contains("unifi_create_change_set"),
             "error must name at least one change-set tool, got: {err_msg}"
         );
+    }
+
+    /// `device_action` and `client_action` used to build their request path
+    /// with a raw `format!`, bypassing the traversal check every other
+    /// request path gets from `mecmcp_openapi::expand_path` (see
+    /// `client.rs`'s `a_traversing_site_id_is_rejected_not_sanitised`). A
+    /// `site` such as `../../v2/api/site/default` would have reached the
+    /// controller unvalidated, redirecting the call onto a different
+    /// site/API path than the one it was authorized against. Both templates
+    /// now route through `expand_path` like every other request, so this
+    /// proves the exact templates they use reject a traversing site.
+    #[test]
+    fn a_traversing_site_is_rejected_for_device_and_client_action_paths() {
+        for template in [
+            "/proxy/network/api/s/{site}/cmd/devmgr",
+            "/proxy/network/api/s/{site}/cmd/stamgr",
+        ] {
+            let expanded =
+                mecmcp_openapi::expand_path(template, &[("site", "../../v2/api/site/default")]);
+            assert!(
+                expanded.is_err(),
+                "traversal in site must be rejected for template {template}"
+            );
+        }
+    }
+
+    /// A site with extra path segments -- not a `../` traversal, but still an
+    /// attempt to steer the request onto a different path than the template
+    /// names -- must be rejected the same way.
+    #[test]
+    fn a_site_with_extra_path_segments_is_rejected_for_device_and_client_action_paths() {
+        for template in [
+            "/proxy/network/api/s/{site}/cmd/devmgr",
+            "/proxy/network/api/s/{site}/cmd/stamgr",
+        ] {
+            let expanded = mecmcp_openapi::expand_path(template, &[("site", "default/extra")]);
+            assert!(
+                expanded.is_err(),
+                "extra path segments in site must be rejected for template {template}"
+            );
+        }
     }
 
     #[test]
