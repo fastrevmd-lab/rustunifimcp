@@ -22,8 +22,9 @@ use rmcp::{
 use rustunifimcp_core::{
     changeset::{
         Preimage, StagedMutation, State, UnifiTransaction, ZoneIndex, actions_for,
-        apply_sequentially, check_zone_deletions, check_zone_references, diff_against_preimage,
-        fingerprint_of, mutations_of, preimage_of, referenced_zone_ids, validate_locally,
+        apply_sequentially, check_writable_fields, check_zone_deletions, check_zone_references,
+        diff_against_preimage, fingerprint_of, mutations_of, preimage_of, referenced_zone_ids,
+        validate_locally,
     },
     client::UnifiClient,
     error::UnifiError,
@@ -1215,6 +1216,15 @@ impl UnifiServer {
             });
         }
 
+        // Checked over the whole plan, not only the new mutations, and before
+        // the pre-image is captured: a mutation naming a read-only kind or a
+        // disallowed field must never enter a change set a human could
+        // approve, so it is refused here rather than left for
+        // unifi_validate_change_set, which a caller can skip entirely.
+        if let Err(e) = check_writable_fields(&mutations) {
+            return tool_error(format!("staged mutation refused: {e}"));
+        }
+
         // Re-captured over the whole plan, not only the new mutations: the
         // fingerprint stands in for a candidate UniFi does not have, so it has
         // to describe the state the plan as a whole was built against.
@@ -1405,6 +1415,15 @@ impl UnifiServer {
             return tool_error(format!("local validation failed: {e}"));
         }
 
+        // Schema constraints: a read-only kind or a disallowed field. Staging
+        // already refuses these, but a change set can outlive a server
+        // restart (it round-trips through --state-file), so a plan built
+        // before this check existed must still be caught by the tool whose
+        // description already promises "schema constraints".
+        if let Err(e) = check_writable_fields(&mutations) {
+            return tool_error(format!("schema constraints failed: {e}"));
+        }
+
         // A zone this set deletes must not be left referenced by anything else
         // in the set. Checked first because it needs no controller round trip:
         // it compares the set against itself and against the pre-image.
@@ -1519,6 +1538,20 @@ impl UnifiServer {
                  nothing to review. Create it again.",
             );
         };
+
+        // Belt-and-suspenders with the same check in `unifi_apply_change_set`:
+        // a plan staged before a writable-field rule tightened, or restored
+        // from `--state-file` into a build that tightened one, should not be
+        // approved into a state where only apply's check stands between it
+        // and the controller. An approver's signature should attest to a plan
+        // that can actually be applied.
+        let (approval_mutations, _) = match Self::plan_of(&record) {
+            Ok(plan) => plan,
+            Err(result) => return *result,
+        };
+        if let Err(e) = check_writable_fields(&approval_mutations) {
+            return tool_error(format!("approval refused: {e}"));
+        }
 
         // An approver who names the digest they read is bound to that plan. Not
         // naming one falls back to the stored digest, which makes the
@@ -1720,6 +1753,27 @@ impl UnifiServer {
                 return *result;
             }
         };
+
+        // A change set can be staged before a writable-field rule tightens,
+        // or -- with `--state-file` -- survive a restart into a build that
+        // tightened one. Staging and `unifi_validate_change_set` already run
+        // this check, but neither is mandatory before apply, so the same
+        // refusal has to be enforced here too. Mirrors the `plan_of` error
+        // arm above: nothing has been written yet, so `Failed` is accurate.
+        if let Err(e) = check_writable_fields(&mutations) {
+            let mut abandoned = claimed;
+            abandoned.state = ChangeSetState::Failed;
+            if let Err(error) = self.coordinator.update_change_set(abandoned).await {
+                tracing::error!(
+                    change_set_id = %args.change_set_id,
+                    field = error.field(),
+                    message = error.message(),
+                    "a claimed change set could not be settled after its writable-field \
+                     check failed; it will stay Applying"
+                );
+            }
+            return tool_error(format!("apply refused: {e}"));
+        }
 
         let principal = Self::principal(caller.as_ref());
 
@@ -1995,6 +2049,7 @@ impl ServerHandler for UnifiServer {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use rmcp::ServiceExt;
     use std::time::Duration;
 
     #[test]
@@ -2485,5 +2540,160 @@ mod tests {
                 "write tool {tool} has no handler in this module"
             );
         }
+    }
+
+    /// A controller `client_for` can build a client for, but that this test
+    /// never actually reaches: every mutation below is refused before the
+    /// first controller read.
+    fn controller_registry() -> Arc<ControllerRegistry> {
+        let mut key = tempfile::NamedTempFile::new().expect("create api key file");
+        std::io::Write::write_all(&mut key, b"dummy-api-key\n").expect("write api key");
+        std::io::Write::flush(&mut key).expect("flush api key");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(key.path(), std::fs::Permissions::from_mode(0o600))
+                .expect("chmod 600");
+        }
+        let key_path = key.into_temp_path().keep().expect("persist api key file");
+
+        let mut controllers = tempfile::NamedTempFile::new().expect("create controllers file");
+        let body = format!(
+            r#"{{"version":1,"devices":{{"home":{{"endpoint":"https://unifi.example.org","site":"default","api_key_file":"{}","allow_private_api":true}}}}}}"#,
+            key_path.display()
+        );
+        std::io::Write::write_all(&mut controllers, body.as_bytes())
+            .expect("write controllers file");
+        std::io::Write::flush(&mut controllers).expect("flush controllers file");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(controllers.path(), std::fs::Permissions::from_mode(0o600))
+                .expect("chmod 600");
+        }
+
+        Arc::new(ControllerRegistry::load(controllers.path()).expect("load controllers"))
+    }
+
+    /// A `Planned` record carrying a `device` update -- the same shape
+    /// `unifi_stage_change` already refuses to create, which is exactly why
+    /// this cannot be built through the tool API. It stands in for a plan
+    /// staged before this check existed, or built by an older binary and
+    /// loaded back from `--state-file`.
+    fn device_update_record(owner: &str, controller: &str, ttl: u64) -> ChangeSetRecord {
+        let record = ChangeSetRecord {
+            id: crate::changeset_state::new_change_set_id(),
+            owner: owner.to_owned(),
+            device: controller.to_owned(),
+            expected_candidate_fingerprint: String::new(),
+            actions: Vec::new(),
+            digest: String::new(),
+            state: ChangeSetState::Planned,
+            approver: None,
+            approval: None,
+            expires_at_unix: unix_seconds_now().saturating_add(ttl),
+            operation_id: None,
+            policy_signature: String::new(),
+            targets: Vec::new(),
+            preview: None,
+            task_id: None,
+            apply_without_handle: false,
+        };
+        let staged = vec![StagedMutation::update(
+            "device",
+            "abc123",
+            serde_json::json!({ "name": "renamed-ap" }),
+        )];
+        UnifiServer::with_plan(
+            record,
+            &staged,
+            &Preimage::from_resources(Vec::new()),
+            "test",
+        )
+        .map_err(|_| "with_plan refused a device-update record")
+        .expect("with_plan plans a mutation check_writable_fields will separately refuse")
+    }
+
+    /// Drive one tool call over an in-process transport, the way a real MCP
+    /// client would.
+    async fn call(
+        handler: UnifiServer,
+        tool: &str,
+        arguments: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        let (server_transport, client_transport) = tokio::io::duplex(64 * 1024);
+        let server_task = tokio::spawn(async move {
+            handler
+                .serve(server_transport)
+                .await
+                .expect("server initialization")
+                .waiting()
+                .await
+        });
+        let client = ().serve(client_transport).await.expect("client initialization");
+        let result = client
+            .call_tool(
+                rmcp::model::CallToolRequestParams::new(tool.to_owned())
+                    .with_arguments(serde_json::from_value(arguments).expect("arguments")),
+            )
+            .await;
+        client.cancel().await.expect("client shutdown");
+        server_task.abort();
+
+        let result = result.map_err(|error| error.to_string())?;
+        let text = result.content[0]
+            .as_text()
+            .expect("text result")
+            .text
+            .clone();
+        if result.is_error == Some(true) {
+            return Err(text);
+        }
+        Ok(serde_json::from_str(&text).expect("JSON envelope"))
+    }
+
+    /// Staging and `unifi_validate_change_set` both refuse a `device`
+    /// mutation, which is exactly why a plan carrying one can only reach
+    /// `Approved` by being seeded directly -- the scenario `--state-file`
+    /// makes real. `unifi_apply_change_set` must refuse it too, settle the
+    /// record to `Failed` rather than leave it stuck `Applying`, and refuse
+    /// it *before* the controller is ever contacted: the controller endpoint
+    /// here is a placeholder no test in this module can reach, so any
+    /// outcome other than the writable-field refusal below would mean the
+    /// check ran too late.
+    #[tokio::test]
+    async fn apply_refuses_a_seeded_device_update_with_no_controller_call() {
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+        let coordinator = coordinator_at(None);
+        let record = device_update_record("alice", "home", 300);
+        let (id, digest) = (record.id.clone(), record.digest.clone());
+        coordinator.insert_change_set(record).await.expect("insert");
+        coordinator
+            .approve_change_set(id.clone(), "home".to_owned(), "bob".to_owned(), digest)
+            .await
+            .expect("a second principal approves");
+
+        let server = UnifiServer::new(controller_registry(), true, coordinator.clone(), None)
+            .expect("server");
+
+        let refused = call(
+            server,
+            "unifi_apply_change_set",
+            serde_json::json!({"controller": "home", "change_set_id": id}),
+        )
+        .await;
+        let error = refused.expect_err("a device write has no verified route");
+        assert!(error.contains("device"), "{error}");
+
+        let settled = coordinator
+            .change_set(&id, "home")
+            .await
+            .expect("the record must still be readable");
+        assert_eq!(
+            settled.state,
+            ChangeSetState::Failed,
+            "a claim that never wrote anything must not be left Applying"
+        );
     }
 }
