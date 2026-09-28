@@ -13,6 +13,31 @@ use rustunifimcp::server::UnifiServer;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
+/// The two tools whose combination on one token defeats two-person control:
+/// a token holding both could stage and approve the same change set.
+///
+/// Refused here at issuance. `UnifiServer::holds_combined_two_person_control_scope`
+/// re-checks the same combination at call time, because a token store loaded
+/// from a hand-edited file never went through this check at all.
+const TWO_PERSON_CONTROL_TOOLS: (&str, &str) = ("unifi_stage_change", "unifi_approve_change_set");
+
+/// Refuse minting or widening a token whose tool scope would combine both
+/// change-set control tools.
+///
+/// # Errors
+/// Returns an error naming both tools if `tools` contains both.
+fn reject_combined_two_person_control_scope(tools: &[String]) -> Result<()> {
+    let (stage, approve) = TWO_PERSON_CONTROL_TOOLS;
+    let has = |name: &str| tools.iter().any(|t| t == name);
+    if has(stage) && has(approve) {
+        bail!(
+            "refusing to grant a token both `{stage}` and `{approve}`: two-person control \
+             requires the staging and approving tokens to differ. Issue separate tokens."
+        );
+    }
+    Ok(())
+}
+
 /// Convert `TokenCommand` to `TokenAction`.
 ///
 /// UniFi uses `NoGrant`, so no vendor grant is built.
@@ -372,6 +397,14 @@ async fn run_inner() -> Result<()> {
             .chain(args.iter().skip(2).cloned())
             .collect::<Vec<_>>();
         let token_cli = TokenCli::parse_from(token_args);
+
+        match &token_cli.command {
+            TokenCommand::Add { tools, .. } => reject_combined_two_person_control_scope(tools)?,
+            TokenCommand::SetScope {
+                tools: Some(tools), ..
+            } => reject_combined_two_person_control_scope(tools)?,
+            _ => {}
+        }
 
         // Install a subscriber before dispatching. `run_with_grant` emits the
         // scope change as a `target: "audit"` event, and this path returns
@@ -971,6 +1004,35 @@ mod tests {
             TokenAction::Add { name, .. } => assert_eq!(name, "test"),
             _ => panic!("expected TokenAction::Add"),
         }
+    }
+
+    /// A token minted with both `unifi_stage_change` and
+    /// `unifi_approve_change_set` in its tool scope could stage and approve
+    /// the same change set alone, defeating two-person control. Issuance
+    /// must refuse it rather than depend on the operational convention in
+    /// CLAUDE.md that nothing enforced.
+    #[test]
+    fn minting_a_token_with_both_changeset_control_scopes_is_refused() {
+        let error = reject_combined_two_person_control_scope(&[
+            "unifi_stage_change".to_string(),
+            "unifi_approve_change_set".to_string(),
+        ])
+        .expect_err("both scopes on one token must be refused");
+        let message = error.to_string();
+        assert!(message.contains("unifi_stage_change"), "{message}");
+        assert!(message.contains("unifi_approve_change_set"), "{message}");
+    }
+
+    /// Holding only one of the two scopes -- the normal case -- must not be
+    /// refused, and neither must an unrelated tool list.
+    #[test]
+    fn minting_a_token_with_only_one_changeset_control_scope_is_allowed() {
+        reject_combined_two_person_control_scope(&["unifi_stage_change".to_string()])
+            .expect("staging alone must be permitted");
+        reject_combined_two_person_control_scope(&["unifi_approve_change_set".to_string()])
+            .expect("approving alone must be permitted");
+        reject_combined_two_person_control_scope(&["unifi_get_change_set".to_string()])
+            .expect("an unrelated tool must be permitted");
     }
 
     #[test]
