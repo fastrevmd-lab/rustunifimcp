@@ -61,11 +61,11 @@ const TRUNCATION_MARGIN_BYTES: usize = 8 * 1024;
 /// has an obvious smaller answer -- fewer items, explicitly marked as fewer --
 /// and refusing outright just means the operator learns nothing about a site
 /// too big to describe in 512 KiB. So the largest array in the response is
-/// shortened here, before the transport ever measures it, with a `truncated`
-/// marker naming how many of how many are shown. `tool_result` still has the
-/// final word: if even the shrunk response cannot fit, it refuses exactly as
-/// before, so this can only make an oversized answer smaller, never turn a
-/// correct refusal into a silent lie.
+/// shortened here, before the transport ever measures it, with a nested
+/// `truncation` marker naming how many of how many are shown. `tool_result`
+/// still has the final word: if even the shrunk response cannot fit, it
+/// refuses exactly as before, so this can only make an oversized answer
+/// smaller, never turn a correct refusal into a silent lie.
 fn json_tool_result<T: serde::Serialize>(value: T) -> CallToolResult {
     let budget = RESULT_LIMITS
         .max_json_bytes
@@ -100,6 +100,19 @@ fn rendered_len(value: &serde_json::Value) -> usize {
 /// if it already fits or has no array to shrink -- a scalar or single-object
 /// response has no smaller true answer, and is left for `tool_result`'s own
 /// refusal.
+///
+/// The marker lives under its own `truncation` key rather than top-level
+/// `truncated`/`shown`/`total` fields, because `unifi_query_stats` and the
+/// workflow reports already fill an object with `offset`/`limit`/`total` from
+/// [`crate::tools::pagination`] before this ever runs -- top-level fields
+/// here used to overwrite that site-wide `total` with the shrunk array's own
+/// length, so a caller advancing `offset` by the (now wrong) `limit` skipped
+/// items it never saw. Existing keys are never overwritten. `partial` is
+/// forced `true` when it is already present, since a shrunk response is
+/// partial by definition. When the object carries a numeric `offset`,
+/// `next_offset` names the correct cursor for the next call: `offset` plus
+/// however many of this field's items are actually shown, not `limit`, since
+/// the shrunk count is very likely a strict fraction of it.
 fn shrink_largest_array(value: serde_json::Value, budget: usize) -> serde_json::Value {
     if rendered_len(&value) <= budget {
         return value;
@@ -126,12 +139,23 @@ fn shrink_largest_array(value: serde_json::Value, budget: usize) -> serde_json::
 
     let total = items.len();
     let field = key.unwrap_or_else(|| "data".to_owned());
+    let offset = rest.get("offset").and_then(serde_json::Value::as_u64);
     let build = |n: usize| -> serde_json::Value {
         let mut map = rest.clone();
         map.insert(field.clone(), serde_json::Value::Array(items[..n].to_vec()));
-        map.insert("truncated".to_owned(), serde_json::Value::Bool(true));
-        map.insert("shown".to_owned(), serde_json::json!(n));
-        map.insert("total".to_owned(), serde_json::json!(total));
+        if map.contains_key("partial") {
+            map.insert("partial".to_owned(), serde_json::Value::Bool(true));
+        }
+        if let Some(offset) = offset {
+            map.insert(
+                "next_offset".to_owned(),
+                serde_json::json!(offset.saturating_add(n as u64)),
+            );
+        }
+        map.insert(
+            "truncation".to_owned(),
+            serde_json::json!({ "field": field, "shown": n, "of": total }),
+        );
         serde_json::Value::Object(map)
     };
 
@@ -1177,7 +1201,11 @@ impl UnifiServer {
                      restart. It becomes a change set on the first unifi_stage_change.",
         });
 
-        json_tool_result(result)
+        tool_result(
+            Ok::<_, String>(result),
+            ResultFormat::PrettyJson,
+            RESULT_LIMITS,
+        )
     }
 
     #[tool(
@@ -1371,7 +1399,11 @@ impl UnifiServer {
             "staged_count": staged_count,
         });
 
-        json_tool_result(result)
+        tool_result(
+            Ok::<_, String>(result),
+            ResultFormat::PrettyJson,
+            RESULT_LIMITS,
+        )
     }
 
     #[tool(
@@ -1414,7 +1446,11 @@ impl UnifiServer {
             "changes": diff.changes,
         });
 
-        json_tool_result(result)
+        tool_result(
+            Ok::<_, String>(result),
+            ResultFormat::PrettyJson,
+            RESULT_LIMITS,
+        )
     }
 
     #[tool(
@@ -1519,7 +1555,11 @@ impl UnifiServer {
             "note": "UniFi has no server-side dry-run validation; this is client-side only"
         });
 
-        json_tool_result(result)
+        tool_result(
+            Ok::<_, String>(result),
+            ResultFormat::PrettyJson,
+            RESULT_LIMITS,
+        )
     }
 
     #[tool(
@@ -1657,7 +1697,11 @@ impl UnifiServer {
             "preview": preview.artifact,
         });
 
-        json_tool_result(result)
+        tool_result(
+            Ok::<_, String>(result),
+            ResultFormat::PrettyJson,
+            RESULT_LIMITS,
+        )
     }
 
     #[tool(
@@ -1922,7 +1966,11 @@ impl UnifiServer {
             "rollback_failures": outcome.rollback_failures,
         });
 
-        json_tool_result(result)
+        tool_result(
+            Ok::<_, String>(result),
+            ResultFormat::PrettyJson,
+            RESULT_LIMITS,
+        )
     }
 
     #[tool(
@@ -1947,16 +1995,20 @@ impl UnifiServer {
         // A draft has no record yet, and reporting "not found" for a change set
         // this server just handed out an id for would read as a fault.
         if let Some(draft) = self.draft(&args.change_set_id, &args.controller) {
-            return json_tool_result(serde_json::json!({
-                "change_set_id": args.change_set_id,
-                "controller": draft.controller,
-                "description": draft.description,
-                "creator": draft.owner,
-                "state": "draft",
-                "mutation_count": 0,
-                "note": "nothing is staged yet; this draft is held in memory and is \
-                         lost on restart",
-            }));
+            return tool_result(
+                Ok::<_, String>(serde_json::json!({
+                    "change_set_id": args.change_set_id,
+                    "controller": draft.controller,
+                    "description": draft.description,
+                    "creator": draft.owner,
+                    "state": "draft",
+                    "mutation_count": 0,
+                    "note": "nothing is staged yet; this draft is held in memory and is \
+                             lost on restart",
+                })),
+                ResultFormat::PrettyJson,
+                RESULT_LIMITS,
+            );
         }
 
         // Through `change_set_status`, because it is the path that transitions
@@ -2006,7 +2058,11 @@ impl UnifiServer {
             "preview": record.preview.as_ref().map(|preview| preview.artifact.clone()),
         });
 
-        json_tool_result(result)
+        tool_result(
+            Ok::<_, String>(result),
+            ResultFormat::PrettyJson,
+            RESULT_LIMITS,
+        )
     }
 }
 
@@ -2101,10 +2157,12 @@ mod tests {
             rendered_len(&out) <= budget,
             "shrunk response still over budget"
         );
-        assert_eq!(out["truncated"], serde_json::json!(true));
-        assert_eq!(out["total"], serde_json::json!(2000));
+        assert_eq!(out["truncation"]["field"], serde_json::json!("devices"));
+        assert_eq!(out["truncation"]["of"], serde_json::json!(2000));
 
-        let shown = out["shown"].as_u64().expect("shown is a number") as usize;
+        let shown = out["truncation"]["shown"]
+            .as_u64()
+            .expect("shown is a number") as usize;
         assert!(shown < 2000, "nothing was actually dropped");
         assert_eq!(
             out["devices"]
@@ -2115,8 +2173,8 @@ mod tests {
             "shown must match the array actually returned"
         );
 
-        // The field that was not the largest array is untouched.
-        assert_eq!(out["partial"], serde_json::json!(false));
+        // `partial` was already present, so a shrunk response must say so.
+        assert_eq!(out["partial"], serde_json::json!(true));
     }
 
     /// A bare top-level array (`unifi_list_resources`'s shape) is wrapped
@@ -2132,8 +2190,8 @@ mod tests {
         let out = shrink_largest_array(value, 20_000);
 
         assert!(out["data"].is_array());
-        assert_eq!(out["total"], serde_json::json!(2000));
-        assert_eq!(out["truncated"], serde_json::json!(true));
+        assert_eq!(out["truncation"]["field"], serde_json::json!("data"));
+        assert_eq!(out["truncation"]["of"], serde_json::json!(2000));
     }
 
     /// A single object with no array has no smaller true answer; it must be
@@ -2143,6 +2201,49 @@ mod tests {
         let value = serde_json::json!({ "note": "x".repeat(1000) });
         let out = shrink_largest_array(value.clone(), 10);
         assert_eq!(out, value, "no array to shrink means no change");
+    }
+
+    /// Percy review F1 (MEC-549): the marker used to be written as top-level
+    /// `truncated`/`shown`/`total` fields, which collided with the
+    /// site-wide `total` that `unifi_query_stats` and the workflow reports
+    /// already fill in from `tools::pagination::paginate`. A caller advancing
+    /// `offset` by `limit` on the corrupted `total` would then skip whatever
+    /// sat between the shrunk count and the real page size. The site-wide
+    /// `total` must survive shrinking untouched, and the object must carry a
+    /// correct cursor for the next call.
+    #[test]
+    fn shrinking_a_paged_object_preserves_its_site_wide_total_and_cursor() {
+        let items: Vec<serde_json::Value> = (0..2000)
+            .map(|i| serde_json::json!({ "id": i, "note": "x".repeat(200) }))
+            .collect();
+        let value = serde_json::json!({
+            "data": items,
+            "offset": 100u64,
+            "limit": 2000,
+            "total": 50_000,
+        });
+
+        let budget = 20_000;
+        let out = shrink_largest_array(value, budget);
+
+        assert!(
+            rendered_len(&out) <= budget,
+            "shrunk response still over budget"
+        );
+        // The pagination cursor's site-wide total must not be clobbered by
+        // the shrunk array's own length.
+        assert_eq!(out["total"], serde_json::json!(50_000));
+        assert_eq!(out["offset"], serde_json::json!(100));
+
+        let shown = out["truncation"]["shown"]
+            .as_u64()
+            .expect("shown is a number");
+        assert!(shown < 2000, "nothing was actually dropped");
+        assert_eq!(
+            out["next_offset"],
+            serde_json::json!(100 + shown),
+            "next_offset must reflect what was actually shown, not the requested limit"
+        );
     }
 
     /// The router and the registry must agree, in both directions.
