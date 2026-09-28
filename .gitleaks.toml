@@ -13,7 +13,7 @@
 # a genuine credential added to the same test file would still be caught.
 
 [extend]
-useDefault = true
+path = ".gitleaks-vendor.toml"
 
 [[allowlists]]
 description = "Synthetic credential-shaped values in the fixture-scrub gate's negative tests"
