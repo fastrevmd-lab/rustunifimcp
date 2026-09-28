@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 - Raised MSRV to 1.89
+- **`unifi_stage_change` now enforces a per-kind writable-field allowlist** (M11) —
+  a staged `create`/`update` body may only set the fields this server's read model
+  recognises for that kind, and a controller-managed `_id` is never writable for
+  any kind. This is a behavioural restriction: a body naming an unrecognised field,
+  or a non-object body, is now refused at staging (and again at apply, for a plan
+  that reached `Approved` before this check existed). The visible effect for
+  `traffic_route` is the most restrictive: this server's read model for that kind
+  carries only `name`, so a `traffic_route` write is now name-only — any other
+  field in the body is refused.
 
 ## [0.4.0] - 2026-09-16
 

@@ -33,6 +33,7 @@ uuid.workspace = true
 
 [dev-dependencies]
 rcgen.workspace = true
+rmcp = { workspace = true, features = ["client"] }
 tempfile = "3"
 
 [lints]

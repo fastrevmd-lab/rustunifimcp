@@ -87,6 +87,18 @@ pub enum UnifiError {
     #[error("{0}")]
     ReferenceNotFound(String),
 
+    /// A staged mutation names a kind this server refuses to write, or a body
+    /// field its kind does not allow.
+    ///
+    /// UniFi has no server-side schema check on the private surfaces this
+    /// server writes to, so this is the only thing standing between a staged
+    /// body and a close-to-verbatim PUT/POST. Deliberately separate from
+    /// [`Self::Malformed`], which means "the controller's response could not
+    /// be parsed" — this means the opposite: the request was refused before it
+    /// was sent.
+    #[error("{0}")]
+    WriteRefused(String),
+
     /// Transport, TLS, timeout, or rate-limit failure from `mecmcp-http`.
     ///
     /// The underlying error is classified and rendered without URLs, because
@@ -225,6 +237,7 @@ mod tests {
             },
             UnifiError::Malformed("test error".to_owned()),
             UnifiError::ReferenceNotFound("test reference".to_owned()),
+            UnifiError::WriteRefused("test refusal".to_owned()),
             // Http variant with a URL-carrying error
             UnifiError::Http(mecmcp_http::HttpError::Timeout {
                 url: mecmcp_http::SafeUrl::from_unparsed("https://controller.example/api/test"),
