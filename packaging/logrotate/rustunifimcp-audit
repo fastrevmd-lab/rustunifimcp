@@ -21,6 +21,16 @@
 #
 #   This is superior to copytruncate mode, which has an inherent race window
 #   where audit events written between copy and truncate can be lost.
+#
+#   The postrotate script below is what actually delivers that signal --
+#   without it, rotation renames the file out from under the server and the
+#   new audit.jsonl stays empty forever: notifempty then skips every later
+#   rotation, and the renamed file grows without bound while the server
+#   believes it is still auditing.
+#
+#   The same SIGHUP also reloads the controller inventory and token store, so
+#   rotation triggers those reloads too. That is benign: a failed reload logs
+#   a warning and keeps the previous configuration rather than restarting.
 
 /var/lib/unifimcp/audit.jsonl {
     daily
@@ -30,6 +40,9 @@
     notifempty
     compress
     delaycompress
-    create 0640 unifimcp unifimcp
-    su unifimcp unifimcp
+    create 0600 unifimcp unifimcp
+    sharedscripts
+    postrotate
+        systemctl kill --kill-whom=main --signal=HUP rustunifimcp.service
+    endscript
 }

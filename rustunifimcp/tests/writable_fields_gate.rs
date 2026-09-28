@@ -60,7 +60,7 @@ fn server() -> UnifiServer {
         Arc::new(ControllerRegistry::load(controllers.path()).expect("load controllers"));
     let coordinator =
         build_coordinator(None, Duration::from_secs(300), true, None).expect("coordinator");
-    UnifiServer::new(registry, true, coordinator, None, None).expect("server")
+    UnifiServer::new(registry, true, coordinator, None).expect("server")
 }
 
 /// Drive one tool call over an in-process transport, the way a real MCP

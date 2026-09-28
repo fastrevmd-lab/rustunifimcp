@@ -2683,7 +2683,7 @@ mod tests {
             .await
             .expect("a second principal approves");
 
-        let server = UnifiServer::new(controller_registry(), true, coordinator.clone(), None, None)
+        let server = UnifiServer::new(controller_registry(), true, coordinator.clone(), None)
             .expect("server");
 
         let refused = call(

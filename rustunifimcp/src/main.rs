@@ -131,9 +131,10 @@ fn init_token_audit() {
         .try_init();
 }
 
-/// Initialize the audit tracing and store the audit file sink if configured.
+/// Install the server's audit subscriber: stderr, an optional audit-file
+/// sink, and optional journald — configured from the shared `--audit-*`
+/// flags, the same way every sibling mecmcp server wires them.
 ///
-/// This is called during server initialization to set up audit logging.
 /// The returned `AuditFileSink` can be used to reopen the file on SIGHUP
 /// for log rotation.
 ///
@@ -595,6 +596,99 @@ fn load_listener_tls(args: &mecmcp_runtime::cli::Cli) -> Result<Option<Arc<rustl
 /// # Errors
 ///
 /// Returns error if the signal handler could not be registered.
+/// One SIGHUP reload pass: reload the inventory, rebuild clients on success,
+/// reload the token store, and reopen the audit file. Pulled out of the
+/// closure `install_sighup_reload` hands to the signal handler so the
+/// reopen branch is reachable without going through signal delivery.
+fn perform_sighup_reload(
+    registry: &rustunifimcp_core::inventory::ControllerRegistry,
+    server: Option<&UnifiServer>,
+    token_store: Option<&mecmcp_auth::TokenStoreFile<mecmcp_auth::NoGrant>>,
+    audit_sink: Option<&AuditFileSink>,
+) {
+    // Reload controller inventory.
+    let registry_reloaded = match registry.reload() {
+        Ok(count) => {
+            tracing::info!(
+                target: "audit",
+                controllers = count,
+                "controller inventory reloaded"
+            );
+            true
+        }
+        Err(error) => {
+            tracing::warn!(
+                target: "audit",
+                %error,
+                "controller inventory reload failed; retaining previous snapshot"
+            );
+            false
+        }
+    };
+
+    // Rebuild clients if inventory reload succeeded.
+    if registry_reloaded && let Some(srv) = server {
+        match srv.rebuild_clients() {
+            Ok(count) => {
+                tracing::info!(
+                    target: "audit",
+                    clients = count,
+                    "HTTP clients rebuilt from reloaded inventory"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    target: "audit",
+                    %error,
+                    "client rebuild failed; retaining previous clients"
+                );
+            }
+        }
+    }
+
+    // Reload token store if present (HTTP mode only).
+    if let Some(store) = token_store {
+        match store.reload() {
+            Ok(()) => {
+                let count = store.store().len();
+                tracing::info!(
+                    target: "audit",
+                    tokens = count,
+                    "token store reloaded"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    target: "audit",
+                    %error,
+                    "token store reload failed; retaining previous snapshot"
+                );
+            }
+        }
+    }
+
+    // Reopen audit file if configured (for lossless log rotation).
+    if let Some(sink) = audit_sink {
+        match sink.reopen() {
+            Ok(()) => {
+                tracing::info!(
+                    target: "audit",
+                    path = %sink.path().display(),
+                    "audit file reopened"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    target: "audit",
+                    %error,
+                    path = %sink.path().display(),
+                    "audit file reopen failed"
+                );
+            }
+        }
+    }
+}
+
 fn install_sighup_reload(
     registry: Arc<rustunifimcp_core::inventory::ControllerRegistry>,
     server: Option<UnifiServer>,
@@ -602,87 +696,12 @@ fn install_sighup_reload(
     audit_sink: Option<Arc<AuditFileSink>>,
 ) -> std::io::Result<()> {
     mecmcp_runtime::signals::install_hup_handler(move || {
-        // Reload controller inventory.
-        let registry_reloaded = match registry.reload() {
-            Ok(count) => {
-                tracing::info!(
-                    target: "audit",
-                    controllers = count,
-                    "controller inventory reloaded"
-                );
-                true
-            }
-            Err(error) => {
-                tracing::warn!(
-                    target: "audit",
-                    %error,
-                    "controller inventory reload failed; retaining previous snapshot"
-                );
-                false
-            }
-        };
-
-        // Rebuild clients if inventory reload succeeded.
-        if registry_reloaded && let Some(ref srv) = server {
-            match srv.rebuild_clients() {
-                Ok(count) => {
-                    tracing::info!(
-                        target: "audit",
-                        clients = count,
-                        "HTTP clients rebuilt from reloaded inventory"
-                    );
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        target: "audit",
-                        %error,
-                        "client rebuild failed; retaining previous clients"
-                    );
-                }
-            }
-        }
-
-        // Reload token store if present (HTTP mode only).
-        if let Some(ref store) = token_store {
-            match store.reload() {
-                Ok(()) => {
-                    let count = store.store().len();
-                    tracing::info!(
-                        target: "audit",
-                        tokens = count,
-                        "token store reloaded"
-                    );
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        target: "audit",
-                        %error,
-                        "token store reload failed; retaining previous snapshot"
-                    );
-                }
-            }
-        }
-
-        // Reopen audit file if configured (for lossless log rotation).
-        if let Some(ref sink) = audit_sink {
-            match sink.reopen() {
-                Ok(()) => {
-                    tracing::info!(
-                        target: "audit",
-                        path = %sink.path().display(),
-                        "audit file reopened"
-                    );
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        target: "audit",
-                        %error,
-                        path = %sink.path().display(),
-                        "audit file reopen failed"
-                    );
-                }
-            }
-        }
+        perform_sighup_reload(
+            &registry,
+            server.as_ref(),
+            token_store.as_deref(),
+            audit_sink.as_deref(),
+        );
     })
 }
 
