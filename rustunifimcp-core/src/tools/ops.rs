@@ -58,14 +58,47 @@ pub struct DeviceActionArgs {
     pub site: Option<String>,
 }
 
+/// Characters permitted in a caller-supplied site identifier.
+///
+/// UniFi site ids are opaque slugs (`default`, or a short generated id) with
+/// no meaningful characters outside this set. `device_action` and
+/// `client_action` build their request path with this value, so this check
+/// is a second, independent layer of defence in front of
+/// `mecmcp_openapi::expand_path`'s traversal check at the HTTP layer: a
+/// caller cannot steer either request onto a different path or site even if
+/// a future refactor ever drops the `expand_path` routing.
+///
+/// # Errors
+///
+/// Returns [`crate::error::UnifiError::Malformed`] if `site` is `Some` and
+/// contains anything other than ASCII alphanumerics, `-`, or `_`, or is
+/// empty or longer than 64 bytes.
+fn validate_site(site: &Option<String>) -> Result<(), crate::error::UnifiError> {
+    if let Some(site) = site {
+        let is_valid = !site.is_empty()
+            && site.len() <= 64
+            && site
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
+        if !is_valid {
+            return Err(crate::error::UnifiError::Malformed(format!(
+                "site {site:?} is not a valid site identifier"
+            )));
+        }
+    }
+    Ok(())
+}
+
 impl DeviceActionArgs {
     /// Check the cross-field invariants `serde` cannot express.
     ///
     /// # Errors
     ///
     /// Returns [`crate::error::UnifiError::Malformed`] if `port_action` was
-    /// requested without a `port_index`.
+    /// requested without a `port_index`, or if `site` is not a valid site
+    /// identifier.
     pub fn validate(&self) -> Result<(), crate::error::UnifiError> {
+        validate_site(&self.site)?;
         if self.action == DeviceAction::PortAction && self.port_index.is_none() {
             return Err(crate::error::UnifiError::Malformed(
                 "action `port_action` requires `port_index`".to_owned(),
@@ -108,14 +141,14 @@ pub struct ClientActionArgs {
 }
 
 impl ClientActionArgs {
-    /// Validate arguments. Currently a no-op as there are no cross-field
-    /// invariants, but kept for consistency with `DeviceActionArgs`.
+    /// Check the cross-field invariants `serde` cannot express.
     ///
     /// # Errors
     ///
-    /// Currently always returns `Ok`.
+    /// Returns [`crate::error::UnifiError::Malformed`] if `site` is not a
+    /// valid site identifier.
     pub fn validate(&self) -> Result<(), crate::error::UnifiError> {
-        Ok(())
+        validate_site(&self.site)
     }
 }
 
@@ -496,39 +529,101 @@ mod tests {
     /// `client.rs`'s `a_traversing_site_id_is_rejected_not_sanitised`). A
     /// `site` such as `../../v2/api/site/default` would have reached the
     /// controller unvalidated, redirecting the call onto a different
-    /// site/API path than the one it was authorized against. Both templates
-    /// now route through `expand_path` like every other request, so this
-    /// proves the exact templates they use reject a traversing site.
+    /// site/API path than the one it was authorized against.
+    ///
+    /// The request path is now built from the same `{site}` template and
+    /// `expand_path` as every other request, but that alone is not what this
+    /// test proves: calling `expand_path` on a copied template literal, as an
+    /// earlier version of this test did, still passes even if `device_action`
+    /// or `client_action` reverts to a raw `format!`, because the copy and
+    /// the production code can drift apart silently. This test instead
+    /// drives the real entry point every caller of these tools goes through
+    /// -- `DeviceActionArgs::validate` / `ClientActionArgs::validate`, called
+    /// before either function touches the client -- so it fails the moment
+    /// that path-rejection is missing, regardless of how the request path
+    /// happens to be built downstream.
     #[test]
-    fn a_traversing_site_is_rejected_for_device_and_client_action_paths() {
-        for template in [
-            "/proxy/network/api/s/{site}/cmd/devmgr",
-            "/proxy/network/api/s/{site}/cmd/stamgr",
-        ] {
-            let expanded =
-                mecmcp_openapi::expand_path(template, &[("site", "../../v2/api/site/default")]);
-            assert!(
-                expanded.is_err(),
-                "traversal in site must be rejected for template {template}"
-            );
-        }
+    fn a_traversing_site_is_rejected_by_device_and_client_action_validation() {
+        use super::ClientActionArgs;
+
+        let device_args = DeviceActionArgs {
+            controller: "home".to_owned(),
+            device: "aa:bb:cc:dd:ee:ff".to_owned(),
+            action: DeviceAction::Restart,
+            port_index: None,
+            site: Some("../../v2/api/site/default".to_owned()),
+        };
+        assert!(
+            device_args.validate().is_err(),
+            "a traversing site must be rejected by DeviceActionArgs::validate"
+        );
+
+        let client_args = ClientActionArgs {
+            controller: "home".to_owned(),
+            client: "aa:bb:cc:dd:ee:ff".to_owned(),
+            action: ClientAction::Block,
+            site: Some("../../v2/api/site/default".to_owned()),
+        };
+        assert!(
+            client_args.validate().is_err(),
+            "a traversing site must be rejected by ClientActionArgs::validate"
+        );
     }
 
     /// A site with extra path segments -- not a `../` traversal, but still an
     /// attempt to steer the request onto a different path than the template
-    /// names -- must be rejected the same way.
+    /// names -- must be rejected the same way, again through the real
+    /// `validate()` entry point (see the comment above).
     #[test]
-    fn a_site_with_extra_path_segments_is_rejected_for_device_and_client_action_paths() {
-        for template in [
-            "/proxy/network/api/s/{site}/cmd/devmgr",
-            "/proxy/network/api/s/{site}/cmd/stamgr",
-        ] {
-            let expanded = mecmcp_openapi::expand_path(template, &[("site", "default/extra")]);
-            assert!(
-                expanded.is_err(),
-                "extra path segments in site must be rejected for template {template}"
-            );
-        }
+    fn a_site_with_extra_path_segments_is_rejected_by_device_and_client_action_validation() {
+        use super::ClientActionArgs;
+
+        let device_args = DeviceActionArgs {
+            controller: "home".to_owned(),
+            device: "aa:bb:cc:dd:ee:ff".to_owned(),
+            action: DeviceAction::Restart,
+            port_index: None,
+            site: Some("default/extra".to_owned()),
+        };
+        assert!(
+            device_args.validate().is_err(),
+            "extra path segments in site must be rejected by DeviceActionArgs::validate"
+        );
+
+        let client_args = ClientActionArgs {
+            controller: "home".to_owned(),
+            client: "aa:bb:cc:dd:ee:ff".to_owned(),
+            action: ClientAction::Block,
+            site: Some("default/extra".to_owned()),
+        };
+        assert!(
+            client_args.validate().is_err(),
+            "extra path segments in site must be rejected by ClientActionArgs::validate"
+        );
+    }
+
+    /// A well-formed site must still be accepted -- the new validation must
+    /// not be so strict that it refuses ordinary UniFi site identifiers.
+    #[test]
+    fn an_ordinary_site_is_accepted_by_device_and_client_action_validation() {
+        use super::ClientActionArgs;
+
+        let device_args = DeviceActionArgs {
+            controller: "home".to_owned(),
+            device: "aa:bb:cc:dd:ee:ff".to_owned(),
+            action: DeviceAction::Restart,
+            port_index: None,
+            site: Some("default".to_owned()),
+        };
+        assert!(device_args.validate().is_ok());
+
+        let client_args = ClientActionArgs {
+            controller: "home".to_owned(),
+            client: "aa:bb:cc:dd:ee:ff".to_owned(),
+            action: ClientAction::Block,
+            site: Some("my-site_01".to_owned()),
+        };
+        assert!(client_args.validate().is_ok());
     }
 
     #[test]
