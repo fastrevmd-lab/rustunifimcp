@@ -4,6 +4,16 @@
 //! control. Each is individually scoped and audited, and all four are in
 //! [`crate::tools::WRITE_TOOLS`] -- a wildcard token reaches none of them.
 //!
+//! `device_action`'s `restart` and `client_action`'s `block`, `unblock`, and
+//! `reconnect` mutate a device or client in a single model call, with no
+//! independent second-principal review -- there is no change set to route an
+//! immediate command like "restart this device" through. The dispatch layer
+//! (`server::UnifiServer::gate_direct_commit`) refuses those specific actions
+//! unless the server was started with `--allow-direct-commit`, and audits the
+//! outcome either way via `mecmcp_audit::AuditScope`. `locate` is exempt: it
+//! is self-reverting and carries no lasting effect. `adopt`, `upgrade`,
+//! `authorize`, and `limit_bandwidth` are not yet wired at all.
+//!
 //! `unifi_backup_action` deliberately does not carry `restore`. Restoring a
 //! controller backup overwrites the entire configuration, which is a larger
 //! blast radius than any change set this server will ever carry, so it is a
@@ -89,16 +99,45 @@ fn validate_site(site: &Option<String>) -> Result<(), crate::error::UnifiError> 
     Ok(())
 }
 
+/// Whether `mac` is a well-formed IEEE 802 MAC address: six colon-separated
+/// hex octets.
+///
+/// `device_action` and `client_action` interpolate this value directly into
+/// the `cmd/devmgr` and `cmd/stamgr` request bodies, and the controller does
+/// not itself validate the `mac` field -- a malformed value reaches the
+/// device management API unrejected. This is the only check standing between
+/// a garbage or malicious caller-supplied string and the wire.
+///
+/// # Errors
+///
+/// Returns [`crate::error::UnifiError::Malformed`] if `mac` is not six
+/// colon-separated two-digit hex octets.
+fn validate_mac(mac: &str) -> Result<(), crate::error::UnifiError> {
+    let octets: Vec<&str> = mac.split(':').collect();
+    let is_valid = octets.len() == 6
+        && octets
+            .iter()
+            .all(|octet| octet.len() == 2 && octet.bytes().all(|b| b.is_ascii_hexdigit()));
+    if is_valid {
+        Ok(())
+    } else {
+        Err(crate::error::UnifiError::Malformed(format!(
+            "{mac:?} is not a valid MAC address (expected six colon-separated hex octets, e.g. aa:bb:cc:dd:ee:ff)"
+        )))
+    }
+}
+
 impl DeviceActionArgs {
     /// Check the cross-field invariants `serde` cannot express.
     ///
     /// # Errors
     ///
     /// Returns [`crate::error::UnifiError::Malformed`] if `port_action` was
-    /// requested without a `port_index`, or if `site` is not a valid site
-    /// identifier.
+    /// requested without a `port_index`, if `site` is not a valid site
+    /// identifier, or if `device` is not a valid MAC address.
     pub fn validate(&self) -> Result<(), crate::error::UnifiError> {
         validate_site(&self.site)?;
+        validate_mac(&self.device)?;
         if self.action == DeviceAction::PortAction && self.port_index.is_none() {
             return Err(crate::error::UnifiError::Malformed(
                 "action `port_action` requires `port_index`".to_owned(),
@@ -146,9 +185,10 @@ impl ClientActionArgs {
     /// # Errors
     ///
     /// Returns [`crate::error::UnifiError::Malformed`] if `site` is not a
-    /// valid site identifier.
+    /// valid site identifier, or if `client` is not a valid MAC address.
     pub fn validate(&self) -> Result<(), crate::error::UnifiError> {
-        validate_site(&self.site)
+        validate_site(&self.site)?;
+        validate_mac(&self.client)
     }
 }
 
@@ -622,6 +662,65 @@ mod tests {
             client: "aa:bb:cc:dd:ee:ff".to_owned(),
             action: ClientAction::Block,
             site: Some("my-site_01".to_owned()),
+        };
+        assert!(client_args.validate().is_ok());
+    }
+
+    #[test]
+    fn an_invalid_mac_is_rejected_by_device_and_client_action_validation() {
+        use super::ClientActionArgs;
+
+        for device in [
+            "not-a-mac",
+            "aa:bb:cc:dd:ee",
+            "aa:bb:cc:dd:ee:ff:00",
+            "aa:bb:cc:dd:ee:gg",
+            "",
+            "aabbccddeeff",
+        ] {
+            let device_args = DeviceActionArgs {
+                controller: "home".to_owned(),
+                device: device.to_owned(),
+                action: DeviceAction::Restart,
+                port_index: None,
+                site: None,
+            };
+            assert!(
+                device_args.validate().is_err(),
+                "{device:?} must be rejected as a device MAC"
+            );
+
+            let client_args = ClientActionArgs {
+                controller: "home".to_owned(),
+                client: device.to_owned(),
+                action: ClientAction::Block,
+                site: None,
+            };
+            assert!(
+                client_args.validate().is_err(),
+                "{device:?} must be rejected as a client MAC"
+            );
+        }
+    }
+
+    #[test]
+    fn a_well_formed_mac_is_accepted_by_device_and_client_action_validation() {
+        use super::ClientActionArgs;
+
+        let device_args = DeviceActionArgs {
+            controller: "home".to_owned(),
+            device: "aa:bb:cc:dd:ee:ff".to_owned(),
+            action: DeviceAction::Restart,
+            port_index: None,
+            site: None,
+        };
+        assert!(device_args.validate().is_ok());
+
+        let client_args = ClientActionArgs {
+            controller: "home".to_owned(),
+            client: "AA:BB:CC:DD:EE:FF".to_owned(),
+            action: ClientAction::Block,
+            site: None,
         };
         assert!(client_args.validate().is_ok());
     }

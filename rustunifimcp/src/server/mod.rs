@@ -231,6 +231,10 @@ pub struct UnifiServer {
     /// the coordinator already allows one pending change set per principal per
     /// controller, so these paths are near-serial anyway.
     plan_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Whether direct-commit tools (`unifi_device_action`'s `restart`,
+    /// `unifi_client_action`'s `block`/`unblock`/`reconnect`) may run without
+    /// change-set approval. Set via `--allow-direct-commit`; off by default.
+    direct_commit: mecmcp_audit::DirectCommitPolicy,
     /// Tool router.
     tool_router: ToolRouter<Self>,
 }
@@ -265,6 +269,7 @@ impl UnifiServer {
         lab_mode: bool,
         coordinator: Arc<ChangesetCoordinator>,
         evidence: Option<Arc<mecmcp_audit::recorder::EvidenceRecorder>>,
+        direct_commit: mecmcp_audit::DirectCommitPolicy,
     ) -> Result<Self, UnifiError> {
         let clients = Self::build_clients(&registry)?;
         Ok(Self {
@@ -275,6 +280,7 @@ impl UnifiServer {
             drafts: Arc::new(std::sync::RwLock::new(BTreeMap::new())),
             evidence,
             plan_lock: Arc::new(tokio::sync::Mutex::new(())),
+            direct_commit,
             tool_router: Self::unifi_tool_router(),
         })
     }
@@ -420,6 +426,49 @@ impl UnifiServer {
             "site-scoped write authorized"
         );
         Ok(site)
+    }
+
+    /// Enforce the direct-commit gate for an operational action that mutates
+    /// a device or client in one call with no change-set approval, and audit
+    /// the outcome.
+    ///
+    /// Refuses unless the server was started with `--allow-direct-commit`.
+    /// Unlike [`authorize_write_site`](Self::authorize_write_site), which
+    /// logs through this crate's own `tracing`-based audit convention, this
+    /// emits its event through `mecmcp_audit::AuditScope` -- the same
+    /// mechanism `mecmcp_audit::DirectCommitPolicy::check` requires and the
+    /// one `rustjunosmcp` uses for the identical gate, so the two servers'
+    /// direct-commit records share one shape.
+    ///
+    /// On refusal the returned `CallToolResult` is final and the `AuditScope`
+    /// has already been dropped (and so emitted) recording the denial. On
+    /// success the caller gets back the *live* `AuditScope` instead of a
+    /// dropped one: it must call [`AuditScope::succeed`] or
+    /// [`AuditScope::fail`] once the gated device/client mutation has
+    /// actually run, then let it drop. Finalizing here -- before the caller
+    /// has performed the mutation -- would record `result=ok` for a call that
+    /// had not executed yet, and still `result=ok` if it went on to fail.
+    ///
+    /// # Errors
+    /// Returns the boxed `CallToolResult` [`tool_error`] renders for
+    /// [`mecmcp_audit::DirectCommitRefused`], for a handler to `return *result`.
+    fn gate_direct_commit(
+        &self,
+        caller: Option<&mecmcp_auth::CallerCtx<UnifiGrant>>,
+        tool: &'static str,
+        action: &'static str,
+        target: &str,
+    ) -> Result<mecmcp_audit::AuditScope, Box<CallToolResult>> {
+        let mut scope = match caller {
+            Some(ctx) => {
+                mecmcp_audit::AuditScope::from_caller(ctx, tool, action, vec![target.to_owned()])
+            }
+            None => mecmcp_audit::AuditScope::stdio(tool, action, vec![target.to_owned()]),
+        };
+        match self.direct_commit.check(&mut scope) {
+            Ok(()) => Ok(scope),
+            Err(error) => Err(Box::new(tool_error(error))),
+        }
     }
 
     /// Map a caller's server-verified `mecmcp_auth::ActorType` to the
@@ -1011,7 +1060,40 @@ impl UnifiServer {
             return *result;
         }
 
-        match ops::device_action(args, &client).await {
+        // Validated before the gate below reads `args.device` into the audit
+        // record: an unvalidated MAC would otherwise let a caller write an
+        // arbitrary string into that record before it was ever checked.
+        if let Err(error) = args.validate() {
+            return tool_error(error);
+        }
+
+        // `restart` mutates the device in one call with no change-set
+        // approval. `locate` is exempt: it is self-reverting and carries no
+        // lasting effect. `adopt`, `upgrade`, and `port_action` are not yet
+        // wired and refuse in `ops::device_action` before reaching a device.
+        let mut gate_scope = if args.action == ops::DeviceAction::Restart {
+            match self.gate_direct_commit(
+                caller.as_ref(),
+                "unifi_device_action",
+                "restart",
+                &args.device,
+            ) {
+                Ok(scope) => Some(scope),
+                Err(result) => return *result,
+            }
+        } else {
+            None
+        };
+
+        let result = ops::device_action(args, &client).await;
+        if let Some(scope) = gate_scope.as_mut() {
+            match &result {
+                Ok(_) => scope.succeed(),
+                Err(error) => scope.fail(error),
+            }
+        }
+
+        match result {
             Ok(json) => json_tool_result(json),
             Err(error) => tool_error(error),
         }
@@ -1051,7 +1133,51 @@ impl UnifiServer {
             return *result;
         }
 
-        match ops::client_action(args, &client).await {
+        // Validated before the gate below reads `args.client` into the audit
+        // record: an unvalidated MAC would otherwise let a caller write an
+        // arbitrary string into that record before it was ever checked.
+        if let Err(error) = args.validate() {
+            return tool_error(error);
+        }
+
+        // `block`, `unblock`, and `reconnect` mutate the client in one call
+        // with no change-set approval. `authorize` and `limit_bandwidth` are
+        // not yet wired and refuse in `ops::client_action` before reaching a
+        // client.
+        let gated_action = match args.action {
+            ops::ClientAction::Block => Some("block"),
+            ops::ClientAction::Unblock => Some("unblock"),
+            ops::ClientAction::Reconnect => Some("reconnect"),
+            ops::ClientAction::Authorize | ops::ClientAction::LimitBandwidth => None,
+            // `ClientAction` is `#[non_exhaustive]`: a future variant is
+            // ungated only until it is wired in `ops::client_action` and
+            // reviewed for whether it belongs in the gate above.
+            _ => None,
+        };
+        let mut gate_scope = match gated_action {
+            Some(action) => {
+                match self.gate_direct_commit(
+                    caller.as_ref(),
+                    "unifi_client_action",
+                    action,
+                    &args.client,
+                ) {
+                    Ok(scope) => Some(scope),
+                    Err(result) => return *result,
+                }
+            }
+            None => None,
+        };
+
+        let result = ops::client_action(args, &client).await;
+        if let Some(scope) = gate_scope.as_mut() {
+            match &result {
+                Ok(_) => scope.succeed(),
+                Err(error) => scope.fail(error),
+            }
+        }
+
+        match result {
             Ok(json) => json_tool_result(json),
             Err(error) => tool_error(error),
         }
@@ -3286,8 +3412,14 @@ mod tests {
             .await
             .expect("a second principal approves");
 
-        let server = UnifiServer::new(controller_registry(), true, coordinator.clone(), None)
-            .expect("server");
+        let server = UnifiServer::new(
+            controller_registry(),
+            true,
+            coordinator.clone(),
+            None,
+            mecmcp_audit::DirectCommitPolicy::new(false),
+        )
+        .expect("server");
 
         let refused = call(
             server,
