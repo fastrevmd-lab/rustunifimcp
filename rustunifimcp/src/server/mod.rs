@@ -1055,15 +1055,25 @@ impl UnifiServer {
             return *result;
         }
 
-        // `restart` mutates the device in one call with no change-set
-        // approval. `locate` is exempt: it is self-reverting and carries no
-        // lasting effect. `adopt`, `upgrade`, and `port_action` are not yet
-        // wired and refuse in `ops::device_action` before reaching a device.
-        if args.action == ops::DeviceAction::Restart
+        // `restart`, `adopt`, `upgrade`, and `port_action` each mutate the
+        // device in one call with no change-set approval. `locate` is exempt:
+        // it is self-reverting and carries no lasting effect.
+        let gated_action = match args.action {
+            ops::DeviceAction::Restart => Some("restart"),
+            ops::DeviceAction::Adopt => Some("adopt"),
+            ops::DeviceAction::Upgrade => Some("upgrade"),
+            ops::DeviceAction::PortAction => Some("port_action"),
+            ops::DeviceAction::Locate => None,
+            // `DeviceAction` is `#[non_exhaustive]`: a future variant is
+            // ungated only until it is wired in `ops::device_action` and
+            // reviewed for whether it belongs in the gate above.
+            _ => None,
+        };
+        if let Some(action) = gated_action
             && let Err(result) = self.gate_direct_commit(
                 caller.as_ref(),
                 "unifi_device_action",
-                "restart",
+                action,
                 &args.device,
             )
         {

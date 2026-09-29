@@ -4,15 +4,25 @@
 //! control. Each is individually scoped and audited, and all four are in
 //! [`crate::tools::WRITE_TOOLS`] -- a wildcard token reaches none of them.
 //!
-//! `device_action`'s `restart` and `client_action`'s `block`, `unblock`, and
-//! `reconnect` mutate a device or client in a single model call, with no
-//! independent second-principal review -- there is no change set to route an
-//! immediate command like "restart this device" through. The dispatch layer
+//! `device_action`'s `restart`, `adopt`, `upgrade`, and `port_action`, and
+//! `client_action`'s `block`, `unblock`, and `reconnect` mutate a device or
+//! client in a single model call, with no independent second-principal
+//! review -- there is no change set to route an immediate command like
+//! "restart this device" through. The dispatch layer
 //! (`server::UnifiServer::gate_direct_commit`) refuses those specific actions
 //! unless the server was started with `--allow-direct-commit`, and audits the
 //! outcome either way via `mecmcp_audit::AuditScope`. `locate` is exempt: it
-//! is self-reverting and carries no lasting effect. `adopt`, `upgrade`,
-//! `authorize`, and `limit_bandwidth` are not yet wired at all.
+//! is self-reverting and carries no lasting effect. `authorize` and
+//! `limit_bandwidth` are not yet wired at all.
+//!
+//! `adopt`, `upgrade`, and `port_action` additionally confirm live controller
+//! state for the target device -- via the private `stat/device` surface --
+//! before dispatching a command, rather than trusting a caller-supplied MAC
+//! blind: `adopt` refuses a device the controller does not report as pending,
+//! `upgrade` refuses a device that is not adopted, is not marked upgradable,
+//! or is already at the requested firmware version, and `port_action` refuses
+//! a device that is not adopted. This is on top of, not instead of, the
+//! direct-commit gate.
 //!
 //! `unifi_backup_action` deliberately does not carry `restore`. Restoring a
 //! controller backup overwrites the entire configuration, which is a larger
@@ -46,7 +56,14 @@ pub enum DeviceAction {
     Adopt,
     /// Start a firmware upgrade.
     Upgrade,
-    /// Act on a single switch port; requires `port_index`.
+    /// Power-cycle PoE on a single switch port; requires `port_index`.
+    ///
+    /// This is the one port action with a verified command spelling
+    /// (`power-cycle`). Enabling or disabling a port is a device
+    /// configuration change (it edits the port's `port_overrides` entry, not
+    /// an ephemeral command), so — like `unifi_backup_action`'s `restore` —
+    /// it belongs to the change-set lifecycle, not here, and is not wired by
+    /// this action.
     PortAction,
 }
 
@@ -63,6 +80,16 @@ pub struct DeviceActionArgs {
     /// Which port, for `port_action`.
     #[serde(default)]
     pub port_index: Option<u16>,
+    /// Target firmware version, required for `upgrade`.
+    ///
+    /// Naming the version the caller expects to land on -- rather than
+    /// letting `upgrade` mean "whatever the controller currently has queued"
+    /// -- is what [`device_action`] checks against the device's live
+    /// `stat/device` state before dispatching, so a stale or mistaken
+    /// upgrade call is refused instead of silently upgrading to the wrong
+    /// build.
+    #[serde(default)]
+    pub firmware_version: Option<String>,
     /// Site identifier; defaults to the controller's configured site.
     #[serde(default)]
     pub site: Option<String>,
@@ -127,13 +154,42 @@ fn validate_mac(mac: &str) -> Result<(), crate::error::UnifiError> {
     }
 }
 
+/// Characters permitted in a caller-supplied firmware version string.
+///
+/// UniFi firmware versions are dotted numeric strings, occasionally with a
+/// build suffix (e.g. `7.1.66.15380`, `6.6.65.15303`). `device_action`
+/// compares this value against the device's live `stat/device` state and
+/// interpolates it into audit records, so it is closed to the same
+/// conservative set `validate_mac` uses rather than accepting arbitrary text.
+///
+/// # Errors
+///
+/// Returns [`crate::error::UnifiError::Malformed`] if `version` is empty,
+/// longer than 64 bytes, or contains anything other than ASCII
+/// alphanumerics, `.`, `-`, or `_`.
+fn validate_firmware_version(version: &str) -> Result<(), crate::error::UnifiError> {
+    let is_valid = !version.is_empty()
+        && version.len() <= 64
+        && version
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_'));
+    if is_valid {
+        Ok(())
+    } else {
+        Err(crate::error::UnifiError::Malformed(format!(
+            "{version:?} is not a valid firmware version (expected dotted alphanumerics, e.g. 7.1.66.15380)"
+        )))
+    }
+}
+
 impl DeviceActionArgs {
     /// Check the cross-field invariants `serde` cannot express.
     ///
     /// # Errors
     ///
     /// Returns [`crate::error::UnifiError::Malformed`] if `port_action` was
-    /// requested without a `port_index`, if `site` is not a valid site
+    /// requested without a `port_index`, if `upgrade` was requested without a
+    /// well-formed `firmware_version`, if `site` is not a valid site
     /// identifier, or if `device` is not a valid MAC address.
     pub fn validate(&self) -> Result<(), crate::error::UnifiError> {
         validate_site(&self.site)?;
@@ -142,6 +198,18 @@ impl DeviceActionArgs {
             return Err(crate::error::UnifiError::Malformed(
                 "action `port_action` requires `port_index`".to_owned(),
             ));
+        }
+        if self.action == DeviceAction::Upgrade {
+            match &self.firmware_version {
+                Some(version) => validate_firmware_version(version)?,
+                None => {
+                    return Err(crate::error::UnifiError::Malformed(
+                        "action `upgrade` requires `firmware_version`, naming the version the \
+                         caller expects to land on, so a blind upgrade cannot proceed"
+                            .to_owned(),
+                    ));
+                }
+            }
         }
         Ok(())
     }
@@ -308,16 +376,170 @@ impl SpeedTestArgs {
     }
 }
 
+/// Fetch the private `stat/device` entry for `mac` on `site`, case-insensitively.
+///
+/// `stat/device` is the one private surface that reports devices the
+/// Integration API omits -- most notably a device awaiting adoption, which
+/// never appears in `/integration/v1/sites/{site}/devices` because that
+/// collection only lists devices already under management. `adopt`,
+/// `upgrade`, and `port_action` call this before dispatching a command so
+/// they act on what the controller currently reports, not on a caller's
+/// unverified claim about a MAC address.
+///
+/// # Errors
+///
+/// Returns [`crate::error::UnifiError::ReferenceNotFound`] if no entry in the
+/// response matches `mac`, and otherwise whatever [`crate::client::UnifiClient::get`]
+/// returns.
+async fn find_private_device(
+    client: &crate::client::UnifiClient,
+    site: &str,
+    mac: &str,
+) -> Result<serde_json::Value, crate::error::UnifiError> {
+    let raw = client
+        .get(
+            crate::ApiSurface::PrivateV1,
+            "/proxy/network/api/s/{site}/stat/device",
+            &[("site", site)],
+            &[],
+        )
+        .await?;
+
+    let data = crate::model::unwrap_enveloped_data(&raw)?;
+    data.iter()
+        .find(|item| {
+            item.get("mac")
+                .and_then(|m| m.as_str())
+                .is_some_and(|m| m.eq_ignore_ascii_case(mac))
+        })
+        .cloned()
+        .ok_or_else(|| {
+            crate::error::UnifiError::ReferenceNotFound(format!(
+                "no device with MAC {mac} is known to controller site {site:?}; refusing to \
+                 act on a device the controller has not reported"
+            ))
+        })
+}
+
+/// Decide the `adopt` command, or refuse, from a device's live `stat/device` state.
+///
+/// Kept separate from [`device_action`] so the decision -- as opposed to the
+/// network fetch that feeds it -- is unit-testable against a canned device
+/// entry, without a live controller.
+///
+/// # Errors
+///
+/// Returns [`crate::error::UnifiError::WriteRefused`] if `device` is already
+/// adopted. Returns [`crate::error::UnifiError::Malformed`] if `device`
+/// carries no `adopted` field at all.
+fn adopt_command(
+    device: &serde_json::Value,
+    mac: &str,
+) -> Result<&'static str, crate::error::UnifiError> {
+    match device.get("adopted").and_then(serde_json::Value::as_bool) {
+        Some(false) => Ok("adopt"),
+        Some(true) => Err(crate::error::UnifiError::WriteRefused(format!(
+            "device {mac} is already adopted; `adopt` is only valid for a device pending \
+             adoption"
+        ))),
+        None => Err(crate::error::UnifiError::Malformed(format!(
+            "controller did not report an adoption state for device {mac}; refusing to adopt \
+             without confirming it is pending"
+        ))),
+    }
+}
+
+/// Decide the `upgrade` command, or refuse, from a device's live `stat/device` state.
+///
+/// Refuses a device that is not adopted, one already at `firmware_version`
+/// (a no-op that still carries mutation risk), and one the controller does
+/// not itself report as upgradable -- so an upgrade only ever proceeds
+/// against state this call just fetched, never a caller's unverified claim.
+///
+/// # Errors
+///
+/// Returns [`crate::error::UnifiError::WriteRefused`] if `device` is not
+/// adopted, already runs `firmware_version`, or is not reported upgradable.
+/// Returns [`crate::error::UnifiError::Malformed`] if `device` carries no
+/// current `version` field.
+fn upgrade_command(
+    device: &serde_json::Value,
+    mac: &str,
+    firmware_version: &str,
+) -> Result<&'static str, crate::error::UnifiError> {
+    match device.get("adopted").and_then(serde_json::Value::as_bool) {
+        Some(true) => {}
+        Some(false) | None => {
+            return Err(crate::error::UnifiError::WriteRefused(format!(
+                "device {mac} is not adopted; cannot upgrade firmware on a device not under \
+                 management"
+            )));
+        }
+    }
+    match device.get("version").and_then(|v| v.as_str()) {
+        Some(current) if current == firmware_version => {
+            return Err(crate::error::UnifiError::WriteRefused(format!(
+                "device {mac} already runs firmware {firmware_version}; refusing a no-op \
+                 upgrade"
+            )));
+        }
+        Some(_) => {}
+        None => {
+            return Err(crate::error::UnifiError::Malformed(format!(
+                "controller did not report a current firmware version for device {mac}; \
+                 refusing a blind upgrade"
+            )));
+        }
+    }
+    match device
+        .get("upgradable")
+        .and_then(serde_json::Value::as_bool)
+    {
+        Some(true) => Ok("upgrade"),
+        Some(false) | None => Err(crate::error::UnifiError::WriteRefused(format!(
+            "controller does not report device {mac} as upgradable to a new firmware version"
+        ))),
+    }
+}
+
+/// Decide the `port_action` command, or refuse, from a device's live `stat/device` state.
+///
+/// # Errors
+///
+/// Returns [`crate::error::UnifiError::WriteRefused`] if `device` is not adopted.
+fn port_action_command(
+    device: &serde_json::Value,
+    mac: &str,
+) -> Result<&'static str, crate::error::UnifiError> {
+    match device.get("adopted").and_then(serde_json::Value::as_bool) {
+        Some(true) => Ok("power-cycle"),
+        Some(false) | None => Err(crate::error::UnifiError::WriteRefused(format!(
+            "device {mac} is not adopted; cannot act on a port of a device not under management"
+        ))),
+    }
+}
+
 /// Execute an operational action on a device.
 ///
-/// Wired actions: `restart`, `locate`. The controller validates devices but
-/// not commands — a misspelled command returns `rc: "ok"`, so command strings
-/// are closed and validated here.
+/// Wired actions: `restart`, `locate`, `adopt`, `upgrade`, `port_action`. The
+/// controller validates devices but not commands — a misspelled command
+/// returns `rc: "ok"`, so command strings are closed and validated here.
+///
+/// `adopt`, `upgrade`, and `port_action` additionally confirm the device's
+/// live `stat/device` state via [`find_private_device`] before dispatching --
+/// see [`adopt_command`], [`upgrade_command`], and [`port_action_command`] for
+/// what each one checks -- per the module documentation.
 ///
 /// # Errors
 ///
 /// Returns [`crate::error::UnifiError::Malformed`] if `port_action` is
-/// requested without a `port_index`, or if the action is not yet wired.
+/// requested without a `port_index` or `upgrade` without a `firmware_version`.
+/// Returns [`crate::error::UnifiError::ReferenceNotFound`] if the controller
+/// does not report a device with the given MAC. Returns
+/// [`crate::error::UnifiError::WriteRefused`] if `adopt` targets an
+/// already-adopted device, or if `upgrade`/`port_action` target a device that
+/// is not adopted, or if `upgrade` targets a device already at the requested
+/// firmware version or not marked upgradable.
 pub async fn device_action(
     args: DeviceActionArgs,
     client: &crate::client::UnifiClient,
@@ -336,28 +558,35 @@ pub async fn device_action(
         DeviceAction::Restart => "restart",
         DeviceAction::Locate => "set-locate",
         DeviceAction::Adopt => {
-            return Err(crate::error::UnifiError::Malformed(
-                "action `adopt` not yet wired; no command spelling verified from controller"
-                    .to_owned(),
-            ));
+            let device = find_private_device(client, site, &args.device).await?;
+            adopt_command(&device, &args.device)?
         }
         DeviceAction::Upgrade => {
-            return Err(crate::error::UnifiError::Malformed(
-                "action `upgrade` not yet wired; no command spelling verified from controller"
-                    .to_owned(),
-            ));
+            // `validate` already refused a missing `firmware_version`.
+            let firmware_version = args
+                .firmware_version
+                .as_deref()
+                .expect("upgrade requires firmware_version, enforced by validate()");
+            let device = find_private_device(client, site, &args.device).await?;
+            upgrade_command(&device, &args.device, firmware_version)?
         }
         DeviceAction::PortAction => {
-            return Err(crate::error::UnifiError::Malformed(
-                "action `port_action` not yet wired; requires port operation parameter".to_owned(),
-            ));
+            let device = find_private_device(client, site, &args.device).await?;
+            port_action_command(&device, &args.device)?
         }
     };
 
-    let body = serde_json::json!({
+    let mut body = serde_json::json!({
         "cmd": cmd,
         "mac": args.device
     });
+    if args.action == DeviceAction::PortAction {
+        // `validate` already refused a missing `port_index`.
+        let port_index = args
+            .port_index
+            .expect("port_action requires port_index, enforced by validate()");
+        body["port_idx"] = serde_json::json!(port_index);
+    }
 
     client
         .post(
@@ -591,6 +820,7 @@ mod tests {
             device: "aa:bb:cc:dd:ee:ff".to_owned(),
             action: DeviceAction::Restart,
             port_index: None,
+            firmware_version: None,
             site: Some("../../v2/api/site/default".to_owned()),
         };
         assert!(
@@ -623,6 +853,7 @@ mod tests {
             device: "aa:bb:cc:dd:ee:ff".to_owned(),
             action: DeviceAction::Restart,
             port_index: None,
+            firmware_version: None,
             site: Some("default/extra".to_owned()),
         };
         assert!(
@@ -653,6 +884,7 @@ mod tests {
             device: "aa:bb:cc:dd:ee:ff".to_owned(),
             action: DeviceAction::Restart,
             port_index: None,
+            firmware_version: None,
             site: Some("default".to_owned()),
         };
         assert!(device_args.validate().is_ok());
@@ -683,6 +915,7 @@ mod tests {
                 device: device.to_owned(),
                 action: DeviceAction::Restart,
                 port_index: None,
+                firmware_version: None,
                 site: None,
             };
             assert!(
@@ -712,6 +945,7 @@ mod tests {
             device: "aa:bb:cc:dd:ee:ff".to_owned(),
             action: DeviceAction::Restart,
             port_index: None,
+            firmware_version: None,
             site: None,
         };
         assert!(device_args.validate().is_ok());
@@ -805,31 +1039,76 @@ mod tests {
         }
     }
 
-    /// Unwired device actions must return an error, never success.
+    /// `adopt` and `port_action` need no `firmware_version` and pass
+    /// validation without one; `upgrade` is checked separately below because
+    /// it has its own required field.
     #[test]
-    fn unwired_device_actions_return_errors() {
+    fn adopt_and_port_action_pass_validation_without_a_firmware_version() {
         use super::{DeviceAction, DeviceActionArgs};
 
-        for action in [
-            DeviceAction::Adopt,
-            DeviceAction::Upgrade,
-            DeviceAction::PortAction,
+        for (action, port_index) in [
+            (DeviceAction::Adopt, None),
+            (DeviceAction::PortAction, Some(1)),
         ] {
             let args = DeviceActionArgs {
                 controller: "test".to_owned(),
                 device: "02:00:00:00:00:01".to_owned(),
                 action,
-                port_index: if action == DeviceAction::PortAction {
-                    Some(1)
-                } else {
-                    None
-                },
+                port_index,
+                firmware_version: None,
                 site: None,
             };
+            assert!(args.validate().is_ok(), "{action:?} must pass validation");
+        }
+    }
 
-            // Validate alone must succeed for these — the refusal happens in
-            // the dispatch, not in validation.
-            assert!(args.validate().is_ok(), "{:?} must pass validation", action);
+    /// `upgrade` without `firmware_version` must be refused before dispatch —
+    /// naming *some* target version is what stands between this action and a
+    /// blind upgrade to whatever the controller has queued.
+    #[test]
+    fn upgrade_requires_a_firmware_version() {
+        use super::{DeviceAction, DeviceActionArgs};
+
+        let args = DeviceActionArgs {
+            controller: "test".to_owned(),
+            device: "02:00:00:00:00:01".to_owned(),
+            action: DeviceAction::Upgrade,
+            port_index: None,
+            firmware_version: None,
+            site: None,
+        };
+        assert!(
+            args.validate().is_err(),
+            "upgrade without firmware_version must be refused before dispatch"
+        );
+    }
+
+    /// A well-formed `firmware_version` is accepted; a malformed one is
+    /// refused before dispatch, the same way a malformed MAC is.
+    #[test]
+    fn upgrade_firmware_version_is_validated() {
+        use super::{DeviceAction, DeviceActionArgs};
+
+        for (version, should_pass) in [
+            ("7.1.66.15380", true),
+            ("6.6.65", true),
+            ("", false),
+            ("7.1; rm -rf /", false),
+            (&"9".repeat(65), false),
+        ] {
+            let args = DeviceActionArgs {
+                controller: "test".to_owned(),
+                device: "02:00:00:00:00:01".to_owned(),
+                action: DeviceAction::Upgrade,
+                port_index: None,
+                firmware_version: Some(version.to_owned()),
+                site: None,
+            };
+            assert_eq!(
+                args.validate().is_ok(),
+                should_pass,
+                "{version:?} validation must be {should_pass}"
+            );
         }
     }
 
@@ -848,5 +1127,120 @@ mod tests {
 
             assert!(args.validate().is_ok(), "{:?} must pass validation", action);
         }
+    }
+
+    /// `adopt_command` must refuse a device already adopted, refuse one with
+    /// no reported adoption state, and only allow the command against a
+    /// device the controller reports as pending.
+    #[test]
+    fn adopt_command_only_allows_a_pending_device() {
+        use super::adopt_command;
+
+        let pending = serde_json::json!({"mac": "aa:bb:cc:dd:ee:ff", "adopted": false});
+        assert_eq!(
+            adopt_command(&pending, "aa:bb:cc:dd:ee:ff").expect("pending device"),
+            "adopt"
+        );
+
+        let already_adopted = serde_json::json!({"mac": "aa:bb:cc:dd:ee:ff", "adopted": true});
+        assert!(
+            adopt_command(&already_adopted, "aa:bb:cc:dd:ee:ff").is_err(),
+            "an already-adopted device must be refused"
+        );
+
+        let unknown_state = serde_json::json!({"mac": "aa:bb:cc:dd:ee:ff"});
+        assert!(
+            adopt_command(&unknown_state, "aa:bb:cc:dd:ee:ff").is_err(),
+            "a device with no reported adoption state must be refused, not assumed pending"
+        );
+    }
+
+    /// `upgrade_command` must refuse a device that is not adopted, refuse a
+    /// no-op upgrade to the firmware already running, refuse a device the
+    /// controller does not mark upgradable, and only allow the command when
+    /// all three checks pass.
+    #[test]
+    fn upgrade_command_validates_adoption_version_and_upgradability() {
+        use super::upgrade_command;
+
+        let ready = serde_json::json!({
+            "mac": "aa:bb:cc:dd:ee:ff",
+            "adopted": true,
+            "version": "6.6.65.15303",
+            "upgradable": true,
+        });
+        assert_eq!(
+            upgrade_command(&ready, "aa:bb:cc:dd:ee:ff", "7.1.66.15380").expect("ready device"),
+            "upgrade"
+        );
+
+        let not_adopted = serde_json::json!({
+            "mac": "aa:bb:cc:dd:ee:ff",
+            "adopted": false,
+            "version": "6.6.65.15303",
+            "upgradable": true,
+        });
+        assert!(
+            upgrade_command(&not_adopted, "aa:bb:cc:dd:ee:ff", "7.1.66.15380").is_err(),
+            "a device that is not adopted must be refused"
+        );
+
+        let already_at_target = serde_json::json!({
+            "mac": "aa:bb:cc:dd:ee:ff",
+            "adopted": true,
+            "version": "7.1.66.15380",
+            "upgradable": true,
+        });
+        assert!(
+            upgrade_command(&already_at_target, "aa:bb:cc:dd:ee:ff", "7.1.66.15380").is_err(),
+            "a no-op upgrade to the currently running firmware must be refused"
+        );
+
+        let not_upgradable = serde_json::json!({
+            "mac": "aa:bb:cc:dd:ee:ff",
+            "adopted": true,
+            "version": "6.6.65.15303",
+            "upgradable": false,
+        });
+        assert!(
+            upgrade_command(&not_upgradable, "aa:bb:cc:dd:ee:ff", "7.1.66.15380").is_err(),
+            "a device the controller does not mark upgradable must be refused"
+        );
+
+        let no_version_reported = serde_json::json!({
+            "mac": "aa:bb:cc:dd:ee:ff",
+            "adopted": true,
+            "upgradable": true,
+        });
+        assert!(
+            upgrade_command(&no_version_reported, "aa:bb:cc:dd:ee:ff", "7.1.66.15380").is_err(),
+            "a device with no reported current firmware must be refused, not blindly upgraded"
+        );
+    }
+
+    /// `port_action_command` must refuse a device that is not adopted, and
+    /// only allow `power-cycle` against one the controller reports as
+    /// adopted.
+    #[test]
+    fn port_action_command_only_allows_an_adopted_device() {
+        use super::port_action_command;
+
+        let adopted = serde_json::json!({"mac": "aa:bb:cc:dd:ee:ff", "adopted": true});
+        assert_eq!(
+            port_action_command(&adopted, "aa:bb:cc:dd:ee:ff").expect("adopted device"),
+            "power-cycle"
+        );
+
+        let not_adopted = serde_json::json!({"mac": "aa:bb:cc:dd:ee:ff", "adopted": false});
+        assert!(
+            port_action_command(&not_adopted, "aa:bb:cc:dd:ee:ff").is_err(),
+            "a device that is not adopted must be refused"
+        );
+
+        let unknown_state = serde_json::json!({"mac": "aa:bb:cc:dd:ee:ff"});
+        assert!(
+            port_action_command(&unknown_state, "aa:bb:cc:dd:ee:ff").is_err(),
+            "a device with no reported adoption state must be refused, not assumed adopted"
+        );
     }
 }

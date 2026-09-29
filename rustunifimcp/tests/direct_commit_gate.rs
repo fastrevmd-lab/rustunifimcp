@@ -1,13 +1,17 @@
 //! `--allow-direct-commit` gates the operational tools that mutate a device
 //! or client in one call with no independent second-principal approval.
 //!
-//! `unifi_device_action`'s `restart` and `unifi_client_action`'s `block`,
-//! `unblock`, and `reconnect` act on the controller immediately -- there is
-//! no change set to route an operational command like "restart this device"
-//! through. Without the flag, the server must refuse those calls before they
-//! ever reach the controller, over stdio (no caller context at all) exactly
-//! as over HTTP. With the flag, the call proceeds and the audit trail shows
-//! it ran under the flag.
+//! `unifi_device_action`'s `restart`, `adopt`, `upgrade`, and `port_action`,
+//! and `unifi_client_action`'s `block`, `unblock`, and `reconnect` act on the
+//! controller immediately -- there is no change set to route an operational
+//! command like "restart this device" through. Without the flag, the server
+//! must refuse those calls before they ever reach the controller, over stdio
+//! (no caller context at all) exactly as over HTTP. With the flag, the call
+//! proceeds and the audit trail shows it ran under the flag -- for `adopt`,
+//! `upgrade`, and `port_action` it then fails on the follow-up `stat/device`
+//! lookup those three make before dispatching (nothing listens at
+//! `127.0.0.1:1` in this test), which is exactly the signal these tests need:
+//! it proves the gate passed without requiring a real UniFi controller.
 //!
 //! `locate` is deliberately not gated (it is self-reverting), which
 //! `stdio_locate_is_not_gated_by_direct_commit` pins so a future change to
@@ -115,6 +119,9 @@ fn audit_lines(lines: &[String]) -> Vec<&String> {
 
 const RESTART_REQUEST: &str = r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"unifi_device_action","arguments":{"controller":"home","device":"aa:bb:cc:dd:ee:ff","action":"restart"}}}"#;
 const LOCATE_REQUEST: &str = r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"unifi_device_action","arguments":{"controller":"home","device":"aa:bb:cc:dd:ee:ff","action":"locate"}}}"#;
+const ADOPT_REQUEST: &str = r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"unifi_device_action","arguments":{"controller":"home","device":"aa:bb:cc:dd:ee:ff","action":"adopt"}}}"#;
+const UPGRADE_REQUEST: &str = r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"unifi_device_action","arguments":{"controller":"home","device":"aa:bb:cc:dd:ee:ff","action":"upgrade","firmware_version":"7.1.66.15380"}}}"#;
+const PORT_ACTION_REQUEST: &str = r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"unifi_device_action","arguments":{"controller":"home","device":"aa:bb:cc:dd:ee:ff","action":"port_action","port_index":1}}}"#;
 const BLOCK_REQUEST: &str = r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"unifi_client_action","arguments":{"controller":"home","client":"aa:bb:cc:dd:ee:ff","action":"block"}}}"#;
 
 /// Without `--allow-direct-commit`, a stdio session -- which carries no
@@ -156,6 +163,63 @@ fn stdio_allows_device_restart_with_the_flag() {
         record.contains("direct_commit_allowed=true"),
         "an allowed direct-commit call must be tagged in the audit trail: {record}"
     );
+}
+
+/// `adopt`, `upgrade`, and `port_action` are each gated identically to
+/// `restart`, refused before the controller is ever touched.
+#[test]
+fn stdio_refuses_device_adopt_upgrade_and_port_action_without_the_flag() {
+    for (name, request) in [
+        ("adopt", ADOPT_REQUEST),
+        ("upgrade", UPGRADE_REQUEST),
+        ("port_action", PORT_ACTION_REQUEST),
+    ] {
+        let lines = stderr_for_request(&[], request);
+
+        let audits = audit_lines(&lines);
+        let record = audits
+            .iter()
+            .find(|line| line.contains("unifi_device_action") && line.contains("direct_commit"))
+            .unwrap_or_else(|| {
+                panic!("{name}: no direct-commit gate audit record among: {audits:#?}")
+            });
+        assert!(
+            record.contains("authorization=denied") && record.contains("direct_commit_disabled"),
+            "{name}: refusal must be audited as a denial naming the reason: {record}"
+        );
+    }
+}
+
+/// With `--allow-direct-commit`, `adopt`, `upgrade`, and `port_action` each
+/// pass the gate -- each then fails on the `stat/device` lookup it makes
+/// before dispatching (nothing listens at 127.0.0.1:1 in this test), but
+/// that failure must not be the direct-commit refusal, and the audit trail
+/// must show the flag was exercised.
+#[test]
+fn stdio_allows_device_adopt_upgrade_and_port_action_with_the_flag() {
+    for (name, request) in [
+        ("adopt", ADOPT_REQUEST),
+        ("upgrade", UPGRADE_REQUEST),
+        ("port_action", PORT_ACTION_REQUEST),
+    ] {
+        let lines = stderr_for_request(&["--allow-direct-commit"], request);
+
+        let audits = audit_lines(&lines);
+        let record = audits
+            .iter()
+            .find(|line| line.contains("unifi_device_action") && line.contains("direct_commit"))
+            .unwrap_or_else(|| {
+                panic!("{name}: no direct-commit gate audit record among: {audits:#?}")
+            });
+        assert!(
+            !record.contains("direct_commit_disabled"),
+            "{name}: the flag must let the call proceed past the gate: {record}"
+        );
+        assert!(
+            record.contains("direct_commit_allowed=true"),
+            "{name}: an allowed direct-commit call must be tagged in the audit trail: {record}"
+        );
+    }
 }
 
 /// `block` is gated identically to `restart`.
@@ -418,6 +482,56 @@ async fn http_device_restart_gate_matches_stdio_with_and_without_the_flag() {
         assert!(
             !text.contains("allow-direct-commit"),
             "the flag must lift the refusal over HTTP too: {text}"
+        );
+        shutdown.cancel();
+        task.abort();
+    }
+}
+
+/// `adopt`, `upgrade`, and `port_action` are each gated identically to
+/// `restart` over HTTP too.
+#[tokio::test]
+async fn http_device_action_gate_covers_adopt_upgrade_and_port_action() {
+    let tokens_dir = tempfile::tempdir().expect("tempdir");
+    let tokens_path = tokens_dir.path().join("tokens.json");
+    let bearer = mint_token(&tokens_path, "device-gate-test", &["unifi_device_action"]);
+    let store = Arc::new(TokenStoreFile::<UnifiGrant>::load(&tokens_path).expect("load store"));
+
+    for args in [
+        serde_json::json!({
+            "controller": "home",
+            "device": "aa:bb:cc:dd:ee:ff",
+            "action": "adopt",
+        }),
+        serde_json::json!({
+            "controller": "home",
+            "device": "aa:bb:cc:dd:ee:ff",
+            "action": "upgrade",
+            "firmware_version": "7.1.66.15380",
+        }),
+        serde_json::json!({
+            "controller": "home",
+            "device": "aa:bb:cc:dd:ee:ff",
+            "action": "port_action",
+            "port_index": 1,
+        }),
+    ] {
+        let action = args["action"].as_str().expect("action").to_owned();
+        let (base_url, shutdown, task) = start_server(Arc::clone(&store), false).await;
+        let result = tokio::task::spawn_blocking({
+            let bearer = bearer.clone();
+            move || call_tool(base_url, bearer, "unifi_device_action", args)
+        })
+        .await
+        .expect("blocking task");
+        let text = result["content"][0]["text"].as_str().unwrap_or_default();
+        assert!(
+            result["isError"].as_bool().unwrap_or(false),
+            "{action} must be refused without the flag, got: {result}"
+        );
+        assert!(
+            text.contains("allow-direct-commit") || text.contains("direct-commit"),
+            "{action} must be refused by the direct-commit gate without the flag, got: {text}"
         );
         shutdown.cancel();
         task.abort();
