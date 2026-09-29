@@ -380,8 +380,8 @@ by fifteen hours. v0.2.0 closes that gap.
   must not be silently accepted — and was the only test for it. Enabled because
   `CanonicalEnvelope` in mecmcp 0.23.0 now carries `#[serde(deny_unknown_fields)]`.
 
-[unreleased]: https://github.com/fastrevmd-lab/rustunifimcp/compare/v0.3.2...HEAD
-[0.3.2]: https://github.com/fastrevmd-lab/rustunifimcp/compare/v0.3.1...v0.3.2
-[0.3.1]: https://github.com/fastrevmd-lab/rustunifimcp/compare/v0.3.0...v0.3.1
-[0.3.0]: https://github.com/fastrevmd-lab/rustunifimcp/compare/v0.2.0...v0.3.0
-[0.2.0]: https://github.com/fastrevmd-lab/rustunifimcp/releases/tag/v0.2.0
+[unreleased]: https://github.com/mechubsec/rustunifimcp/compare/v0.3.2...HEAD
+[0.3.2]: https://github.com/mechubsec/rustunifimcp/compare/v0.3.1...v0.3.2
+[0.3.1]: https://github.com/mechubsec/rustunifimcp/compare/v0.3.0...v0.3.1
+[0.3.0]: https://github.com/mechubsec/rustunifimcp/compare/v0.2.0...v0.3.0
+[0.2.0]: https://github.com/mechubsec/rustunifimcp/releases/tag/v0.2.0

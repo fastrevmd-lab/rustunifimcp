@@ -2,7 +2,7 @@
 //!
 //! This crate holds everything vendor-specific to UniFi. Authentication,
 //! transport hardening, audit, policy, inventory, and change control come from
-//! the [`mecmcp`](https://github.com/fastrevmd-lab/mecmcp) crate family and are
+//! the [`mecmcp`](https://github.com/mechubsec/mecmcp) crate family and are
 //! deliberately absent here.
 //!
 //! Implementation has not started; see `PLAN.md` at the workspace root for the

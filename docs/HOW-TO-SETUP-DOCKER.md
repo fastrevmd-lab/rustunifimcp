@@ -25,7 +25,7 @@ The image runs as numeric UID/GID `65532:65532` and has `ENTRYPOINT
 ["/usr/local/bin/rustunifimcp"]` with **no `CMD`**. Nothing is preset, so
 nothing can be silently lost when you pass your own arguments — unlike two
 sibling servers where config or audit flags live in `CMD` and disappear the
-moment a caller overrides anything (see fastrevmd-lab/mecmcp#357). The cost is
+moment a caller overrides anything (see mechubsec/mecmcp#357). The cost is
 that **you must supply every argument yourself**. The examples below are long
 because the image provides only the binary.
 
@@ -226,7 +226,7 @@ into a `docker run` command; the shapes are different.
 **`Fatal: failed to serve HTTP router`** — the actual cause is usually a missing
 `--allowed-origin` on an off-loopback listener (`--host 0.0.0.0` or a LAN
 address). Binding anything other than loopback demands an explicit origin
-allow-list. The unhelpful error message is a known gap (fastrevmd-lab/mecmcp#358).
+allow-list. The unhelpful error message is a known gap (mechubsec/mecmcp#358).
 `--allowed-origin` lists the origins of browser applications that call this
 server; clients sending no Origin header (curl, non-browser MCP clients) are
 never matched against it. Note that this server validates its inventory before
