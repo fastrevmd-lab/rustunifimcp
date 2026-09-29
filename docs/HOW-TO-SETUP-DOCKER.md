@@ -123,6 +123,36 @@ image=$(docker inspect ghcr.io/fastrevmd-lab/rustunifimcp:0.4.0 \
 Record the digest value wherever the deployment is tracked — it identifies the
 exact bytes.
 
+**Verify the signature and provenance before running it.** Every image pushed
+by the `Release image` workflow is signed keylessly with
+[cosign](https://github.com/sigstore/cosign) via GitHub Actions OIDC — no key
+pair exists anywhere. Verification pins the signing identity to that exact
+workflow, so a signature from anywhere else (a fork, a different repo, a local
+build) fails:
+
+```bash
+cosign verify \
+  --certificate-identity-regexp '^https://github\.com/fastrevmd-lab/rustunifimcp/\.github/workflows/release-image\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$' \
+  --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+  "$image"
+```
+
+The same workflow also attaches a
+[SLSA build provenance attestation](https://docs.github.com/en/actions/security-guides/using-artifact-attestations-to-establish-provenance-for-builds),
+checkable with the GitHub CLI instead of cosign:
+
+```bash
+gh attestation verify "oci://$image" --repo fastrevmd-lab/rustunifimcp
+```
+
+A failure in either check means do not run it, not "probably fine."
+
+**Multi-arch:** the published manifest covers both `linux/amd64` and
+`linux/arm64` — `docker pull`/`docker run` resolve the matching platform
+automatically. `cosign verify` and `gh attestation verify` above check the
+manifest-list digest once; that one signature and one attestation cover both
+platform images underneath it.
+
 ## 4. Run it — two-person mode
 
 ```bash

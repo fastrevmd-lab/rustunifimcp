@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+- **Release supply chain hardening** (MEC-507): the `Release image` workflow now
+  publishes a CycloneDX SBOM per workspace crate as a release artifact,
+  cosign-signs the pushed image keylessly (GitHub OIDC, no key material),
+  attaches a SLSA build provenance attestation, and builds/publishes
+  `linux/arm64` alongside `linux/amd64` in one multi-arch manifest.
+  `cargo deny check` in CI now covers `advisories` and `licenses` as well as
+  `bans` and `sources`; that surfaced a yanked `chacha20 0.10.1` (bumped to
+  0.10.2) and an unallowed `CDLA-Permissive-2.0` license on
+  `webpki-root-certs`/`webpki-roots` (added to `deny.toml`'s allow list —
+  covers embedded Mozilla root cert data, not code, same allowance as
+  mecmcp/rustjunosmcp/rustproxmoxmcp). See
+  [docs/HOW-TO-SETUP-DOCKER.md](docs/HOW-TO-SETUP-DOCKER.md) for the
+  `cosign verify` / `gh attestation verify` recipes.
 - **Re-pinned the `mecmcp-*` crates from `v0.23.1` to `v0.24.1`** (MEC-504).
   Brings in mecmcp#390 (the human-approver gate: `ChangesetCoordinator::approve_change_set`
   now takes an `approver_actor_type: mecmcp_audit::ActorType` and refuses
