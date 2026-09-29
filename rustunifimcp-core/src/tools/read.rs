@@ -966,7 +966,7 @@ mod tests {
                     .as_str()
                     .unwrap_or_default()
                     .contains("special-widget"),
-                "a non-matching item leaked through: {item}"
+                "a non-matching item leaked through the filter"
             );
         }
     }
