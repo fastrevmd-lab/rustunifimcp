@@ -52,6 +52,13 @@ mecmcp-runtime   = { version = "0.24.1", git = "https://github.com/mechubsec/mec
 mecmcp-secret    = { version = "0.24.1", git = "https://github.com/mechubsec/mecmcp", tag = "v0.24.1" }
 mecmcp-server    = { version = "0.24.1", git = "https://github.com/mechubsec/mecmcp", tag = "v0.24.1" }
 mecmcp-transport = { version = "0.24.1", git = "https://github.com/mechubsec/mecmcp", tag = "v0.24.1" }
+# mecmcp-redact landed on mecmcp's main branch after v0.24.1 was tagged and has
+# not shipped in a tagged release yet (checked against upstream: v0.24.1 is
+# still the newest tag and does not contain crates/mecmcp-redact). Every other
+# mecmcp-* crate above pins a tag; this one pins the exact commit that finished
+# the crate's trust-boundary review instead. Swap this to a tag once one exists
+# that includes this crate.
+mecmcp-redact    = { version = "0.24.1", git = "https://github.com/mechubsec/mecmcp", rev = "2e157e0f09894e2a5309408523c0911425eebd20" }
 
 [workspace.lints.rust]
 missing_docs = "warn"

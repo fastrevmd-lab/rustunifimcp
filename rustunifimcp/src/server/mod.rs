@@ -671,7 +671,7 @@ impl UnifiServer {
 impl UnifiServer {
     #[tool(
         name = "unifi_list_resources",
-        description = "List UniFi resources by type and site"
+        description = "List UniFi resources by type and site. Output is redacted: WLAN passphrases, VPN/RADIUS secrets, WireGuard private keys, and PPPoE passwords are stripped; identifying fields (name, VLAN, subnet, MAC/IP) remain."
     )]
     async fn unifi_list_resources(
         &self,
@@ -701,7 +701,7 @@ impl UnifiServer {
 
     #[tool(
         name = "unifi_get_resource",
-        description = "Get a specific UniFi resource by type and id"
+        description = "Get a specific UniFi resource by type and id. Output is redacted: WLAN passphrases, VPN/RADIUS secrets, WireGuard private keys, and PPPoE passwords are stripped; identifying fields (name, VLAN, subnet, MAC/IP) remain."
     )]
     async fn unifi_get_resource(
         &self,
@@ -731,7 +731,7 @@ impl UnifiServer {
 
     #[tool(
         name = "unifi_query_stats",
-        description = "Query statistics for UniFi resources"
+        description = "Query statistics for UniFi resources. Output is redacted: device/station stats are narrowed to their typed field set, site/WLAN/flow stats pass through a best-effort secret scan."
     )]
     async fn unifi_query_stats(
         &self,
@@ -761,7 +761,7 @@ impl UnifiServer {
 
     #[tool(
         name = "unifi_search",
-        description = "Search UniFi resources with filters"
+        description = "Search UniFi resources with filters. Output is redacted: results are filtered on the same typed, secret-stripped shape unifi_list_resources returns."
     )]
     async fn unifi_search(
         &self,
@@ -1016,7 +1016,7 @@ impl UnifiServer {
 
     #[tool(
         name = "unifi_site_health_report",
-        description = "Generate a site health report joining devices, health metrics, and statistics"
+        description = "Generate a site health report joining devices, health metrics, and statistics. Output is redacted: device fields are narrowed to the device allowlist, health/stats pass through a best-effort secret scan."
     )]
     async fn unifi_site_health_report(
         &self,
@@ -1046,7 +1046,7 @@ impl UnifiServer {
 
     #[tool(
         name = "unifi_topology_report",
-        description = "Generate a network topology report joining edges, devices, and networks"
+        description = "Generate a network topology report joining edges, devices, and networks. Output is redacted: device and network fields are narrowed to their allowlists, so VPN/PSK/WireGuard secrets on a network are stripped."
     )]
     async fn unifi_topology_report(
         &self,
@@ -1076,7 +1076,7 @@ impl UnifiServer {
 
     #[tool(
         name = "unifi_traffic_flow_report",
-        description = "Generate a traffic flow report joining clients, statistics, and top applications"
+        description = "Generate a traffic flow report joining clients, statistics, and top applications. Output is redacted: client fields are narrowed to the station allowlist, joined flow stats pass through a best-effort secret scan."
     )]
     async fn unifi_traffic_flow_report(
         &self,
@@ -1106,7 +1106,7 @@ impl UnifiServer {
 
     #[tool(
         name = "unifi_firewall_audit",
-        description = "Audit firewall policies and zones for common misconfigurations"
+        description = "Audit firewall policies and zones for common misconfigurations. Output is redacted: a policy's open field set is scanned for secret-named fields and redacted in place rather than allowlisted, since custom fields are load-bearing for the audit."
     )]
     async fn unifi_firewall_audit(
         &self,
@@ -1136,7 +1136,7 @@ impl UnifiServer {
 
     #[tool(
         name = "unifi_client_troubleshoot",
-        description = "Troubleshoot a client by correlating association, uplink, and firewall policy"
+        description = "Troubleshoot a client by correlating association, uplink, and firewall policy. Output is redacted: the station and device are narrowed to their allowlists, and any matched firewall policy is scanned for secret-named fields."
     )]
     async fn unifi_client_troubleshoot(
         &self,
@@ -1465,7 +1465,7 @@ impl UnifiServer {
 
     #[tool(
         name = "unifi_diff_change_set",
-        description = "Returns a diff showing what applying the change set would do"
+        description = "Returns a diff showing what applying the change set would do. Both sides of the diff are redacted: the pre-image and staged body are narrowed to the resource's allowlist before the diff is built."
     )]
     async fn unifi_diff_change_set(
         &self,
