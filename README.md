@@ -83,6 +83,26 @@ scopes, no audit trail, and no rate limiting. Anything that can reach the port
 has unrestricted write access to the controller. `rustunifimcp` inherits the
 full `mecmcp` security layer instead.
 
+## Tool catalog
+
+The read primitives, the collapsed surface behind `unifi_list_resources` and
+`unifi_get_resource`. Every `kind` is projected through the allowlist or scan
+documented in `rustunifimcp-core::redact` before it reaches the model — see
+[Design highlights](#design-highlights) below.
+
+| Tool | Notes |
+|---|---|
+| `unifi_list_resources` | `kind` = `station \| device \| network \| wlan \| port_profile \| dhcp_reservation \| firewall_policy \| firewall_zone \| firewall_group \| firewall_rule \| port_forward \| static_route \| traffic_route \| radius_profile` |
+| `unifi_get_resource` | `kind`, `id` |
+| `unifi_query_stats` | `subject` = `site \| device \| station \| wlan \| flow \| event`, plus a time window |
+| `unifi_search` | Free-text across stations, devices, and sites |
+| `unifi_list_sites` | |
+
+`firewall_rule`, `port_forward`, and `static_route` (MEC-509) are the legacy
+(non-zone-based) ruleset, port forwarding rules, and static routes —
+read-only for now; no write route exists for them through
+`unifi_stage_change`. `subject=event` reaches the controller's event log.
+
 ## Design highlights
 
 **Three API surfaces, each labelled.** UniFi's supported Integration API is far

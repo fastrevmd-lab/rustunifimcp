@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+- **Added read coverage for legacy firewall rules, port forwards, static
+  routes, and the controller event log** (MEC-509). `unifi_list_resources`
+  and `unifi_get_resource` gain three new `kind`s: `firewall_rule` (the
+  pre-zone-based ruleset, `rest/firewallrule`), `port_forward`
+  (`rest/portforward`), and `static_route` (`rest/routing`) — all read-only
+  for now, projected through their own field allowlists like every other
+  kind. `unifi_query_stats` gains `subject=event` for the controller's event
+  log (`stat/event`), projected through a typed model rather than the
+  shared crate's denylist-and-shape scan: an event's type discriminator is
+  carried in a field literally named `key`, which that scan treats as an
+  exact-match secret-shaped name, so it is renamed to `event_type` on the
+  way out instead.
 - **Release supply chain hardening** (MEC-507): the `Release image` workflow now
   publishes a CycloneDX SBOM per workspace crate as a release artifact,
   cosign-signs the pushed image keylessly (GitHub OIDC, no key material),
