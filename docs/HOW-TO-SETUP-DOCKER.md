@@ -115,13 +115,51 @@ Pull first if not already present, then capture the resolved digest (RepoDigests
 is empty if the image has not been pulled):
 
 ```bash
-docker pull ghcr.io/fastrevmd-lab/rustunifimcp:0.4.0
-image=$(docker inspect ghcr.io/fastrevmd-lab/rustunifimcp:0.4.0 \
+docker pull ghcr.io/mechubsec/rustunifimcp:0.4.0
+image=$(docker inspect ghcr.io/mechubsec/rustunifimcp:0.4.0 \
     --format '{{index .RepoDigests 0}}')
 ```
 
 Record the digest value wherever the deployment is tracked — it identifies the
 exact bytes.
+
+**Verify the signature and provenance before running it.** Every image pushed
+by the `Release image` workflow is signed keylessly with
+[cosign](https://github.com/sigstore/cosign) via GitHub Actions OIDC — no key
+pair exists anywhere. Verification pins the signing identity to that exact
+workflow, so a signature from anywhere else (a fork, a different repo, a local
+build) fails:
+
+```bash
+cosign verify \
+  --certificate-identity-regexp '^https://github\.com/mechubsec/rustunifimcp/\.github/workflows/release-image\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$' \
+  --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+  "$image"
+```
+
+The same workflow also attaches a
+[SLSA build provenance attestation](https://docs.github.com/en/actions/security-guides/using-artifact-attestations-to-establish-provenance-for-builds),
+checkable with the GitHub CLI instead of cosign:
+
+```bash
+gh attestation verify "oci://$image" --repo mechubsec/rustunifimcp
+```
+
+The workflow also attaches a signed CycloneDX SBOM to the same digest,
+checkable the same way:
+
+```bash
+gh attestation verify "oci://$image" --repo mechubsec/rustunifimcp \
+  --predicate-type https://cyclonedx.org/bom
+```
+
+A failure in any of these checks means do not run it, not "probably fine."
+
+**Multi-arch:** the published manifest covers both `linux/amd64` and
+`linux/arm64` — `docker pull`/`docker run` resolve the matching platform
+automatically. `cosign verify` and `gh attestation verify` above check the
+manifest-list digest once; that one signature and one attestation cover both
+platform images underneath it.
 
 ## 4. Run it — two-person mode
 
