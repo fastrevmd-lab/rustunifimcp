@@ -18,11 +18,16 @@
 //! `adopt`, `upgrade`, and `port_action` additionally confirm live controller
 //! state for the target device -- via the private `stat/device` surface --
 //! before dispatching a command, rather than trusting a caller-supplied MAC
-//! blind: `adopt` refuses a device the controller does not report as pending,
-//! `upgrade` refuses a device that is not adopted, is not marked upgradable,
-//! or is already at the requested firmware version, and `port_action` refuses
-//! a device that is not adopted. This is on top of, not instead of, the
-//! direct-commit gate.
+//! blind: `adopt` refuses a device the controller does not report as pending
+//! (`state != 2`) or whose reported `model` (and, if given, `serial`) does not
+//! match the caller-supplied `expected_model`/`expected_serial`; `upgrade`
+//! refuses a device that is not adopted, is not marked upgradable, is already
+//! at the requested firmware version, or whose controller-queued
+//! `upgrade_to_firmware` does not match the requested `firmware_version` (so
+//! the call never installs a build the caller did not name); and
+//! `port_action` refuses a device that is not adopted or whose `port_table`
+//! does not report the requested `port_index` as PoE-capable. This is on top
+//! of, not instead of, the direct-commit gate.
 //!
 //! `unifi_backup_action` deliberately does not carry `restore`. Restoring a
 //! controller backup overwrites the entire configuration, which is a larger
@@ -67,6 +72,28 @@ pub enum DeviceAction {
     PortAction,
 }
 
+impl DeviceAction {
+    /// Whether this action mutates a device in one call with no independent
+    /// change-set approval, and so must pass
+    /// `server::UnifiServer::gate_direct_commit` before it runs.
+    ///
+    /// `#[non_exhaustive]` only stops other crates from matching
+    /// exhaustively; it has no effect inside this crate, so this match has no
+    /// wildcard arm. Adding a variant is a compile error here until this
+    /// function says explicitly whether it is gated -- the server's dispatch
+    /// match relies on that, rather than defaulting a new, unreviewed
+    /// variant to ungated.
+    #[must_use]
+    pub fn requires_direct_commit(self) -> bool {
+        match self {
+            Self::Restart | Self::Adopt | Self::Upgrade | Self::PortAction => true,
+            // Self-reverting: the LED turns off on its own, so it carries no
+            // lasting effect worth gating.
+            Self::Locate => false,
+        }
+    }
+}
+
 /// Arguments to `unifi_device_action`.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -90,6 +117,26 @@ pub struct DeviceActionArgs {
     /// build.
     #[serde(default)]
     pub firmware_version: Option<String>,
+    /// Model the caller expects the pending device to report, required for
+    /// `adopt`.
+    ///
+    /// A pending device's MAC and model are self-reported in its inform to
+    /// the controller, so [`adopt_command`] checking `stat/device` alone is
+    /// not an identity check -- any host that can reach the inform endpoint
+    /// can present as a pending device. Naming the expected model here, for a
+    /// human to have confirmed out of band, is what [`device_action`] checks
+    /// the live `stat/device` entry against before adopting.
+    #[serde(default)]
+    pub expected_model: Option<String>,
+    /// Serial the caller expects the pending device to report, checked
+    /// against `stat/device` in addition to `expected_model` when given.
+    ///
+    /// Optional because not every deployment tracks serials ahead of
+    /// adoption, but strictly stronger than `expected_model` alone when
+    /// available: two pending devices of the same model would otherwise both
+    /// satisfy the model check.
+    #[serde(default)]
+    pub expected_serial: Option<String>,
     /// Site identifier; defaults to the controller's configured site.
     #[serde(default)]
     pub site: Option<String>,
@@ -182,6 +229,35 @@ fn validate_firmware_version(version: &str) -> Result<(), crate::error::UnifiErr
     }
 }
 
+/// Characters permitted in a caller-supplied device identity token
+/// (`expected_model`, `expected_serial`).
+///
+/// UniFi model names and serials are short alphanumeric tokens, occasionally
+/// with a `-` (e.g. `U6-LR`, `USW-24-PoE`). `adopt_command` compares these
+/// values against the device's live `stat/device` state, so this is closed to
+/// the same conservative set `validate_firmware_version` uses.
+///
+/// # Errors
+///
+/// Returns [`crate::error::UnifiError::Malformed`] if `value` is empty,
+/// longer than 64 bytes, or contains anything other than ASCII
+/// alphanumerics, `.`, `-`, or `_`.
+fn validate_identity_token(label: &str, value: &str) -> Result<(), crate::error::UnifiError> {
+    let is_valid = !value.is_empty()
+        && value.len() <= 64
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_'));
+    if is_valid {
+        Ok(())
+    } else {
+        Err(crate::error::UnifiError::Malformed(format!(
+            "{label} {value:?} is not valid (expected alphanumerics, '.', '-', or '_', max 64 \
+             bytes)"
+        )))
+    }
+}
+
 impl DeviceActionArgs {
     /// Check the cross-field invariants `serde` cannot express.
     ///
@@ -189,8 +265,10 @@ impl DeviceActionArgs {
     ///
     /// Returns [`crate::error::UnifiError::Malformed`] if `port_action` was
     /// requested without a `port_index`, if `upgrade` was requested without a
-    /// well-formed `firmware_version`, if `site` is not a valid site
-    /// identifier, or if `device` is not a valid MAC address.
+    /// well-formed `firmware_version`, if `adopt` was requested without a
+    /// well-formed `expected_model` (or an ill-formed `expected_serial`), if
+    /// `site` is not a valid site identifier, or if `device` is not a valid
+    /// MAC address.
     pub fn validate(&self) -> Result<(), crate::error::UnifiError> {
         validate_site(&self.site)?;
         validate_mac(&self.device)?;
@@ -209,6 +287,22 @@ impl DeviceActionArgs {
                             .to_owned(),
                     ));
                 }
+            }
+        }
+        if self.action == DeviceAction::Adopt {
+            match &self.expected_model {
+                Some(model) => validate_identity_token("expected_model", model)?,
+                None => {
+                    return Err(crate::error::UnifiError::Malformed(
+                        "action `adopt` requires `expected_model`, naming the model a human has \
+                         confirmed the pending device should report, so adoption cannot proceed \
+                         against an unexpected device"
+                            .to_owned(),
+                    ));
+                }
+            }
+            if let Some(serial) = &self.expected_serial {
+                validate_identity_token("expected_serial", serial)?;
             }
         }
         Ok(())
@@ -230,6 +324,26 @@ pub enum ClientAction {
     Authorize,
     /// Apply bandwidth limits to the client.
     LimitBandwidth,
+}
+
+impl ClientAction {
+    /// Whether this action mutates a client in one call with no independent
+    /// change-set approval, and so must pass
+    /// `server::UnifiServer::gate_direct_commit` before it runs.
+    ///
+    /// See [`DeviceAction::requires_direct_commit`] for why this match has no
+    /// wildcard arm.
+    #[must_use]
+    pub fn requires_direct_commit(self) -> bool {
+        match self {
+            Self::Block | Self::Unblock | Self::Reconnect => true,
+            // Not yet wired: `client_action` refuses both before reaching a
+            // client, so gating them here would be dead code today, but
+            // wiring either is exactly the kind of change this method exists
+            // to force a decision on.
+            Self::Authorize | Self::LimitBandwidth => false,
+        }
+    }
 }
 
 /// Arguments to `unifi_client_action`.
@@ -421,47 +535,115 @@ async fn find_private_device(
         })
 }
 
+/// The `stat/device` `state` value UniFi controllers use for a device
+/// awaiting adoption.
+const DEVICE_STATE_PENDING: i64 = 2;
+
 /// Decide the `adopt` command, or refuse, from a device's live `stat/device` state.
 ///
 /// Kept separate from [`device_action`] so the decision -- as opposed to the
 /// network fetch that feeds it -- is unit-testable against a canned device
 /// entry, without a live controller.
 ///
+/// A pending device's MAC and model are self-reported in its inform to the
+/// controller, so `adopted: false` alone is not an identity check -- any host
+/// that can reach the inform endpoint can present as a pending device with
+/// any MAC and model. This additionally requires the controller-reported
+/// `state` to be the pending-adoption state, and the reported `model` (and,
+/// when the caller gave one, `serial`) to match `expected_model` /
+/// `expected_serial` -- values a human is expected to have confirmed out of
+/// band before calling `adopt`.
+///
 /// # Errors
 ///
 /// Returns [`crate::error::UnifiError::WriteRefused`] if `device` is already
-/// adopted. Returns [`crate::error::UnifiError::Malformed`] if `device`
-/// carries no `adopted` field at all.
+/// adopted, is not reported in the pending-adoption state, or its reported
+/// model or serial does not match `expected_model` / `expected_serial`.
+/// Returns [`crate::error::UnifiError::Malformed`] if `device` carries no
+/// `adopted` or `state` field at all.
 fn adopt_command(
     device: &serde_json::Value,
     mac: &str,
+    expected_model: &str,
+    expected_serial: Option<&str>,
 ) -> Result<&'static str, crate::error::UnifiError> {
     match device.get("adopted").and_then(serde_json::Value::as_bool) {
-        Some(false) => Ok("adopt"),
-        Some(true) => Err(crate::error::UnifiError::WriteRefused(format!(
-            "device {mac} is already adopted; `adopt` is only valid for a device pending \
-             adoption"
-        ))),
-        None => Err(crate::error::UnifiError::Malformed(format!(
-            "controller did not report an adoption state for device {mac}; refusing to adopt \
-             without confirming it is pending"
-        ))),
+        Some(false) => {}
+        Some(true) => {
+            return Err(crate::error::UnifiError::WriteRefused(format!(
+                "device {mac} is already adopted; `adopt` is only valid for a device pending \
+                 adoption"
+            )));
+        }
+        None => {
+            return Err(crate::error::UnifiError::Malformed(format!(
+                "controller did not report an adoption state for device {mac}; refusing to \
+                 adopt without confirming it is pending"
+            )));
+        }
     }
+
+    match device.get("state").and_then(serde_json::Value::as_i64) {
+        Some(DEVICE_STATE_PENDING) => {}
+        Some(other) => {
+            return Err(crate::error::UnifiError::WriteRefused(format!(
+                "device {mac} is reported in state {other}, not the pending-adoption state \
+                 ({DEVICE_STATE_PENDING}); refusing to adopt"
+            )));
+        }
+        None => {
+            return Err(crate::error::UnifiError::Malformed(format!(
+                "controller did not report a state for device {mac}; refusing to adopt without \
+                 confirming it is pending"
+            )));
+        }
+    }
+
+    let reported_model = device.get("model").and_then(|v| v.as_str());
+    if reported_model != Some(expected_model) {
+        return Err(crate::error::UnifiError::WriteRefused(format!(
+            "device {mac} reports model {reported_model:?}, not the expected \
+             {expected_model:?}; refusing to adopt a device that does not match the caller's \
+             expectation"
+        )));
+    }
+
+    if let Some(expected_serial) = expected_serial {
+        let reported_serial = device.get("serial").and_then(|v| v.as_str());
+        if reported_serial != Some(expected_serial) {
+            return Err(crate::error::UnifiError::WriteRefused(format!(
+                "device {mac} reports serial {reported_serial:?}, not the expected \
+                 {expected_serial:?}; refusing to adopt a device that does not match the \
+                 caller's expectation"
+            )));
+        }
+    }
+
+    Ok("adopt")
 }
 
 /// Decide the `upgrade` command, or refuse, from a device's live `stat/device` state.
 ///
 /// Refuses a device that is not adopted, one already at `firmware_version`
-/// (a no-op that still carries mutation risk), and one the controller does
-/// not itself report as upgradable -- so an upgrade only ever proceeds
-/// against state this call just fetched, never a caller's unverified claim.
+/// (a no-op that still carries mutation risk), one the controller does not
+/// itself report as upgradable, and -- critically -- one whose
+/// controller-queued `upgrade_to_firmware` does not match `firmware_version`.
+/// The `cmd/devmgr` `upgrade` command carries no firmware version of its own;
+/// it installs whatever the controller currently has queued for the device.
+/// Without this last check, a caller naming a version that merely differs
+/// from the one currently running would pass every other check while the
+/// controller silently installed a different build than the one requested --
+/// so an upgrade only ever proceeds when the queued build is the one the
+/// caller named, never a caller's unverified claim about what will land.
 ///
 /// # Errors
 ///
 /// Returns [`crate::error::UnifiError::WriteRefused`] if `device` is not
-/// adopted, already runs `firmware_version`, or is not reported upgradable.
-/// Returns [`crate::error::UnifiError::Malformed`] if `device` carries no
-/// current `version` field.
+/// adopted, already runs `firmware_version`, is not reported upgradable, or
+/// the controller's queued `upgrade_to_firmware` does not match
+/// `firmware_version`. Returns [`crate::error::UnifiError::Malformed`] if
+/// `device` carries no current `version` field or no `upgrade_to_firmware`
+/// field.
 fn upgrade_command(
     device: &serde_json::Value,
     mac: &str,
@@ -495,26 +677,77 @@ fn upgrade_command(
         .get("upgradable")
         .and_then(serde_json::Value::as_bool)
     {
-        Some(true) => Ok("upgrade"),
-        Some(false) | None => Err(crate::error::UnifiError::WriteRefused(format!(
-            "controller does not report device {mac} as upgradable to a new firmware version"
+        Some(true) => {}
+        Some(false) | None => {
+            return Err(crate::error::UnifiError::WriteRefused(format!(
+                "controller does not report device {mac} as upgradable to a new firmware version"
+            )));
+        }
+    }
+    match device.get("upgrade_to_firmware").and_then(|v| v.as_str()) {
+        Some(queued) if queued == firmware_version => Ok("upgrade"),
+        Some(queued) => Err(crate::error::UnifiError::WriteRefused(format!(
+            "controller would install firmware {queued} on device {mac}, not the requested \
+             {firmware_version}; the `upgrade` command carries no version of its own and \
+             installs whatever the controller has queued, so refusing rather than upgrading to \
+             the wrong build"
+        ))),
+        None => Err(crate::error::UnifiError::Malformed(format!(
+            "controller did not report a queued firmware version (upgrade_to_firmware) for \
+             device {mac}; refusing a blind upgrade"
         ))),
     }
 }
 
 /// Decide the `port_action` command, or refuse, from a device's live `stat/device` state.
 ///
+/// The controller answers `rc: "ok"` to a `power-cycle` naming a port that
+/// does not exist or carries no PoE, so this confirms `device`'s reported
+/// `port_table` has an entry at `port_index` with `port_poe: true` before
+/// dispatching -- otherwise the call would be audited as a success while
+/// nothing on the device actually changed.
+///
 /// # Errors
 ///
-/// Returns [`crate::error::UnifiError::WriteRefused`] if `device` is not adopted.
+/// Returns [`crate::error::UnifiError::WriteRefused`] if `device` is not
+/// adopted, or its `port_table` has no PoE-capable entry at `port_index`.
 fn port_action_command(
     device: &serde_json::Value,
     mac: &str,
+    port_index: u16,
 ) -> Result<&'static str, crate::error::UnifiError> {
     match device.get("adopted").and_then(serde_json::Value::as_bool) {
-        Some(true) => Ok("power-cycle"),
-        Some(false) | None => Err(crate::error::UnifiError::WriteRefused(format!(
-            "device {mac} is not adopted; cannot act on a port of a device not under management"
+        Some(true) => {}
+        Some(false) | None => {
+            return Err(crate::error::UnifiError::WriteRefused(format!(
+                "device {mac} is not adopted; cannot act on a port of a device not under \
+                 management"
+            )));
+        }
+    }
+
+    let port = device
+        .get("port_table")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .find(|entry| {
+            entry
+                .get("port_idx")
+                .and_then(serde_json::Value::as_u64)
+                .is_some_and(|idx| idx == u64::from(port_index))
+        });
+    match port {
+        Some(entry) if entry.get("port_poe").and_then(serde_json::Value::as_bool) == Some(true) => {
+            Ok("power-cycle")
+        }
+        Some(_) => Err(crate::error::UnifiError::WriteRefused(format!(
+            "device {mac} port {port_index} is not reported as PoE-capable; refusing a \
+             power-cycle the controller would silently no-op"
+        ))),
+        None => Err(crate::error::UnifiError::WriteRefused(format!(
+            "device {mac} does not report a port at index {port_index}; refusing a power-cycle \
+             the controller would silently no-op"
         ))),
     }
 }
@@ -558,8 +791,18 @@ pub async fn device_action(
         DeviceAction::Restart => "restart",
         DeviceAction::Locate => "set-locate",
         DeviceAction::Adopt => {
+            // `validate` already refused a missing `expected_model`.
+            let expected_model = args
+                .expected_model
+                .as_deref()
+                .expect("adopt requires expected_model, enforced by validate()");
             let device = find_private_device(client, site, &args.device).await?;
-            adopt_command(&device, &args.device)?
+            adopt_command(
+                &device,
+                &args.device,
+                expected_model,
+                args.expected_serial.as_deref(),
+            )?
         }
         DeviceAction::Upgrade => {
             // `validate` already refused a missing `firmware_version`.
@@ -571,8 +814,12 @@ pub async fn device_action(
             upgrade_command(&device, &args.device, firmware_version)?
         }
         DeviceAction::PortAction => {
+            // `validate` already refused a missing `port_index`.
+            let port_index = args
+                .port_index
+                .expect("port_action requires port_index, enforced by validate()");
             let device = find_private_device(client, site, &args.device).await?;
-            port_action_command(&device, &args.device)?
+            port_action_command(&device, &args.device, port_index)?
         }
     };
 
@@ -719,6 +966,32 @@ mod tests {
         assert!(parsed.is_err());
     }
 
+    /// Pins which `DeviceAction` variants the direct-commit gate covers, so a
+    /// future variant added to the match in [`DeviceAction::requires_direct_commit`]
+    /// is a deliberate, reviewed decision rather than a silent default.
+    #[test]
+    fn device_action_direct_commit_gating_matches_documented_actions() {
+        assert!(DeviceAction::Restart.requires_direct_commit());
+        assert!(DeviceAction::Adopt.requires_direct_commit());
+        assert!(DeviceAction::Upgrade.requires_direct_commit());
+        assert!(DeviceAction::PortAction.requires_direct_commit());
+        assert!(
+            !DeviceAction::Locate.requires_direct_commit(),
+            "locate is self-reverting and must stay ungated"
+        );
+    }
+
+    /// Same pin for `ClientAction`: only the three wired mutating actions are
+    /// gated.
+    #[test]
+    fn client_action_direct_commit_gating_matches_documented_actions() {
+        assert!(ClientAction::Block.requires_direct_commit());
+        assert!(ClientAction::Unblock.requires_direct_commit());
+        assert!(ClientAction::Reconnect.requires_direct_commit());
+        assert!(!ClientAction::Authorize.requires_direct_commit());
+        assert!(!ClientAction::LimitBandwidth.requires_direct_commit());
+    }
+
     #[test]
     fn a_port_action_requires_a_port_index() {
         let raw = r#"{"controller":"home","device":"aa:bb:cc:dd:ee:ff","action":"port_action"}"#;
@@ -821,6 +1094,8 @@ mod tests {
             action: DeviceAction::Restart,
             port_index: None,
             firmware_version: None,
+            expected_model: None,
+            expected_serial: None,
             site: Some("../../v2/api/site/default".to_owned()),
         };
         assert!(
@@ -854,6 +1129,8 @@ mod tests {
             action: DeviceAction::Restart,
             port_index: None,
             firmware_version: None,
+            expected_model: None,
+            expected_serial: None,
             site: Some("default/extra".to_owned()),
         };
         assert!(
@@ -885,6 +1162,8 @@ mod tests {
             action: DeviceAction::Restart,
             port_index: None,
             firmware_version: None,
+            expected_model: None,
+            expected_serial: None,
             site: Some("default".to_owned()),
         };
         assert!(device_args.validate().is_ok());
@@ -916,6 +1195,8 @@ mod tests {
                 action: DeviceAction::Restart,
                 port_index: None,
                 firmware_version: None,
+                expected_model: None,
+                expected_serial: None,
                 site: None,
             };
             assert!(
@@ -946,6 +1227,8 @@ mod tests {
             action: DeviceAction::Restart,
             port_index: None,
             firmware_version: None,
+            expected_model: None,
+            expected_serial: None,
             site: None,
         };
         assert!(device_args.validate().is_ok());
@@ -1046,9 +1329,9 @@ mod tests {
     fn adopt_and_port_action_pass_validation_without_a_firmware_version() {
         use super::{DeviceAction, DeviceActionArgs};
 
-        for (action, port_index) in [
-            (DeviceAction::Adopt, None),
-            (DeviceAction::PortAction, Some(1)),
+        for (action, port_index, expected_model) in [
+            (DeviceAction::Adopt, None, Some("U6-LR".to_owned())),
+            (DeviceAction::PortAction, Some(1), None),
         ] {
             let args = DeviceActionArgs {
                 controller: "test".to_owned(),
@@ -1056,9 +1339,67 @@ mod tests {
                 action,
                 port_index,
                 firmware_version: None,
+                expected_model,
+                expected_serial: None,
                 site: None,
             };
             assert!(args.validate().is_ok(), "{action:?} must pass validation");
+        }
+    }
+
+    /// `adopt` without `expected_model` must be refused before dispatch --
+    /// naming the expected model is what stands between this action and
+    /// adopting whatever pending device the controller reports.
+    #[test]
+    fn adopt_requires_an_expected_model() {
+        use super::{DeviceAction, DeviceActionArgs};
+
+        let args = DeviceActionArgs {
+            controller: "test".to_owned(),
+            device: "02:00:00:00:00:01".to_owned(),
+            action: DeviceAction::Adopt,
+            port_index: None,
+            firmware_version: None,
+            expected_model: None,
+            expected_serial: None,
+            site: None,
+        };
+        assert!(
+            args.validate().is_err(),
+            "adopt without expected_model must be refused before dispatch"
+        );
+    }
+
+    /// A well-formed `expected_model`/`expected_serial` is accepted; a
+    /// malformed one is refused before dispatch, the same way a malformed
+    /// firmware version is.
+    #[test]
+    fn adopt_identity_tokens_are_validated() {
+        use super::{DeviceAction, DeviceActionArgs};
+
+        for (model, serial, should_pass) in [
+            (Some("U6-LR"), None, true),
+            (Some("USW-24-PoE"), Some("ABC123"), true),
+            (Some(""), None, false),
+            (Some("bad; rm -rf /"), None, false),
+            (Some("U6-LR"), Some("bad serial"), false),
+            (None, None, false),
+        ] {
+            let args = DeviceActionArgs {
+                controller: "test".to_owned(),
+                device: "02:00:00:00:00:01".to_owned(),
+                action: DeviceAction::Adopt,
+                port_index: None,
+                firmware_version: None,
+                expected_model: model.map(str::to_owned),
+                expected_serial: serial.map(str::to_owned),
+                site: None,
+            };
+            assert_eq!(
+                args.validate().is_ok(),
+                should_pass,
+                "model {model:?} / serial {serial:?} validation must be {should_pass}"
+            );
         }
     }
 
@@ -1075,6 +1416,8 @@ mod tests {
             action: DeviceAction::Upgrade,
             port_index: None,
             firmware_version: None,
+            expected_model: None,
+            expected_serial: None,
             site: None,
         };
         assert!(
@@ -1102,6 +1445,8 @@ mod tests {
                 action: DeviceAction::Upgrade,
                 port_index: None,
                 firmware_version: Some(version.to_owned()),
+                expected_model: None,
+                expected_serial: None,
                 site: None,
             };
             assert_eq!(
@@ -1130,37 +1475,90 @@ mod tests {
     }
 
     /// `adopt_command` must refuse a device already adopted, refuse one with
-    /// no reported adoption state, and only allow the command against a
-    /// device the controller reports as pending.
+    /// no reported adoption state, refuse one not in the pending-adoption
+    /// `state`, refuse one whose reported model or serial does not match the
+    /// caller's expectation, and only allow the command against a device the
+    /// controller reports as pending with a matching identity.
     #[test]
-    fn adopt_command_only_allows_a_pending_device() {
+    fn adopt_command_only_allows_a_pending_device_matching_the_expected_identity() {
         use super::adopt_command;
 
-        let pending = serde_json::json!({"mac": "aa:bb:cc:dd:ee:ff", "adopted": false});
+        let pending = serde_json::json!({
+            "mac": "aa:bb:cc:dd:ee:ff",
+            "adopted": false,
+            "state": 2,
+            "model": "U6-LR",
+            "serial": "ABC123",
+        });
         assert_eq!(
-            adopt_command(&pending, "aa:bb:cc:dd:ee:ff").expect("pending device"),
+            adopt_command(&pending, "aa:bb:cc:dd:ee:ff", "U6-LR", None).expect("pending device"),
+            "adopt"
+        );
+        assert_eq!(
+            adopt_command(&pending, "aa:bb:cc:dd:ee:ff", "U6-LR", Some("ABC123"))
+                .expect("pending device matching serial too"),
             "adopt"
         );
 
-        let already_adopted = serde_json::json!({"mac": "aa:bb:cc:dd:ee:ff", "adopted": true});
+        let already_adopted = serde_json::json!({
+            "mac": "aa:bb:cc:dd:ee:ff",
+            "adopted": true,
+            "state": 1,
+            "model": "U6-LR",
+        });
         assert!(
-            adopt_command(&already_adopted, "aa:bb:cc:dd:ee:ff").is_err(),
+            adopt_command(&already_adopted, "aa:bb:cc:dd:ee:ff", "U6-LR", None).is_err(),
             "an already-adopted device must be refused"
         );
 
-        let unknown_state = serde_json::json!({"mac": "aa:bb:cc:dd:ee:ff"});
+        let unknown_state = serde_json::json!({"mac": "aa:bb:cc:dd:ee:ff", "model": "U6-LR"});
         assert!(
-            adopt_command(&unknown_state, "aa:bb:cc:dd:ee:ff").is_err(),
+            adopt_command(&unknown_state, "aa:bb:cc:dd:ee:ff", "U6-LR", None).is_err(),
             "a device with no reported adoption state must be refused, not assumed pending"
+        );
+
+        let not_pending_state = serde_json::json!({
+            "mac": "aa:bb:cc:dd:ee:ff",
+            "adopted": false,
+            "state": 4,
+            "model": "U6-LR",
+        });
+        assert!(
+            adopt_command(&not_pending_state, "aa:bb:cc:dd:ee:ff", "U6-LR", None).is_err(),
+            "a device reported `adopted: false` but not in the pending state must be refused"
+        );
+
+        let wrong_model = serde_json::json!({
+            "mac": "aa:bb:cc:dd:ee:ff",
+            "adopted": false,
+            "state": 2,
+            "model": "USW-24-PoE",
+        });
+        assert!(
+            adopt_command(&wrong_model, "aa:bb:cc:dd:ee:ff", "U6-LR", None).is_err(),
+            "a device reporting a different model than expected must be refused"
+        );
+
+        let wrong_serial = serde_json::json!({
+            "mac": "aa:bb:cc:dd:ee:ff",
+            "adopted": false,
+            "state": 2,
+            "model": "U6-LR",
+            "serial": "XYZ999",
+        });
+        assert!(
+            adopt_command(&wrong_serial, "aa:bb:cc:dd:ee:ff", "U6-LR", Some("ABC123")).is_err(),
+            "a device reporting a different serial than expected must be refused"
         );
     }
 
     /// `upgrade_command` must refuse a device that is not adopted, refuse a
     /// no-op upgrade to the firmware already running, refuse a device the
-    /// controller does not mark upgradable, and only allow the command when
-    /// all three checks pass.
+    /// controller does not mark upgradable, refuse a device whose
+    /// controller-queued firmware does not match what the caller asked for,
+    /// and only allow the command when every check passes.
     #[test]
-    fn upgrade_command_validates_adoption_version_and_upgradability() {
+    fn upgrade_command_validates_adoption_version_upgradability_and_queued_firmware() {
         use super::upgrade_command;
 
         let ready = serde_json::json!({
@@ -1168,6 +1566,7 @@ mod tests {
             "adopted": true,
             "version": "6.6.65.15303",
             "upgradable": true,
+            "upgrade_to_firmware": "7.1.66.15380",
         });
         assert_eq!(
             upgrade_command(&ready, "aa:bb:cc:dd:ee:ff", "7.1.66.15380").expect("ready device"),
@@ -1179,6 +1578,7 @@ mod tests {
             "adopted": false,
             "version": "6.6.65.15303",
             "upgradable": true,
+            "upgrade_to_firmware": "7.1.66.15380",
         });
         assert!(
             upgrade_command(&not_adopted, "aa:bb:cc:dd:ee:ff", "7.1.66.15380").is_err(),
@@ -1190,6 +1590,7 @@ mod tests {
             "adopted": true,
             "version": "7.1.66.15380",
             "upgradable": true,
+            "upgrade_to_firmware": "7.1.66.15380",
         });
         assert!(
             upgrade_command(&already_at_target, "aa:bb:cc:dd:ee:ff", "7.1.66.15380").is_err(),
@@ -1201,6 +1602,7 @@ mod tests {
             "adopted": true,
             "version": "6.6.65.15303",
             "upgradable": false,
+            "upgrade_to_firmware": "7.1.66.15380",
         });
         assert!(
             upgrade_command(&not_upgradable, "aa:bb:cc:dd:ee:ff", "7.1.66.15380").is_err(),
@@ -1211,36 +1613,83 @@ mod tests {
             "mac": "aa:bb:cc:dd:ee:ff",
             "adopted": true,
             "upgradable": true,
+            "upgrade_to_firmware": "7.1.66.15380",
         });
         assert!(
             upgrade_command(&no_version_reported, "aa:bb:cc:dd:ee:ff", "7.1.66.15380").is_err(),
             "a device with no reported current firmware must be refused, not blindly upgraded"
         );
+
+        let queued_mismatch = serde_json::json!({
+            "mac": "aa:bb:cc:dd:ee:ff",
+            "adopted": true,
+            "version": "6.6.65.15303",
+            "upgradable": true,
+            "upgrade_to_firmware": "7.2.0.0",
+        });
+        assert!(
+            upgrade_command(&queued_mismatch, "aa:bb:cc:dd:ee:ff", "7.1.66.15380").is_err(),
+            "a controller queuing a different firmware than requested must be refused, not \
+             installed blind"
+        );
+
+        let no_queued_firmware = serde_json::json!({
+            "mac": "aa:bb:cc:dd:ee:ff",
+            "adopted": true,
+            "version": "6.6.65.15303",
+            "upgradable": true,
+        });
+        assert!(
+            upgrade_command(&no_queued_firmware, "aa:bb:cc:dd:ee:ff", "7.1.66.15380").is_err(),
+            "a device with no reported queued firmware must be refused, not blindly upgraded"
+        );
     }
 
-    /// `port_action_command` must refuse a device that is not adopted, and
-    /// only allow `power-cycle` against one the controller reports as
-    /// adopted.
+    /// `port_action_command` must refuse a device that is not adopted, refuse
+    /// a port index the device does not report at all, refuse a reported
+    /// port with no PoE, and only allow `power-cycle` against an adopted
+    /// device's PoE-capable port.
     #[test]
-    fn port_action_command_only_allows_an_adopted_device() {
+    fn port_action_command_only_allows_an_adopted_device_with_a_poe_port() {
         use super::port_action_command;
 
-        let adopted = serde_json::json!({"mac": "aa:bb:cc:dd:ee:ff", "adopted": true});
+        let adopted = serde_json::json!({
+            "mac": "aa:bb:cc:dd:ee:ff",
+            "adopted": true,
+            "port_table": [
+                {"port_idx": 1, "port_poe": true},
+                {"port_idx": 2, "port_poe": false},
+            ],
+        });
         assert_eq!(
-            port_action_command(&adopted, "aa:bb:cc:dd:ee:ff").expect("adopted device"),
+            port_action_command(&adopted, "aa:bb:cc:dd:ee:ff", 1).expect("adopted device"),
             "power-cycle"
         );
 
-        let not_adopted = serde_json::json!({"mac": "aa:bb:cc:dd:ee:ff", "adopted": false});
+        let not_adopted = serde_json::json!({
+            "mac": "aa:bb:cc:dd:ee:ff",
+            "adopted": false,
+            "port_table": [{"port_idx": 1, "port_poe": true}],
+        });
         assert!(
-            port_action_command(&not_adopted, "aa:bb:cc:dd:ee:ff").is_err(),
+            port_action_command(&not_adopted, "aa:bb:cc:dd:ee:ff", 1).is_err(),
             "a device that is not adopted must be refused"
         );
 
         let unknown_state = serde_json::json!({"mac": "aa:bb:cc:dd:ee:ff"});
         assert!(
-            port_action_command(&unknown_state, "aa:bb:cc:dd:ee:ff").is_err(),
+            port_action_command(&unknown_state, "aa:bb:cc:dd:ee:ff", 1).is_err(),
             "a device with no reported adoption state must be refused, not assumed adopted"
+        );
+
+        assert!(
+            port_action_command(&adopted, "aa:bb:cc:dd:ee:ff", 2).is_err(),
+            "a reported port with no PoE must be refused, not silently no-opped"
+        );
+
+        assert!(
+            port_action_command(&adopted, "aa:bb:cc:dd:ee:ff", 99).is_err(),
+            "a port index the device does not report must be refused, not silently no-opped"
         );
     }
 }

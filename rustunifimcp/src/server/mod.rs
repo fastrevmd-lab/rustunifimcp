@@ -429,8 +429,8 @@ impl UnifiServer {
     }
 
     /// Enforce the direct-commit gate for an operational action that mutates
-    /// a device or client in one call with no change-set approval, and audit
-    /// the outcome.
+    /// a device or client in one call with no change-set approval, returning
+    /// the live [`mecmcp_audit::AuditScope`] for the caller to settle.
     ///
     /// Refuses unless the server was started with `--allow-direct-commit`.
     /// Unlike [`authorize_write_site`](Self::authorize_write_site), which
@@ -438,8 +438,17 @@ impl UnifiServer {
     /// emits its event through `mecmcp_audit::AuditScope` -- the same
     /// mechanism `mecmcp_audit::DirectCommitPolicy::check` requires and the
     /// one `rustjunosmcp` uses for the identical gate, so the two servers'
-    /// direct-commit records share one shape. The `AuditScope` is dropped (and
-    /// so emits) whether `check` allows or refuses the call.
+    /// direct-commit records share one shape.
+    ///
+    /// On refusal the returned `Box<CallToolResult>` already dropped (and so
+    /// emitted) the denied scope; a handler just returns it. On success the
+    /// scope is `Ok(())`-tagged but held open and returned rather than
+    /// dropped here: this gate only proves the call was *permitted*, not that
+    /// the device mutation that follows *succeeded*, and a scope dropped
+    /// before that mutation runs would audit a refusal or a controller error
+    /// as `result=ok`. The caller must call `succeed()` or `fail()` on the
+    /// returned scope once the mutation has actually run, before it goes out
+    /// of scope.
     ///
     /// # Errors
     /// Returns the boxed `CallToolResult` [`tool_error`] renders for
@@ -450,7 +459,7 @@ impl UnifiServer {
         tool: &'static str,
         action: &'static str,
         target: &str,
-    ) -> Result<(), Box<CallToolResult>> {
+    ) -> Result<mecmcp_audit::AuditScope, Box<CallToolResult>> {
         let mut scope = match caller {
             Some(ctx) => {
                 mecmcp_audit::AuditScope::from_caller(ctx, tool, action, vec![target.to_owned()])
@@ -458,10 +467,7 @@ impl UnifiServer {
             None => mecmcp_audit::AuditScope::stdio(tool, action, vec![target.to_owned()]),
         };
         match self.direct_commit.check(&mut scope) {
-            Ok(()) => {
-                scope.succeed();
-                Ok(())
-            }
+            Ok(()) => Ok(scope),
             Err(error) => Err(Box::new(tool_error(error))),
         }
     }
@@ -1057,30 +1063,51 @@ impl UnifiServer {
 
         // `restart`, `adopt`, `upgrade`, and `port_action` each mutate the
         // device in one call with no change-set approval. `locate` is exempt:
-        // it is self-reverting and carries no lasting effect.
-        let gated_action = match args.action {
-            ops::DeviceAction::Restart => Some("restart"),
-            ops::DeviceAction::Adopt => Some("adopt"),
-            ops::DeviceAction::Upgrade => Some("upgrade"),
-            ops::DeviceAction::PortAction => Some("port_action"),
-            ops::DeviceAction::Locate => None,
-            // `DeviceAction` is `#[non_exhaustive]`: a future variant is
-            // ungated only until it is wired in `ops::device_action` and
-            // reviewed for whether it belongs in the gate above.
-            _ => None,
+        // it is self-reverting and carries no lasting effect. Whether a
+        // variant is gated is decided by `DeviceAction::requires_direct_commit`
+        // below -- an exhaustive match in `rustunifimcp-core` that is a
+        // compile error there until a future variant says explicitly whether
+        // it belongs in the gate. `#[non_exhaustive]` still forces a wildcard
+        // here for the display name only, which carries no gating decision.
+        let action_name = match args.action {
+            ops::DeviceAction::Restart => "restart",
+            ops::DeviceAction::Adopt => "adopt",
+            ops::DeviceAction::Upgrade => "upgrade",
+            ops::DeviceAction::PortAction => "port_action",
+            ops::DeviceAction::Locate => "locate",
+            _ => "unknown",
         };
-        if let Some(action) = gated_action
-            && let Err(result) = self.gate_direct_commit(
+        let mut gate_scope = if args.action.requires_direct_commit() {
+            match self.gate_direct_commit(
                 caller.as_ref(),
                 "unifi_device_action",
-                action,
+                action_name,
                 &args.device,
-            )
-        {
-            return *result;
+            ) {
+                Ok(scope) => Some(scope),
+                Err(result) => return *result,
+            }
+        } else {
+            None
+        };
+        if let Some(scope) = gate_scope.as_mut() {
+            if let Some(firmware_version) = args.firmware_version.as_deref() {
+                scope.meta("firmware_version", firmware_version.to_owned());
+            }
+            if let Some(port_index) = args.port_index {
+                scope.meta("port_idx", u64::from(port_index));
+            }
         }
 
-        match ops::device_action(args, &client).await {
+        let result = ops::device_action(args, &client).await;
+        if let Some(scope) = gate_scope.as_mut() {
+            match &result {
+                Ok(_) => scope.succeed(),
+                Err(error) => scope.fail(error),
+            }
+        }
+
+        match result {
             Ok(json) => json_tool_result(json),
             Err(error) => tool_error(error),
         }
@@ -1123,29 +1150,43 @@ impl UnifiServer {
         // `block`, `unblock`, and `reconnect` mutate the client in one call
         // with no change-set approval. `authorize` and `limit_bandwidth` are
         // not yet wired and refuse in `ops::client_action` before reaching a
-        // client.
-        let gated_action = match args.action {
-            ops::ClientAction::Block => Some("block"),
-            ops::ClientAction::Unblock => Some("unblock"),
-            ops::ClientAction::Reconnect => Some("reconnect"),
-            ops::ClientAction::Authorize | ops::ClientAction::LimitBandwidth => None,
-            // `ClientAction` is `#[non_exhaustive]`: a future variant is
-            // ungated only until it is wired in `ops::client_action` and
-            // reviewed for whether it belongs in the gate above.
-            _ => None,
+        // client. Whether a variant is gated is decided by
+        // `ClientAction::requires_direct_commit` below -- an exhaustive match
+        // in `rustunifimcp-core` that is a compile error there until a future
+        // variant says explicitly whether it belongs in the gate.
+        // `#[non_exhaustive]` still forces a wildcard here for the display
+        // name only, which carries no gating decision.
+        let action_name = match args.action {
+            ops::ClientAction::Block => "block",
+            ops::ClientAction::Unblock => "unblock",
+            ops::ClientAction::Reconnect => "reconnect",
+            ops::ClientAction::Authorize => "authorize",
+            ops::ClientAction::LimitBandwidth => "limit_bandwidth",
+            _ => "unknown",
         };
-        if let Some(action) = gated_action
-            && let Err(result) = self.gate_direct_commit(
+        let mut gate_scope = if args.action.requires_direct_commit() {
+            match self.gate_direct_commit(
                 caller.as_ref(),
                 "unifi_client_action",
-                action,
+                action_name,
                 &args.client,
-            )
-        {
-            return *result;
+            ) {
+                Ok(scope) => Some(scope),
+                Err(result) => return *result,
+            }
+        } else {
+            None
+        };
+
+        let result = ops::client_action(args, &client).await;
+        if let Some(scope) = gate_scope.as_mut() {
+            match &result {
+                Ok(_) => scope.succeed(),
+                Err(error) => scope.fail(error),
+            }
         }
 
-        match ops::client_action(args, &client).await {
+        match result {
             Ok(json) => json_tool_result(json),
             Err(error) => tool_error(error),
         }

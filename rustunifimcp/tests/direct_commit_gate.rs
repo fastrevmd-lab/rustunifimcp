@@ -7,11 +7,17 @@
 //! command like "restart this device" through. Without the flag, the server
 //! must refuse those calls before they ever reach the controller, over stdio
 //! (no caller context at all) exactly as over HTTP. With the flag, the call
-//! proceeds and the audit trail shows it ran under the flag -- for `adopt`,
-//! `upgrade`, and `port_action` it then fails on the follow-up `stat/device`
-//! lookup those three make before dispatching (nothing listens at
-//! `127.0.0.1:1` in this test), which is exactly the signal these tests need:
-//! it proves the gate passed without requiring a real UniFi controller.
+//! proceeds past the gate and the audit trail shows it ran under the flag --
+//! for `adopt`, `upgrade`, and `port_action` it then fails on the follow-up
+//! `stat/device` lookup those three make before dispatching (nothing listens
+//! at `127.0.0.1:1` in this test), and `restart` fails dispatching directly.
+//! Either way that failure must surface as `result=error` on the *same*
+//! audit record the gate produced, not `result=ok`: the gate's `AuditScope`
+//! stays open until the mutation actually runs, rather than being dropped --
+//! and so emitted -- the moment the gate itself passes. This is exactly the
+//! signal these tests need: it proves both that the gate passed and that the
+//! audit outcome reflects the real call, without requiring a real UniFi
+//! controller.
 //!
 //! `locate` is deliberately not gated (it is self-reverting), which
 //! `stdio_locate_is_not_gated_by_direct_commit` pins so a future change to
@@ -119,7 +125,7 @@ fn audit_lines(lines: &[String]) -> Vec<&String> {
 
 const RESTART_REQUEST: &str = r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"unifi_device_action","arguments":{"controller":"home","device":"aa:bb:cc:dd:ee:ff","action":"restart"}}}"#;
 const LOCATE_REQUEST: &str = r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"unifi_device_action","arguments":{"controller":"home","device":"aa:bb:cc:dd:ee:ff","action":"locate"}}}"#;
-const ADOPT_REQUEST: &str = r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"unifi_device_action","arguments":{"controller":"home","device":"aa:bb:cc:dd:ee:ff","action":"adopt"}}}"#;
+const ADOPT_REQUEST: &str = r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"unifi_device_action","arguments":{"controller":"home","device":"aa:bb:cc:dd:ee:ff","action":"adopt","expected_model":"U6-LR"}}}"#;
 const UPGRADE_REQUEST: &str = r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"unifi_device_action","arguments":{"controller":"home","device":"aa:bb:cc:dd:ee:ff","action":"upgrade","firmware_version":"7.1.66.15380"}}}"#;
 const PORT_ACTION_REQUEST: &str = r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"unifi_device_action","arguments":{"controller":"home","device":"aa:bb:cc:dd:ee:ff","action":"port_action","port_index":1}}}"#;
 const BLOCK_REQUEST: &str = r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"unifi_client_action","arguments":{"controller":"home","client":"aa:bb:cc:dd:ee:ff","action":"block"}}}"#;
@@ -145,7 +151,11 @@ fn stdio_refuses_device_restart_without_the_flag() {
 /// With `--allow-direct-commit`, the same stdio call passes the gate -- it
 /// then fails for an unrelated reason (nothing listens at 127.0.0.1:1 in
 /// this test), but that failure must not be the direct-commit refusal, and
-/// the audit trail must show the flag was exercised.
+/// the audit trail must show the flag was exercised. The *same* audit record
+/// must also show the mutation's real outcome, not the gate's: the
+/// `AuditScope` the gate opens stays open until `ops::device_action` actually
+/// runs, so a controller that never even accepts the connection must be
+/// recorded as `result=error`, not `result=ok`.
 #[test]
 fn stdio_allows_device_restart_with_the_flag() {
     let lines = stderr_for_request(&["--allow-direct-commit"], RESTART_REQUEST);
@@ -162,6 +172,11 @@ fn stdio_allows_device_restart_with_the_flag() {
     assert!(
         record.contains("direct_commit_allowed=true"),
         "an allowed direct-commit call must be tagged in the audit trail: {record}"
+    );
+    assert!(
+        record.contains("result=error") && !record.contains("result=ok"),
+        "the audit record must reflect the mutation's real outcome (a connection failure), not \
+         the gate's success: {record}"
     );
 }
 
@@ -194,7 +209,11 @@ fn stdio_refuses_device_adopt_upgrade_and_port_action_without_the_flag() {
 /// pass the gate -- each then fails on the `stat/device` lookup it makes
 /// before dispatching (nothing listens at 127.0.0.1:1 in this test), but
 /// that failure must not be the direct-commit refusal, and the audit trail
-/// must show the flag was exercised.
+/// must show the flag was exercised. As with `restart` above, the *same*
+/// audit record must show the follow-up failure, not a gate-time success --
+/// and, for `upgrade` and `port_action`, must carry the caller-supplied
+/// `firmware_version` / `port_idx` the gate's metadata attaches, so the
+/// record names what was actually requested.
 #[test]
 fn stdio_allows_device_adopt_upgrade_and_port_action_with_the_flag() {
     for (name, request) in [
@@ -219,6 +238,23 @@ fn stdio_allows_device_adopt_upgrade_and_port_action_with_the_flag() {
             record.contains("direct_commit_allowed=true"),
             "{name}: an allowed direct-commit call must be tagged in the audit trail: {record}"
         );
+        assert!(
+            record.contains("result=error") && !record.contains("result=ok"),
+            "{name}: the audit record must reflect the mutation's real outcome (a connection \
+             failure), not the gate's success: {record}"
+        );
+        if name == "upgrade" {
+            assert!(
+                record.contains("firmware_version=7.1.66.15380"),
+                "{name}: the requested firmware version must reach the audit record: {record}"
+            );
+        }
+        if name == "port_action" {
+            assert!(
+                record.contains("port_idx=1"),
+                "{name}: the requested port index must reach the audit record: {record}"
+            );
+        }
     }
 }
 
@@ -502,6 +538,7 @@ async fn http_device_action_gate_covers_adopt_upgrade_and_port_action() {
             "controller": "home",
             "device": "aa:bb:cc:dd:ee:ff",
             "action": "adopt",
+            "expected_model": "U6-LR",
         }),
         serde_json::json!({
             "controller": "home",
