@@ -142,32 +142,6 @@ pub struct TrafficFlowReport {
     pub total: usize,
 }
 
-/// Arguments to `unifi_firewall_audit`.
-#[derive(Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct FirewallAuditArgs {
-    /// Which controller, by its name in `controllers.json`.
-    pub controller: String,
-    /// Site identifier; defaults to the controller's configured site.
-    #[serde(default)]
-    pub site: Option<String>,
-}
-
-/// Firewall audit report response.
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct FirewallAuditReport {
-    /// Whether the audit ran (false means no data was examined).
-    pub ran: bool,
-    /// Number of firewall policies examined.
-    pub policies_examined: usize,
-    /// Audit findings.
-    pub findings: Vec<serde_json::Value>,
-    /// Whether this report is missing data it would normally include.
-    pub partial: bool,
-    /// What was omitted and why, one entry per omission.
-    pub omitted: Vec<String>,
-}
-
 /// Arguments to `unifi_client_troubleshoot`.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -574,89 +548,6 @@ pub async fn traffic_flow_report(
     })
 }
 
-/// Generate a firewall audit report.
-///
-/// Audits firewall policies and zones for common misconfigurations. Distinguishes
-/// between "ran and found nothing" (clean audit) and "did not run" (no data).
-///
-/// # Errors
-///
-/// Returns [`UnifiError`] when:
-/// - All legs are refused for surface permission reasons (nothing was gathered)
-/// - Any leg fails with a real transport/protocol error (not a permission refusal)
-pub async fn firewall_audit(
-    client: &UnifiClient,
-    args: &FirewallAuditArgs,
-) -> Result<FirewallAuditReport, UnifiError> {
-    let _site_uuid = client.default_site_for(ApiSurface::Supported).await?;
-    let site_name = if let Some(ref s) = args.site {
-        s.as_str()
-    } else {
-        client.default_site()
-    };
-
-    let mut omitted = Vec::new();
-    let mut policies_result = serde_json::Value::Null;
-    let mut zones_result = serde_json::Value::Null;
-
-    // Fetch firewall policies via Private v2 API
-    match client
-        .get(
-            ApiSurface::PrivateV2,
-            ResourceKind::FirewallPolicy.path_template(),
-            &[("site", site_name)],
-            &[],
-        )
-        .await
-    {
-        Ok(policies) => {
-            policies_result = policies;
-        }
-        Err(UnifiError::SurfaceRequiresConfig { .. }) => {
-            omitted.push("policies: controller has allow_private_api disabled".to_owned());
-        }
-        Err(UnifiError::SurfaceRequiresScope { .. }) => {
-            omitted.push("policies: token lacks required scope".to_owned());
-        }
-        Err(e) => return Err(e),
-    }
-
-    // Fetch firewall zones via Private v2 API
-    match client
-        .get(
-            ApiSurface::PrivateV2,
-            ResourceKind::FirewallZone.path_template(),
-            &[("site", site_name)],
-            &[],
-        )
-        .await
-    {
-        Ok(zones) => {
-            zones_result = zones;
-        }
-        Err(UnifiError::SurfaceRequiresConfig { .. }) => {
-            omitted.push("zones: controller has allow_private_api disabled".to_owned());
-        }
-        Err(UnifiError::SurfaceRequiresScope { .. }) => {
-            omitted.push("zones: token lacks required scope".to_owned());
-        }
-        Err(e) => return Err(e),
-    }
-
-    // If all legs were refused, that's an error
-    if omitted.len() == 2 {
-        return Err(UnifiError::Malformed(
-            "all data sources refused: nothing was gathered".to_owned(),
-        ));
-    }
-
-    build_firewall_audit(&policies_result, &zones_result).map(|mut report| {
-        report.partial = !omitted.is_empty();
-        report.omitted = omitted;
-        report
-    })
-}
-
 /// Generate a client troubleshoot report.
 ///
 /// Correlates a station's association history, signal, DHCP lease, applied
@@ -792,38 +683,6 @@ pub async fn client_troubleshoot(
         report.partial = !omitted.is_empty();
         report.omitted = omitted;
         report
-    })
-}
-
-/// Build a firewall audit report from policies and zones.
-///
-/// # Errors
-///
-/// Returns an error if the data cannot be parsed.
-pub fn build_firewall_audit(
-    policies: &serde_json::Value,
-    zones: &serde_json::Value,
-) -> Result<FirewallAuditReport, UnifiError> {
-    // Policies and zones can be either bare arrays (PrivateV2) or enveloped (tests)
-    let policies_array = policies
-        .as_array()
-        .or_else(|| policies.get("data").and_then(|d| d.as_array()));
-    let zones_array = zones
-        .as_array()
-        .or_else(|| zones.get("data").and_then(|d| d.as_array()));
-
-    let ran = policies_array.is_some() || zones_array.is_some();
-    let policies_examined = policies_array.map_or(0, Vec::len);
-
-    // Placeholder audit logic - for now just report what we examined
-    let findings = Vec::new();
-
-    Ok(FirewallAuditReport {
-        ran,
-        policies_examined,
-        findings,
-        partial: false,
-        omitted: Vec::new(),
     })
 }
 
@@ -1347,18 +1206,5 @@ mod troubleshoot_tests {
             err_msg.contains("not found"),
             "error doesn't say 'not found'"
         );
-    }
-
-    /// An audit that finds nothing must be distinguishable from an audit that
-    /// did not run.
-    #[test]
-    fn a_clean_firewall_audit_is_not_an_empty_one() {
-        let policies = serde_json::json!({ "data": [] });
-        let zones = serde_json::json!({ "data": [] });
-        let result =
-            crate::tools::workflow::build_firewall_audit(&policies, &zones).expect("builds");
-        assert_eq!(result.policies_examined, 0);
-        assert!(result.findings.is_empty());
-        assert!(result.ran, "a clean audit still ran");
     }
 }

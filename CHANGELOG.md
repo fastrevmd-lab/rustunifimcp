@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+- **Removed unwired stub tools and sub-actions** (MEC-505): `unifi_run_speed_test`
+  and `unifi_firewall_audit` are gone from the tool catalog, `unifi_client_action`
+  no longer admits `authorize` or `limit_bandwidth`, and `unifi_backup_action` no
+  longer admits `download` or `validate` — each was advertised but only ever
+  returned an error or an empty result. The catalog is now 22 tools (11 write).
+  `adopt`, `upgrade`, `port_action`, and backup `list`/`trigger`, wired for real
+  in #80/#81, are kept. README/CLAUDE.md contradictions on `--lab-mode` and
+  stale tool counts across the docs are corrected.
 - **Wired `unifi_backup_action list` and `trigger`** (MEC-516): `list` calls
   the controller's `cmd/backup` `list-backups` command and returns the
   result capped at 100 entries with a `truncated`/`shown`/`total` marker,

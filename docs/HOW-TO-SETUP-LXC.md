@@ -225,7 +225,7 @@ pct exec 622 -- systemctl enable --now rustunifimcp.service
 ```bash
 pct exec 622 -- runuser -u unifimcp -- /usr/local/bin/rustunifimcp token add \
     --tokens-file /var/lib/unifimcp/tokens.json \
-    --name my-client --controllers '*' --tools '*'
+    --name my-client --devices '*' --tools '*'
 ```
 
 The secret is printed **once** and stored hashed. Two things worth knowing:
@@ -235,7 +235,7 @@ The secret is printed **once** and stored hashed. Two things worth knowing:
   `systemctl kill -s HUP rustunifimcp.service`. The CLI warns you about this.
 - `--tools '*'` is a wildcard that resolves to *read-only tools only*. Write
   tools must be named explicitly, so a wildcard token calling
-  `create_unifi_change_set` gets `insufficient_scope`. That is deliberate.
+  `unifi_create_change_set` gets `insufficient_scope`. That is deliberate.
 - For a token that will call `unifi_approve_change_set`, add `--actor-type
   human`; agent and unattributed callers are refused.
 - **Two-person control is enforced on tokens.** A token whose scope combines

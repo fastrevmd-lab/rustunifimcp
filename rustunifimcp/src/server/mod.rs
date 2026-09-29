@@ -1121,7 +1121,7 @@ impl UnifiServer {
 
     #[tool(
         name = "unifi_client_action",
-        description = "Execute an operational action on a client (block, unblock, reconnect, authorize, limit_bandwidth)"
+        description = "Execute an operational action on a client (block, unblock, reconnect)"
     )]
     async fn unifi_client_action(
         &self,
@@ -1161,9 +1161,7 @@ impl UnifiServer {
         }
 
         // `block`, `unblock`, and `reconnect` mutate the client in one call
-        // with no change-set approval. `authorize` and `limit_bandwidth` are
-        // not yet wired and refuse in `ops::client_action` before reaching a
-        // client. Whether a variant is gated is decided by
+        // with no change-set approval. Whether a variant is gated is decided by
         // `ClientAction::requires_direct_commit` below -- an exhaustive match
         // in `rustunifimcp-core` that is a compile error there until a future
         // variant says explicitly whether it belongs in the gate.
@@ -1173,8 +1171,6 @@ impl UnifiServer {
             ops::ClientAction::Block => "block",
             ops::ClientAction::Unblock => "unblock",
             ops::ClientAction::Reconnect => "reconnect",
-            ops::ClientAction::Authorize => "authorize",
-            ops::ClientAction::LimitBandwidth => "limit_bandwidth",
             _ => "unknown",
         };
         let mut gate_scope = if args.action.requires_direct_commit() {
@@ -1207,7 +1203,7 @@ impl UnifiServer {
 
     #[tool(
         name = "unifi_backup_action",
-        description = "Execute a backup action (trigger, list). `download` and `validate` are not wired yet. `trigger` starts an asynchronous, non-idempotent job on the controller: if the request times out, do not retry it, since the controller may still complete the job and a retry can leave duplicate backup files behind. `restore` is not an operational action — it is governed by the change-set lifecycle (Phase 6): `unifi_create_change_set` -> `unifi_stage_change` -> `unifi_approve_change_set` -> `unifi_apply_change_set`."
+        description = "Execute a backup action (trigger, list). `trigger` starts an asynchronous, non-idempotent job on the controller: if the request times out, do not retry it, since the controller may still complete the job and a retry can leave duplicate backup files behind. `restore` is not an operational action — it is governed by the change-set lifecycle (Phase 6): `unifi_create_change_set` -> `unifi_stage_change` -> `unifi_approve_change_set` -> `unifi_apply_change_set`."
     )]
     async fn unifi_backup_action(
         &self,
@@ -1240,46 +1236,6 @@ impl UnifiServer {
         }
 
         match ops::backup_action(args, &client).await {
-            Ok(json) => json_tool_result(json),
-            Err(error) => tool_error(error),
-        }
-    }
-
-    #[tool(
-        name = "unifi_run_speed_test",
-        description = "Run a speed test from the controller"
-    )]
-    async fn unifi_run_speed_test(
-        &self,
-        Parameters(args): Parameters<ops::SpeedTestArgs>,
-        context: RequestContext<RoleServer>,
-    ) -> CallToolResult {
-        let caller = Self::caller(&context);
-        if let Err(error) = authorize_call(
-            caller.as_ref(),
-            "unifi_run_speed_test",
-            Some(&args.controller),
-            WRITE_TOOLS,
-        ) {
-            return tool_error(error);
-        }
-
-        let client = match self.client_for(&args.controller) {
-            Ok(client) => client,
-            Err(result) => return *result,
-        };
-
-        if let Err(result) = Self::authorize_write_site(
-            caller.as_ref(),
-            "unifi_run_speed_test",
-            &args.controller,
-            &client,
-            args.site.as_deref(),
-        ) {
-            return *result;
-        }
-
-        match ops::run_speed_test(args, &client).await {
             Ok(json) => json_tool_result(json),
             Err(error) => tool_error(error),
         }
@@ -1370,36 +1326,6 @@ impl UnifiServer {
         };
 
         match workflow::traffic_flow_report(&client, &args).await {
-            Ok(report) => json_tool_result(report),
-            Err(error) => tool_error(error),
-        }
-    }
-
-    #[tool(
-        name = "unifi_firewall_audit",
-        description = "Audit firewall policies and zones for common misconfigurations. Output is redacted: a policy's open field set is scanned for secret-named fields and redacted in place rather than allowlisted, since custom fields are load-bearing for the audit."
-    )]
-    async fn unifi_firewall_audit(
-        &self,
-        Parameters(args): Parameters<workflow::FirewallAuditArgs>,
-        context: RequestContext<RoleServer>,
-    ) -> CallToolResult {
-        let caller = Self::caller(&context);
-        if let Err(error) = authorize_call(
-            caller.as_ref(),
-            "unifi_firewall_audit",
-            Some(&args.controller),
-            WRITE_TOOLS,
-        ) {
-            return tool_error(error);
-        }
-
-        let client = match self.client_for(&args.controller) {
-            Ok(client) => client,
-            Err(result) => return *result,
-        };
-
-        match workflow::firewall_audit(&client, &args).await {
             Ok(report) => json_tool_result(report),
             Err(error) => tool_error(error),
         }

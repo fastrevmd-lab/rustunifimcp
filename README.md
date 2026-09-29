@@ -54,10 +54,12 @@ separate decision for its owner.
 
 Parity against the legacy surface is recorded in
 [`docs/PARITY-AUDIT.md`](docs/PARITY-AUDIT.md): of 33 legacy tools in the usage
-window, 31 are covered and verified against the live controller, one is an
-accepted gap (`set_device_port_overrides` — no verified write route on
-10.5.67), and one is built but deliberately unverified (`execute_port_action`,
-which cannot be exercised without disrupting a live switch port).
+window, 31 are covered and verified against the live controller, one is
+built but unverified (`execute_port_action`, reachable as
+`unifi_device_action action=port_action` — PoE power-cycle only, behind
+`--allow-direct-commit`, and not exercised live because it would disrupt a
+switch port in use), and one is an accepted gap (`set_device_port_overrides`
+— no verified write route on 10.5.67).
 
 | Document | What it is |
 |---|---|
@@ -74,9 +76,11 @@ API client with two problems this project exists to fix.
 
 **Tool sprawl.** Its registry auto-registers every public async function in
 `src/tools/` by reflection — 205 functions across 37 modules become roughly
-**270 MCP tools**. Nobody chose that number. `rustunifimcp` targets **~24**:
+**270 MCP tools**. Nobody chose that number. `rustunifimcp` targets **22**:
 typed read primitives over a resource enum, a change-control lifecycle, scoped
-operational actions, and five workflows that earn their names.
+operational actions, and four workflows that earn their names. Every one of
+the 22 does real work end to end — none is advertised and then refuses or
+returns an empty result on every call.
 
 **No MCP-layer security.** It listens on plain HTTP with no bearer token, no
 scopes, no audit trail, and no rate limiting. Anything that can reach the port
@@ -106,8 +110,9 @@ read-only for now; no write route exists for them through
 `unifi_backup_action` (MEC-516) wires `list` and `trigger`: `list` returns
 the controller's retained backups, capped at 100 entries with a `truncated`
 marker like every other list-shaped tool; `trigger` starts a new backup.
-`download` and `validate` remain refused — both would need to move a raw
-`.unf` file rather than JSON, which this server does not yet support.
+`download` and `validate` are not offered at all (MEC-505: removed from the
+action enum rather than advertised and refused) — both would need to move a
+raw `.unf` file rather than JSON, which this server does not yet support.
 `restore` is refused permanently; restoring a backup overwrites the entire
 configuration, so it goes through the change-set lifecycle instead.
 
@@ -116,7 +121,8 @@ configuration, so it goes through the change-set lifecycle instead.
 **Three API surfaces, each labelled.** UniFi's supported Integration API is far
 narrower than what the controller can actually do, so the private `/api/s/` and
 `/v2/api/` routes stay in — but every endpoint carries its tag in code, and the
-private ones are gated behind an explicit scope. A supported-only deployment is
+private ones are gated behind an explicit per-controller `allow_private_api`
+flag in `controllers.json`, not a token scope. A supported-only deployment is
 a real, runnable configuration that a controller upgrade cannot silently break.
 
 **Change control adapted honestly.** UniFi has no candidate configuration and no

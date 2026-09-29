@@ -155,13 +155,13 @@ fn routes() -> Vec<Route> {
             "/proxy/network/api/s/default/rest/radiusprofile".to_owned(),
             f("radiusprofile"),
         ),
-        // kind=firewall_policy; firewall_audit, client_troubleshoot. Carries
+        // kind=firewall_policy; client_troubleshoot. Carries
         // a custom secret-named field on an otherwise-open shape.
         route(
             "/proxy/network/v2/api/site/default/firewall-policies".to_owned(),
             f("policies"),
         ),
-        // kind=firewall_zone; firewall_audit, client_troubleshoot.
+        // kind=firewall_zone; client_troubleshoot.
         route(
             "/proxy/network/v2/api/site/default/firewall/zone".to_owned(),
             f("zones"),
@@ -380,10 +380,6 @@ fn read_only_tool_calls() -> Vec<(&'static str, serde_json::Value)> {
         ),
         (
             "unifi_traffic_flow_report",
-            serde_json::json!({"controller": CONTROLLER}),
-        ),
-        (
-            "unifi_firewall_audit",
             serde_json::json!({"controller": CONTROLLER}),
         ),
         (

@@ -2,7 +2,7 @@
 //!
 //! UniFi Network is multi-site: one controller manages many sites, and the
 //! operational write tools (`unifi_device_action`, `unifi_client_action`,
-//! `unifi_backup_action`, `unifi_run_speed_test`) already accept a
+//! `unifi_backup_action`) already accept a
 //! caller-supplied `site`, defaulting to the controller's configured site
 //! when omitted. Before this grant existed there was no way to restrict a
 //! token to a subset of a multi-site deployment's sites: any token holding

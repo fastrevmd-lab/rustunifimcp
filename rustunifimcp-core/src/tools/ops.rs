@@ -1,7 +1,7 @@
 //! Operational actions.
 //!
 //! These are commands, not configuration, so they do not go through change
-//! control. Each is individually scoped and audited, and all four are in
+//! control. Each is individually scoped and audited, and all three are in
 //! [`crate::tools::WRITE_TOOLS`] -- a wildcard token reaches none of them.
 //!
 //! `device_action`'s `restart`, `adopt`, `upgrade`, and `port_action`, and
@@ -12,8 +12,16 @@
 //! (`server::UnifiServer::gate_direct_commit`) refuses those specific actions
 //! unless the server was started with `--allow-direct-commit`, and audits the
 //! outcome either way via `mecmcp_audit::AuditScope`. `locate` is exempt: it
-//! is self-reverting and carries no lasting effect. `authorize` and
-//! `limit_bandwidth` are not yet wired at all.
+//! is self-reverting and carries no lasting effect.
+//!
+//! Only actions that do real work are advertised. `client_action`'s
+//! `authorize` and `limit_bandwidth`, `backup_action`'s `download` and
+//! `validate`, and the speed test are deliberately absent (MEC-505): they
+//! were reachable through `tools/list` but only ever returned an error, and
+//! the controller returns `{"meta":{"rc":"ok"}}` for commands that do not
+//! exist (it validates the device or client, not the command), so a guessed
+//! spelling would look like success. See `docs/PARITY-AUDIT.md` for what
+//! would need to be confirmed before any of them could come back.
 //!
 //! `adopt`, `upgrade`, and `port_action` additionally confirm live controller
 //! state for the target device -- via the private `stat/device` surface --
@@ -45,7 +53,7 @@ pub const RESTORE_NOT_OPERATIONAL: &str = "\
 `restore` is not an operational action. Restoring a controller backup overwrites \
 the entire configuration, so it is governed by the change-set lifecycle: \
 `unifi_create_change_set` -> `unifi_stage_change` -> `unifi_approve_change_set` -> \
-`unifi_apply_change_set`. Valid actions here are: trigger, list, download, validate.";
+`unifi_apply_change_set`. Valid actions here are: trigger, list.";
 
 /// What to do to an adopted device.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, JsonSchema)]
@@ -320,10 +328,6 @@ pub enum ClientAction {
     Unblock,
     /// Disconnect and force the client to reconnect.
     Reconnect,
-    /// Authorize a guest client on the guest portal.
-    Authorize,
-    /// Apply bandwidth limits to the client.
-    LimitBandwidth,
 }
 
 impl ClientAction {
@@ -337,11 +341,6 @@ impl ClientAction {
     pub fn requires_direct_commit(self) -> bool {
         match self {
             Self::Block | Self::Unblock | Self::Reconnect => true,
-            // Not yet wired: `client_action` refuses both before reaching a
-            // client, so gating them here would be dead code today, but
-            // wiring either is exactly the kind of change this method exists
-            // to force a decision on.
-            Self::Authorize | Self::LimitBandwidth => false,
         }
     }
 }
@@ -388,10 +387,6 @@ pub enum BackupAction {
     Trigger,
     /// List available backups.
     List,
-    /// Download a backup file.
-    Download,
-    /// Validate a backup file's integrity.
-    Validate,
 }
 
 impl<'de> Deserialize<'de> for BackupAction {
@@ -404,12 +399,7 @@ impl<'de> Deserialize<'de> for BackupAction {
             "restore" => Err(de::Error::custom(RESTORE_NOT_OPERATIONAL)),
             "trigger" => Ok(Self::Trigger),
             "list" => Ok(Self::List),
-            "download" => Ok(Self::Download),
-            "validate" => Ok(Self::Validate),
-            other => Err(de::Error::unknown_variant(
-                other,
-                &["trigger", "list", "download", "validate"],
-            )),
+            other => Err(de::Error::unknown_variant(other, &["trigger", "list"])),
         }
     }
 }
@@ -424,7 +414,7 @@ impl JsonSchema for BackupAction {
         // This ensures the enum values match what the custom deserializer accepts.
         let schema_json = serde_json::json!({
             "type": "string",
-            "enum": ["trigger", "list", "download", "validate"]
+            "enum": ["trigger", "list"]
         });
 
         serde_json::from_value(schema_json).expect("static schema JSON must deserialize to Schema")
@@ -442,9 +432,6 @@ pub struct BackupActionArgs {
     /// Site identifier; defaults to the controller's configured site.
     #[serde(default)]
     pub site: Option<String>,
-    /// Backup filename, required for `download` and `validate`.
-    #[serde(default)]
-    pub backup_file: Option<String>,
 }
 
 impl BackupActionArgs {
@@ -452,20 +439,10 @@ impl BackupActionArgs {
     ///
     /// # Errors
     ///
-    /// Returns [`crate::error::UnifiError::Malformed`] if `download` or
-    /// `validate` was requested without a `backup_file`, or if `site` is not
-    /// a valid site identifier.
+    /// Returns [`crate::error::UnifiError::Malformed`] if `site` is not a
+    /// valid site identifier.
     pub fn validate(&self) -> Result<(), crate::error::UnifiError> {
-        validate_site(&self.site)?;
-        if matches!(self.action, BackupAction::Download | BackupAction::Validate)
-            && self.backup_file.is_none()
-        {
-            return Err(crate::error::UnifiError::Malformed(format!(
-                "action `{:?}` requires `backup_file`",
-                self.action
-            )));
-        }
-        Ok(())
+        validate_site(&self.site)
     }
 }
 
@@ -525,29 +502,6 @@ fn truncate_backups<T>(mut items: Vec<T>) -> TruncatedBackups<T> {
         truncated: true,
         shown,
         total,
-    }
-}
-
-/// Arguments to `unifi_run_speed_test`.
-#[derive(Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct SpeedTestArgs {
-    /// Which controller, by its name in `controllers.json`.
-    pub controller: String,
-    /// Site identifier; defaults to the controller's configured site.
-    #[serde(default)]
-    pub site: Option<String>,
-}
-
-impl SpeedTestArgs {
-    /// Validate arguments. Currently a no-op as there are no cross-field
-    /// invariants, but kept for consistency with other operational args.
-    ///
-    /// # Errors
-    ///
-    /// Currently always returns `Ok`.
-    pub fn validate(&self) -> Result<(), crate::error::UnifiError> {
-        Ok(())
     }
 }
 
@@ -914,7 +868,8 @@ pub async fn device_action(
 ///
 /// # Errors
 ///
-/// Returns [`crate::error::UnifiError::Malformed`] if the action is not yet wired.
+/// Returns [`crate::error::UnifiError::Malformed`] if the arguments fail
+/// validation, and otherwise whatever the controller call returns.
 pub async fn client_action(
     args: ClientActionArgs,
     client: &crate::client::UnifiClient,
@@ -926,24 +881,12 @@ pub async fn client_action(
         .as_deref()
         .unwrap_or_else(|| client.default_site());
 
-    // Map enum to controller command string. Conservative: only wire what we
-    // have evidence for.
+    // Map enum to controller command string. Closed: only actions with a
+    // confirmed command spelling exist in `ClientAction` at all.
     let cmd = match args.action {
         ClientAction::Block => "block-sta",
         ClientAction::Unblock => "unblock-sta",
         ClientAction::Reconnect => "kick-sta",
-        ClientAction::Authorize => {
-            return Err(crate::error::UnifiError::Malformed(
-                "action `authorize` not yet wired; requires authorization duration parameter"
-                    .to_owned(),
-            ));
-        }
-        ClientAction::LimitBandwidth => {
-            return Err(crate::error::UnifiError::Malformed(
-                "action `limit_bandwidth` not yet wired; requires bandwidth limit parameters"
-                    .to_owned(),
-            ));
-        }
     };
 
     let body = serde_json::json!({
@@ -972,18 +915,17 @@ pub async fn client_action(
 /// asynchronous job on the controller, and a request that times out on the
 /// client side does not mean the job stopped. Retrying after a timeout can
 /// leave multiple backup files behind; callers must not retry `trigger`
-/// automatically. `download` and `validate` remain unwired: both would need
-/// to move a raw `.unf` file rather than JSON, which `UnifiClient` does not
-/// support today, and there is no independent evidence for a `validate`
-/// command on the controller at all. `restore` is not available here —
+/// automatically. `download` and `validate` are not offered (MEC-505): both
+/// would need to move a raw `.unf` file rather than JSON, which `UnifiClient`
+/// does not support today, and there is no independent evidence for a
+/// `validate` command on the controller at all. `restore` is not available here —
 /// restoring a controller backup overwrites the entire configuration, so it
 /// goes through change control in Phase 6.
 ///
 /// # Errors
 ///
-/// Returns [`crate::error::UnifiError::Malformed`] if `download` or
-/// `validate` is requested without a `backup_file`, or because `download`
-/// and `validate` are not yet wired.
+/// Returns [`crate::error::UnifiError::Malformed`] if `site` is not a valid
+/// site identifier, and otherwise whatever the controller call returns.
 pub async fn backup_action(
     args: BackupActionArgs,
     client: &crate::client::UnifiClient,
@@ -1029,31 +971,7 @@ pub async fn backup_action(
                 )
                 .await
         }
-        BackupAction::Download | BackupAction::Validate => {
-            Err(crate::error::UnifiError::Malformed(format!(
-                "action `{:?}` not yet wired: it would transfer a raw backup file, which \
-                 UnifiClient does not support, and no endpoint spelling for it is verified \
-                 from a controller",
-                args.action
-            )))
-        }
     }
-}
-
-/// Run a speed test from the controller.
-///
-/// # Errors
-///
-/// Returns [`crate::error::Malformed`] because speed test is not yet wired.
-pub async fn run_speed_test(
-    args: SpeedTestArgs,
-    _client: &crate::client::UnifiClient,
-) -> Result<serde_json::Value, crate::error::UnifiError> {
-    args.validate()?;
-
-    Err(crate::error::UnifiError::Malformed(
-        "speed test not yet wired; no endpoint spelling verified from controller".to_owned(),
-    ))
 }
 
 #[cfg(test)]
@@ -1106,8 +1024,6 @@ mod tests {
         assert!(ClientAction::Block.requires_direct_commit());
         assert!(ClientAction::Unblock.requires_direct_commit());
         assert!(ClientAction::Reconnect.requires_direct_commit());
-        assert!(!ClientAction::Authorize.requires_direct_commit());
-        assert!(!ClientAction::LimitBandwidth.requires_direct_commit());
     }
 
     #[test]
@@ -1122,16 +1038,31 @@ mod tests {
 
     #[test]
     fn client_actions_parse_from_their_documented_spellings() {
-        for raw in [
-            "block",
-            "unblock",
-            "reconnect",
-            "authorize",
-            "limit_bandwidth",
-        ] {
+        for raw in ["block", "unblock", "reconnect"] {
             let json = format!(r#""{raw}""#);
             let parsed: Result<ClientAction, _> = serde_json::from_str(&json);
             assert!(parsed.is_ok(), "{raw} must parse");
+        }
+    }
+
+    /// The removed unwired sub-actions (MEC-505) must not parse at all, so a
+    /// caller gets a schema error rather than a silent no-op.
+    #[test]
+    fn removed_client_and_backup_actions_do_not_parse() {
+        use super::BackupAction;
+        for raw in ["authorize", "limit_bandwidth"] {
+            let json = format!(r#""{raw}""#);
+            assert!(
+                serde_json::from_str::<ClientAction>(&json).is_err(),
+                "{raw} must not parse as a client action"
+            );
+        }
+        for raw in ["download", "validate"] {
+            let json = format!(r#""{raw}""#);
+            assert!(
+                serde_json::from_str::<BackupAction>(&json).is_err(),
+                "{raw} must not parse as a backup action"
+            );
         }
     }
 
@@ -1141,8 +1072,6 @@ mod tests {
         for (raw, expected) in [
             ("trigger", BackupAction::Trigger),
             ("list", BackupAction::List),
-            ("download", BackupAction::Download),
-            ("validate", BackupAction::Validate),
         ] {
             let json = format!(r#""{raw}""#);
             let parsed: BackupAction =
@@ -1360,24 +1289,6 @@ mod tests {
         assert!(client_args.validate().is_ok());
     }
 
-    #[test]
-    fn download_and_validate_require_a_backup_file() {
-        use super::{BackupAction, BackupActionArgs};
-        for action in [BackupAction::Download, BackupAction::Validate] {
-            let args = BackupActionArgs {
-                controller: "home".to_owned(),
-                action,
-                site: None,
-                backup_file: None,
-            };
-            assert!(
-                args.validate().is_err(),
-                "{:?} without backup_file must be refused before dispatch",
-                action
-            );
-        }
-    }
-
     /// `backup_action` now dispatches `list`/`trigger` with `args.site` in the
     /// request path, so `BackupActionArgs::validate` needs the same
     /// traversal defence `DeviceActionArgs`/`ClientActionArgs` already carry
@@ -1391,7 +1302,6 @@ mod tests {
             controller: "home".to_owned(),
             action: BackupAction::List,
             site: Some("../../v2/api/site/default".to_owned()),
-            backup_file: None,
         };
         assert!(
             args.validate().is_err(),
@@ -1408,7 +1318,6 @@ mod tests {
             controller: "home".to_owned(),
             action: BackupAction::List,
             site: Some("default".to_owned()),
-            backup_file: None,
         };
         assert!(args.validate().is_ok());
     }
@@ -1447,20 +1356,15 @@ mod tests {
     }
 
     #[test]
-    fn trigger_and_list_do_not_require_a_backup_file() {
+    fn trigger_and_list_pass_validation() {
         use super::{BackupAction, BackupActionArgs};
         for action in [BackupAction::Trigger, BackupAction::List] {
             let args = BackupActionArgs {
                 controller: "home".to_owned(),
                 action,
                 site: None,
-                backup_file: None,
             };
-            assert!(
-                args.validate().is_ok(),
-                "{:?} must not require backup_file",
-                action
-            );
+            assert!(args.validate().is_ok(), "{:?} must pass validation", action);
         }
     }
 
@@ -1480,12 +1384,7 @@ mod tests {
             .as_array()
             .expect("enum must be array");
 
-        let expected: Vec<String> = vec![
-            "trigger".to_owned(),
-            "list".to_owned(),
-            "download".to_owned(),
-            "validate".to_owned(),
-        ];
+        let expected: Vec<String> = vec!["trigger".to_owned(), "list".to_owned()];
 
         let actual: Vec<String> = enum_values
             .iter()
@@ -1640,23 +1539,6 @@ mod tests {
                 should_pass,
                 "{version:?} validation must be {should_pass}"
             );
-        }
-    }
-
-    /// Unwired client actions must return an error, never success.
-    #[test]
-    fn unwired_client_actions_are_explicitly_refused() {
-        use super::{ClientAction, ClientActionArgs};
-
-        for action in [ClientAction::Authorize, ClientAction::LimitBandwidth] {
-            let args = ClientActionArgs {
-                controller: "test".to_owned(),
-                client: "02:00:00:00:00:02".to_owned(),
-                action,
-                site: None,
-            };
-
-            assert!(args.validate().is_ok(), "{:?} must pass validation", action);
         }
     }
 

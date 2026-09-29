@@ -82,9 +82,15 @@ so a deployment can choose its own risk posture.
 | Tag | Base path | Availability |
 |---|---|---|
 | `Supported` | `/proxy/network/integration/v1` | Always |
-| `PrivateV1` | `/proxy/network/api/s/<site>` | Requires the `unifi:private-api` scope |
-| `PrivateV2` | `/proxy/network/v2/api/site/<site>` | Requires the `unifi:private-api` scope |
+| `PrivateV1` | `/proxy/network/api/s/<site>` | Requires `allow_private_api: true` on the controller |
+| `PrivateV2` | `/proxy/network/v2/api/site/<site>` | Requires `allow_private_api: true` on the controller |
 | `Cloud` | Site Manager (Ubiquiti cloud) | Off by default; explicit opt-in |
+
+**As implemented, this gate is a per-controller flag (`allow_private_api` in
+`controllers.json`), not a token scope.** This spec originally called for a
+`unifi:private-api` token scope; that scope was never built, and no token
+grants it. `UnifiError::SurfaceRequiresScope` is reserved in the error type for
+a future token-level gate but is never returned today.
 
 The tag is a property of the endpoint, carried through to the tool. Two
 consequences follow, and both are the point:

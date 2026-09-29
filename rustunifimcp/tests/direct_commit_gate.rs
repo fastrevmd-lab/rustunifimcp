@@ -624,9 +624,10 @@ async fn http_device_action_gate_covers_adopt_upgrade_and_port_action() {
     }
 }
 
-/// `block`, `unblock`, and `reconnect` are each gated; `authorize` and
-/// `limit_bandwidth` are refused for being unwired, not by the direct-commit
-/// gate, so they must not carry the direct-commit refusal text.
+/// `block`, `unblock`, and `reconnect` are each gated. `authorize` and
+/// `limit_bandwidth` were removed as unwired stubs (MEC-505), so they must be
+/// refused as unknown actions before the direct-commit gate is ever reached,
+/// and must not carry the gate's refusal text.
 #[tokio::test]
 async fn http_client_action_gate_covers_block_unblock_reconnect_only() {
     let tokens_dir = tempfile::tempdir().expect("tempdir");
@@ -663,31 +664,39 @@ async fn http_client_action_gate_covers_block_unblock_reconnect_only() {
         task.abort();
     }
 
-    let (base_url, shutdown, task) = start_server(Arc::clone(&store), false).await;
-    let result = tokio::task::spawn_blocking({
-        let bearer = bearer.clone();
-        move || {
-            call_tool(
-                base_url,
-                bearer,
-                "unifi_client_action",
-                serde_json::json!({
-                    "controller": "home",
-                    "client": "aa:bb:cc:dd:ee:ff",
-                    "action": "authorize",
-                }),
-            )
-        }
-    })
-    .await
-    .expect("blocking task");
-    let text = result["content"][0]["text"].as_str().unwrap_or_default();
-    assert!(
-        !text.contains("allow-direct-commit") && !text.contains("direct-commit"),
-        "authorize is unwired, not direct-commit gated, and must not carry the gate's text: {text}"
-    );
-    shutdown.cancel();
-    task.abort();
+    for removed in ["authorize", "limit_bandwidth"] {
+        let (base_url, shutdown, task) = start_server(Arc::clone(&store), false).await;
+        let result = tokio::task::spawn_blocking({
+            let bearer = bearer.clone();
+            let removed = removed.to_owned();
+            move || {
+                call_tool(
+                    base_url,
+                    bearer,
+                    "unifi_client_action",
+                    serde_json::json!({
+                        "controller": "home",
+                        "client": "aa:bb:cc:dd:ee:ff",
+                        "action": removed,
+                    }),
+                )
+            }
+        })
+        .await
+        .expect("blocking task");
+        let refused = result.get("error").is_some() || result["isError"].as_bool().unwrap_or(false);
+        assert!(
+            refused,
+            "{removed} was removed and must be refused, got: {result}"
+        );
+        let rendered = result.to_string();
+        assert!(
+            !rendered.contains("allow-direct-commit"),
+            "{removed} must be refused as an unknown action, not by the gate: {rendered}"
+        );
+        shutdown.cancel();
+        task.abort();
+    }
 }
 
 /// A malformed MAC address is refused before dispatch, over the real
