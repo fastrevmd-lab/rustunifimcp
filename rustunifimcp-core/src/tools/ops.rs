@@ -450,14 +450,18 @@ pub async fn client_action(
 ///
 /// Wired actions: `list` (`cmd/backup` `list-backups`, capped at
 /// [`MAX_BACKUP_ITEMS`] and reporting a truncation marker like every other
-/// list-shaped tool) and `trigger` (`cmd/backup` `backup`) — the read tool
-/// and governed trigger action named in the issue this implements.
-/// `download` and `validate` remain unwired: both would need to move a raw
-/// `.unf` file rather than JSON, which `UnifiClient` does not support today,
-/// and there is no independent evidence for a `validate` command on the
-/// controller at all. `restore` is not available here — restoring a
-/// controller backup overwrites the entire configuration, so it goes through
-/// change control in Phase 6.
+/// list-shaped tool) and `trigger` (`cmd/backup` `backup`, requesting `days:
+/// 0` so the controller builds a config-only backup rather than the largest,
+/// slowest full-history one). `trigger` is not idempotent: it starts an
+/// asynchronous job on the controller, and a request that times out on the
+/// client side does not mean the job stopped. Retrying after a timeout can
+/// leave multiple backup files behind; callers must not retry `trigger`
+/// automatically. `download` and `validate` remain unwired: both would need
+/// to move a raw `.unf` file rather than JSON, which `UnifiClient` does not
+/// support today, and there is no independent evidence for a `validate`
+/// command on the controller at all. `restore` is not available here —
+/// restoring a controller backup overwrites the entire configuration, so it
+/// goes through change control in Phase 6.
 ///
 /// # Errors
 ///
@@ -505,7 +509,7 @@ pub async fn backup_action(
                     "/proxy/network/api/s/{site}/cmd/backup",
                     &[("site", site)],
                     &[],
-                    &serde_json::json!({"cmd": "backup", "days": -1}),
+                    &serde_json::json!({"cmd": "backup", "days": 0}),
                 )
                 .await
         }
