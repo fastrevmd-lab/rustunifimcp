@@ -72,6 +72,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `traffic_route` is the most restrictive: this server's read model for that kind
   carries only `name`, so a `traffic_route` write is now name-only — any other
   field in the body is refused.
+- **Container images now publish to `ghcr.io/mechubsec/rustunifimcp`** —
+  the repo moved to the mechubsec organization, and images are renamed to
+  match. Older tags were copied from the previous name.
 
 ## [0.4.0] - 2026-09-16
 
