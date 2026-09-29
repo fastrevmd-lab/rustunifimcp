@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+- **Wired `unifi_backup_action list` and `trigger`** (MEC-516): `list` calls
+  the controller's `cmd/backup` `list-backups` command and returns the
+  result capped at 100 entries with a `truncated`/`shown`/`total` marker,
+  the same shape `mecmcp-server::truncate_items` (MEC-513, mecmcp#443) will
+  give once `rustunifimcp` adopts a tagged `mecmcp-server` release that
+  carries it — the local helper is a deliberate placeholder, not a
+  reimplementation to keep. `trigger` calls `cmd/backup` `backup`. `download`
+  and `validate` still refuse: both would move a raw `.unf` file rather than
+  JSON, which `UnifiClient` does not support today.
 - **Added read coverage for legacy firewall rules, port forwards, static
   routes, and the controller event log** (MEC-509). `unifi_list_resources`
   and `unifi_get_resource` gain three new `kind`s: `firewall_rule` (the

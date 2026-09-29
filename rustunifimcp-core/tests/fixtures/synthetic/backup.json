@@ -1,0 +1,17 @@
+{
+  "meta": {
+    "rc": "ok"
+  },
+  "data": [
+    {
+      "filename": "autobackup_9.1.120_20260928.unf",
+      "size": 4194304,
+      "time": 1790380800
+    },
+    {
+      "filename": "autobackup_9.1.120_20260921.unf",
+      "size": 4187136,
+      "time": 1789776000
+    }
+  ]
+}

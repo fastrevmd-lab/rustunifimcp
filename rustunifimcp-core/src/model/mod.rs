@@ -14,6 +14,7 @@ use crate::error::UnifiError;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+pub mod backup;
 pub mod device;
 pub mod firewall;
 pub mod network;
