@@ -54,10 +54,11 @@ separate decision for its owner.
 
 Parity against the legacy surface is recorded in
 [`docs/PARITY-AUDIT.md`](docs/PARITY-AUDIT.md): of 33 legacy tools in the usage
-window, 31 are covered and verified against the live controller, one is an
-accepted gap (`set_device_port_overrides` — no verified write route on
-10.5.67), and one is built but deliberately unverified (`execute_port_action`,
-which cannot be exercised without disrupting a live switch port).
+window, 31 are covered and verified against the live controller, and two are
+accepted gaps (`set_device_port_overrides` — no verified write route on
+10.5.67 — and `execute_port_action`, removed from the advertised catalog
+because no command spelling has been confirmed from a live controller without
+disrupting a switch port in use).
 
 | Document | What it is |
 |---|---|
@@ -74,9 +75,11 @@ API client with two problems this project exists to fix.
 
 **Tool sprawl.** Its registry auto-registers every public async function in
 `src/tools/` by reflection — 205 functions across 37 modules become roughly
-**270 MCP tools**. Nobody chose that number. `rustunifimcp` targets **~24**:
+**270 MCP tools**. Nobody chose that number. `rustunifimcp` targets **21**:
 typed read primitives over a resource enum, a change-control lifecycle, scoped
-operational actions, and five workflows that earn their names.
+operational actions, and four workflows that earn their names. Every one of
+the 21 does real work end to end — none is advertised and then refuses or
+returns an empty result on every call.
 
 **No MCP-layer security.** It listens on plain HTTP with no bearer token, no
 scopes, no audit trail, and no rate limiting. Anything that can reach the port
@@ -88,7 +91,8 @@ full `mecmcp` security layer instead.
 **Three API surfaces, each labelled.** UniFi's supported Integration API is far
 narrower than what the controller can actually do, so the private `/api/s/` and
 `/v2/api/` routes stay in — but every endpoint carries its tag in code, and the
-private ones are gated behind an explicit scope. A supported-only deployment is
+private ones are gated behind an explicit per-controller `allow_private_api`
+flag in `controllers.json`, not a token scope. A supported-only deployment is
 a real, runnable configuration that a controller upgrade cannot silently break.
 
 **Change control adapted honestly.** UniFi has no candidate configuration and no

@@ -23,15 +23,15 @@ fn the_write_tool_registry_holds_exactly_the_mutating_tools() {
     let mut actual: Vec<&str> = WRITE_TOOLS.to_vec();
     actual.sort_unstable();
 
-    // Phase 3 registers the four operational tools. Phase 6 adds the seven
-    // change-set tools. Extend this list in the task that adds them, never
-    // ahead of it -- a name here with no tool behind it is not a guard.
+    // Phase 3 registers the two operational tools (`unifi_backup_action` and
+    // `unifi_run_speed_test` were removed as unwired stubs -- see MEC-505).
+    // Phase 6 adds the seven change-set tools. Extend this list in the task
+    // that adds them, never ahead of it -- a name here with no tool behind it
+    // is not a guard.
     let mut expected = vec![
         "unifi_add_controller",
-        "unifi_backup_action",
         "unifi_client_action",
         "unifi_device_action",
-        "unifi_run_speed_test",
         "unifi_create_change_set",
         "unifi_stage_change",
         "unifi_diff_change_set",

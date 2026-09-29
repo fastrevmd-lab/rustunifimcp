@@ -955,66 +955,6 @@ impl UnifiServer {
     }
 
     #[tool(
-        name = "unifi_backup_action",
-        description = "Execute a backup action (trigger, list, download, validate). `restore` is not an operational action — it is governed by the change-set lifecycle (Phase 6): `unifi_create_change_set` -> `unifi_stage_change` -> `unifi_approve_change_set` -> `unifi_apply_change_set`."
-    )]
-    async fn unifi_backup_action(
-        &self,
-        Parameters(args): Parameters<ops::BackupActionArgs>,
-        context: RequestContext<RoleServer>,
-    ) -> CallToolResult {
-        let caller = Self::caller(&context);
-        if let Err(error) = authorize_call(
-            caller.as_ref(),
-            "unifi_backup_action",
-            Some(&args.controller),
-            WRITE_TOOLS,
-        ) {
-            return tool_error(error);
-        }
-
-        let client = match self.client_for(&args.controller) {
-            Ok(client) => client,
-            Err(result) => return *result,
-        };
-
-        match ops::backup_action(args, &client).await {
-            Ok(json) => json_tool_result(json),
-            Err(error) => tool_error(error),
-        }
-    }
-
-    #[tool(
-        name = "unifi_run_speed_test",
-        description = "Run a speed test from the controller"
-    )]
-    async fn unifi_run_speed_test(
-        &self,
-        Parameters(args): Parameters<ops::SpeedTestArgs>,
-        context: RequestContext<RoleServer>,
-    ) -> CallToolResult {
-        let caller = Self::caller(&context);
-        if let Err(error) = authorize_call(
-            caller.as_ref(),
-            "unifi_run_speed_test",
-            Some(&args.controller),
-            WRITE_TOOLS,
-        ) {
-            return tool_error(error);
-        }
-
-        let client = match self.client_for(&args.controller) {
-            Ok(client) => client,
-            Err(result) => return *result,
-        };
-
-        match ops::run_speed_test(args, &client).await {
-            Ok(json) => json_tool_result(json),
-            Err(error) => tool_error(error),
-        }
-    }
-
-    #[tool(
         name = "unifi_site_health_report",
         description = "Generate a site health report joining devices, health metrics, and statistics"
     )]
@@ -1099,36 +1039,6 @@ impl UnifiServer {
         };
 
         match workflow::traffic_flow_report(&client, &args).await {
-            Ok(report) => json_tool_result(report),
-            Err(error) => tool_error(error),
-        }
-    }
-
-    #[tool(
-        name = "unifi_firewall_audit",
-        description = "Audit firewall policies and zones for common misconfigurations"
-    )]
-    async fn unifi_firewall_audit(
-        &self,
-        Parameters(args): Parameters<workflow::FirewallAuditArgs>,
-        context: RequestContext<RoleServer>,
-    ) -> CallToolResult {
-        let caller = Self::caller(&context);
-        if let Err(error) = authorize_call(
-            caller.as_ref(),
-            "unifi_firewall_audit",
-            Some(&args.controller),
-            WRITE_TOOLS,
-        ) {
-            return tool_error(error);
-        }
-
-        let client = match self.client_for(&args.controller) {
-            Ok(client) => client,
-            Err(result) => return *result,
-        };
-
-        match workflow::firewall_audit(&client, &args).await {
             Ok(report) => json_tool_result(report),
             Err(error) => tool_error(error),
         }

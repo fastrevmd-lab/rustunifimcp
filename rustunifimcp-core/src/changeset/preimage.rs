@@ -317,17 +317,9 @@ mod restore_tests {
     use super::StagedMutation;
 
     /// Restore overwrites the entire controller configuration. It is not an
-    /// operational action, and there must be no path to it that skips approval.
-    #[test]
-    fn restore_is_not_reachable_through_backup_action() {
-        let raw = r#"{"controller":"home","action":"restore","backup_id":"x"}"#;
-        let parsed: Result<crate::tools::ops::BackupActionArgs, _> = serde_json::from_str(raw);
-        assert!(
-            parsed.is_err(),
-            "restore must not parse as an operational action"
-        );
-    }
-
+    /// operational action -- there is no `unifi_backup_action` tool at all
+    /// (removed as an unwired stub), so the only path to `restore` is the
+    /// change-set lifecycle asserted below.
     #[test]
     fn a_staged_restore_declares_its_blast_radius() {
         let staged = StagedMutation::restore("backup-2026-08-26");
