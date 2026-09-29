@@ -175,6 +175,26 @@ fn routes() -> Vec<Route> {
             "/proxy/network/v2/api/site/default/topology".to_owned(),
             f("topology"),
         ),
+        // kind=firewall_rule (legacy, non-zone-based ruleset).
+        route(
+            "/proxy/network/api/s/default/rest/firewallrule".to_owned(),
+            f("firewallrule"),
+        ),
+        // kind=port_forward.
+        route(
+            "/proxy/network/api/s/default/rest/portforward".to_owned(),
+            f("portforward"),
+        ),
+        // kind=static_route.
+        route(
+            "/proxy/network/api/s/default/rest/routing".to_owned(),
+            f("routing"),
+        ),
+        // unifi_query_stats(subject=event).
+        route(
+            "/proxy/network/api/s/default/stat/event".to_owned(),
+            f("stat_event"),
+        ),
         // unifi_query_stats(subject=device); site_health_report.
         route(
             "/proxy/network/api/s/default/stat/device".to_owned(),
@@ -367,7 +387,7 @@ fn read_only_tool_calls() -> Vec<(&'static str, serde_json::Value)> {
     // Every stats subject and every list_resources kind, in addition to the
     // hand-picked calls above, so a per-kind allowlist gap is at least
     // reachable here even for kinds the table above does not name.
-    for subject in ["site", "device", "station", "wlan", "flow"] {
+    for subject in ["site", "device", "station", "wlan", "flow", "event"] {
         calls.push((
             "unifi_query_stats",
             serde_json::json!({"controller": CONTROLLER, "subject": subject}),

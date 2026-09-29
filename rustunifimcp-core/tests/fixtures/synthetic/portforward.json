@@ -1,0 +1,18 @@
+{
+  "meta": {
+    "rc": "ok"
+  },
+  "data": [
+    {
+      "_id": "000000000000000000000701",
+      "name": "SSH to jump host",
+      "enabled": true,
+      "pfwd_interface": "wan",
+      "src": "any",
+      "dst_port": "2222",
+      "fwd": "192.0.2.50",
+      "fwd_port": "22",
+      "proto": "tcp"
+    }
+  ]
+}

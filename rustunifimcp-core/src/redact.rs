@@ -146,6 +146,49 @@ const FIREWALL_ZONE_FIELDS: FieldAllowlist =
 /// Fields the model may see for a [`ResourceKind::TrafficRoute`].
 const TRAFFIC_ROUTE_FIELDS: FieldAllowlist = FieldAllowlist::new(&["_id", "name"]);
 
+/// Fields the model may see for a [`ResourceKind::FirewallRule`].
+///
+/// The legacy (non-zone-based) ruleset. UniFi documents no secret-bearing
+/// field on this shape, so this allowlist is a completeness guard rather than
+/// a credential boundary -- the same reasoning as `FIREWALL_GROUP_FIELDS`.
+const FIREWALL_RULE_FIELDS: FieldAllowlist = FieldAllowlist::new(&[
+    "_id",
+    "name",
+    "ruleset",
+    "rule_index",
+    "enabled",
+    "action",
+    "protocol",
+    "src_address",
+    "dst_address",
+    "src_port",
+    "dst_port",
+]);
+
+/// Fields the model may see for a [`ResourceKind::PortForward`].
+const PORT_FORWARD_FIELDS: FieldAllowlist = FieldAllowlist::new(&[
+    "_id",
+    "name",
+    "enabled",
+    "pfwd_interface",
+    "src",
+    "dst_port",
+    "fwd",
+    "fwd_port",
+    "proto",
+]);
+
+/// Fields the model may see for a [`ResourceKind::StaticRoute`].
+const STATIC_ROUTE_FIELDS: FieldAllowlist = FieldAllowlist::new(&[
+    "_id",
+    "name",
+    "type",
+    "enabled",
+    "static-route_network",
+    "static-route_nexthop",
+    "static-route_distance",
+]);
+
 /// The allowlist for `kind`, or `None` for [`ResourceKind::FirewallPolicy`],
 /// which is handled by [`project_firewall_policy`] instead.
 const fn allowlist_for(kind: ResourceKind) -> Option<FieldAllowlist> {
@@ -160,6 +203,9 @@ const fn allowlist_for(kind: ResourceKind) -> Option<FieldAllowlist> {
         ResourceKind::FirewallGroup => Some(FIREWALL_GROUP_FIELDS),
         ResourceKind::FirewallZone => Some(FIREWALL_ZONE_FIELDS),
         ResourceKind::TrafficRoute => Some(TRAFFIC_ROUTE_FIELDS),
+        ResourceKind::FirewallRule => Some(FIREWALL_RULE_FIELDS),
+        ResourceKind::PortForward => Some(PORT_FORWARD_FIELDS),
+        ResourceKind::StaticRoute => Some(STATIC_ROUTE_FIELDS),
         ResourceKind::FirewallPolicy => None,
     }
 }
@@ -311,6 +357,59 @@ mod tests {
         // corporate network's non-secret fields must still be there.
         assert!(rendered.contains("Test Network"));
         assert!(rendered.contains("192.0.2.0/24"));
+    }
+
+    /// The legacy firewall rule allowlist must keep the fields that make a
+    /// rule legible while dropping anything the controller adds that was
+    /// never named -- an allowlist drops unnamed fields by construction, so
+    /// this is the regression test for a typo in the field list silently
+    /// widening the surface.
+    #[test]
+    fn firewall_rule_allowlist_keeps_named_fields_and_drops_the_rest() {
+        let value = serde_json::json!([{
+            "_id": "000000000000000000000801",
+            "name": "Block guest to LAN",
+            "ruleset": "WAN_IN",
+            "enabled": true,
+            "action": "drop",
+            "unexpected_field": "should not survive projection",
+        }]);
+
+        let projected = project_resource_list(ResourceKind::FirewallRule, &value);
+        let rule = &projected[0];
+        assert_eq!(rule["ruleset"], "WAN_IN");
+        assert_eq!(rule["action"], "drop");
+        assert!(
+            rule.get("unexpected_field").is_none(),
+            "an unnamed field must be dropped, not passed through"
+        );
+    }
+
+    /// Port forwards keep the fields an operator needs to understand where
+    /// traffic goes, and drop anything not named.
+    #[test]
+    fn port_forward_allowlist_keeps_named_fields() {
+        let raw = fixture(DEFAULT_FIXTURE_VERSION, "portforward");
+        let data = raw.get("data").expect("portforward has data");
+
+        let projected = project_resource_list(ResourceKind::PortForward, data);
+        let forward = &projected[0];
+        assert_eq!(forward["fwd"], "192.0.2.50");
+        assert_eq!(forward["fwd_port"], "22");
+        assert_eq!(forward["proto"], "tcp");
+    }
+
+    /// Static routes keep the network/nexthop pair a route is meaningless
+    /// without.
+    #[test]
+    fn static_route_allowlist_keeps_network_and_nexthop() {
+        let raw = fixture(DEFAULT_FIXTURE_VERSION, "routing");
+        let data = raw.get("data").expect("routing has data");
+
+        let projected = project_resource_list(ResourceKind::StaticRoute, data);
+        let route = &projected[0];
+        assert_eq!(route["static-route_network"], "198.51.100.0/24");
+        assert_eq!(route["static-route_nexthop"], "192.0.2.1");
     }
 
     #[test]

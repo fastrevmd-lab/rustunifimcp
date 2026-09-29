@@ -29,6 +29,12 @@ pub struct Route {
         skip_serializing_if = "Option::is_none"
     )]
     pub static_route_nexthop: Option<String>,
+    /// Static route administrative distance.
+    #[serde(
+        rename = "static-route_distance",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub static_route_distance: Option<u32>,
 }
 
 /// A policy-based traffic route.
@@ -62,4 +68,28 @@ pub fn parse_traffic_routes(val: &serde_json::Value) -> Result<Vec<TrafficRoute>
                 .map_err(|e| UnifiError::Malformed(format!("traffic route parse failed: {e}")))
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_routes;
+    use crate::testing::{DEFAULT_FIXTURE_VERSION, fixture};
+
+    /// Static routes must parse from the committed synthetic fixture.
+    #[test]
+    fn static_routes_parse_from_the_synthetic_fixture() {
+        let raw = fixture(DEFAULT_FIXTURE_VERSION, "routing");
+        let routes = parse_routes(&raw).expect("route parse");
+        assert!(
+            !routes.is_empty(),
+            "the synthetic fixture must carry at least one route"
+        );
+        let route = &routes[0];
+        assert_eq!(
+            route.static_route_network.as_deref(),
+            Some("198.51.100.0/24")
+        );
+        assert_eq!(route.static_route_nexthop.as_deref(), Some("192.0.2.1"));
+        assert_eq!(route.static_route_distance, Some(1));
+    }
 }

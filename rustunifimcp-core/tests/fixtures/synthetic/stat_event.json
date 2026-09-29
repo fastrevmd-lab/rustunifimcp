@@ -1,0 +1,19 @@
+{
+  "meta": {
+    "rc": "ok"
+  },
+  "data": [
+    {
+      "_id": "000000000000000000000901",
+      "key": "EXAMPLE-EVT_WU_Connected",
+      "subsystem": "wlan",
+      "site_id": "000000000000000000000000",
+      "time": 1735689600000,
+      "datetime": "2025-01-01T00:00:00Z",
+      "msg": "User[02:00:00:02:01:01] has connected to AP[02:00:00:01:01:01] with SSID \"Guest\"",
+      "user": "02:00:00:02:01:01",
+      "ap": "02:00:00:01:01:01",
+      "ssid": "Guest"
+    }
+  ]
+}

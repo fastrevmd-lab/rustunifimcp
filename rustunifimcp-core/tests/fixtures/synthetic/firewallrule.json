@@ -1,3 +1,20 @@
 {
-  "data": []
+  "meta": {
+    "rc": "ok"
+  },
+  "data": [
+    {
+      "_id": "000000000000000000000801",
+      "name": "Block guest to LAN",
+      "ruleset": "WAN_IN",
+      "rule_index": "2001",
+      "enabled": true,
+      "action": "drop",
+      "protocol": "all",
+      "src_address": "network",
+      "dst_address": "network",
+      "src_port": "",
+      "dst_port": ""
+    }
+  ]
 }

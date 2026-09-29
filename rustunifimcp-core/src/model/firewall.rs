@@ -78,6 +78,57 @@ pub struct FirewallPolicy {
     pub rest: serde_json::Map<String, serde_json::Value>,
 }
 
+/// A legacy (non-zone-based) firewall rule.
+///
+/// This is the pre-zone-based ruleset (`rest/firewallrule`), superseded on
+/// newer controllers by [`FirewallPolicy`] but still the active enforcement
+/// path on controllers that have not migrated. Unlike `FirewallPolicy` this
+/// shape has no secret-bearing fields UniFi documents, so it is projected
+/// through a plain allowlist rather than the denylist-and-shape scan.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct FirewallRule {
+    /// Rule ID.
+    #[serde(rename = "_id")]
+    pub id: String,
+    /// Rule name.
+    pub name: String,
+    /// Ruleset the rule belongs to (e.g., `"WAN_IN"`, `"LAN_IN"`).
+    pub ruleset: String,
+    /// Rule index (ordering within the ruleset).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rule_index: Option<String>,
+    /// Whether the rule is enabled.
+    pub enabled: bool,
+    /// Action (`"accept"`, `"drop"`, `"reject"`).
+    pub action: String,
+    /// Protocol matched (e.g., `"tcp"`, `"udp"`, `"all"`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub protocol: Option<String>,
+    /// Source address type (`"any"`, `"address"`, `"network"`, `"group"`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub src_address: Option<String>,
+    /// Destination address type.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dst_address: Option<String>,
+    /// Source port(s).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub src_port: Option<String>,
+    /// Destination port(s).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dst_port: Option<String>,
+}
+
+/// Parses legacy firewall rules from the Private v1 API response.
+pub fn parse_firewall_rules(val: &serde_json::Value) -> Result<Vec<FirewallRule>, UnifiError> {
+    let data = super::unwrap_enveloped_data(val)?;
+    data.iter()
+        .map(|item| {
+            serde_json::from_value(item.clone())
+                .map_err(|e| UnifiError::Malformed(format!("firewall rule parse failed: {e}")))
+        })
+        .collect()
+}
+
 /// Parses firewall groups from the Private v1 API response.
 pub fn parse_firewall_groups(val: &serde_json::Value) -> Result<Vec<FirewallGroup>, UnifiError> {
     let data = super::unwrap_enveloped_data(val)?;
@@ -113,8 +164,21 @@ pub fn parse_firewall_policies(val: &serde_json::Value) -> Result<Vec<FirewallPo
 
 #[cfg(test)]
 mod tests {
-    use super::parse_firewall_policies;
+    use super::{parse_firewall_policies, parse_firewall_rules};
+    use crate::testing::{DEFAULT_FIXTURE_VERSION, fixture};
     use serde_json::json;
+
+    /// Legacy firewall rules must parse from the committed synthetic fixture.
+    #[test]
+    fn firewall_rules_parse_from_the_synthetic_fixture() {
+        let raw = fixture(DEFAULT_FIXTURE_VERSION, "firewallrule");
+        let rules = parse_firewall_rules(&raw).expect("firewall rule parse");
+        assert!(
+            !rules.is_empty(),
+            "the synthetic fixture must carry at least one rule"
+        );
+        assert_eq!(rules[0].ruleset, "WAN_IN");
+    }
 
     /// A policy the Private v2 surface returns, with the match fields that make
     /// it mean anything.
