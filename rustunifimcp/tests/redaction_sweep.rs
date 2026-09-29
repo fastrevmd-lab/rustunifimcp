@@ -442,6 +442,12 @@ async fn no_read_only_tool_leaks_a_fixture_secret() {
                 panic!("{tool}({args}) transport/protocol error, not tolerated: {error}")
             });
 
+        // An error result carries no resource data, so it would "pass" the
+        // leak check without proving anything (MEC-737 F3).
+        assert!(
+            !result.is_error.unwrap_or(false),
+            "{tool}({args}) returned a tool error, so its output was never checked for leaks"
+        );
         let mut rendered = String::new();
         for content in &result.content {
             if let Some(text) = content.as_text() {
@@ -471,4 +477,73 @@ async fn no_read_only_tool_leaks_a_fixture_secret() {
         checked >= TOOL_NAMES.len() - WRITE_TOOLS.len(),
         "swept fewer tools than the read-only registry holds"
     );
+}
+
+/// MEC-737 F1: the pre-image must stay raw internally -- drift detection
+/// compares it with the live object -- while every copy that reaches the model
+/// (the diff's `before`) is projected. Drives the real `UnifiClient` against
+/// the sweep's mock controller, whose WLAN carries fixture `x_*` secrets.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn preimage_is_raw_for_drift_but_diff_output_is_projected() {
+    use rustunifimcp_core::changeset::apply::ControllerOps as _;
+    use rustunifimcp_core::changeset::{Preimage, StagedMutation, diff_against_preimage};
+    use rustunifimcp_core::client::UnifiClient;
+
+    let (server_cert_pem, server_key_pem) = tls_material();
+    let ca_pem_path = write_temp(server_cert_pem.as_bytes());
+    let port = serve_mock_controller(server_cert_pem, server_key_pem, routes()).await;
+    ensure_crypto_provider();
+    let api_key_path = write_temp(b"sweep-test-key\n");
+    let controllers_body = serde_json::json!({
+        "version": 1,
+        "devices": {
+            CONTROLLER: {
+                "endpoint": format!("https://localhost:{port}"),
+                "site": "default",
+                "api_key_file": api_key_path,
+                "ca_pem_path": ca_pem_path,
+                "allow_private_api": true,
+            }
+        }
+    });
+    let controllers_path = write_temp(controllers_body.to_string().as_bytes());
+    let registry = ControllerRegistry::load(&controllers_path).expect("load inventory");
+    let client = UnifiClient::new(registry.get(CONTROLLER).expect("controller")).expect("client");
+
+    let wlan = "000000000000000000000501";
+    for mutation in [
+        StagedMutation::Update {
+            kind: "wlan".to_owned(),
+            id: wlan.to_owned(),
+            body: serde_json::json!({"name": "renamed"}),
+        },
+        StagedMutation::Delete {
+            kind: "wlan".to_owned(),
+            id: wlan.to_owned(),
+        },
+    ] {
+        let mutations = vec![mutation];
+        let preimage = Preimage::capture_preimage(&client, &mutations)
+            .await
+            .expect("capture pre-image");
+        assert!(
+            client
+                .preimage_matches(&preimage, &mutations)
+                .await
+                .expect("drift check"),
+            "an unchanged resource with x_* fields must not read as stale"
+        );
+        let diff = diff_against_preimage(&preimage, &mutations).expect("diff");
+        let rendered = serde_json::to_string(&diff.changes).expect("render diff");
+        assert!(
+            rendered.contains(wlan),
+            "the diff must still describe the resource"
+        );
+        for secret in FIXTURE_SECRETS {
+            assert!(
+                !rendered.contains(secret),
+                "the diff leaked a fixture secret"
+            );
+        }
+    }
 }

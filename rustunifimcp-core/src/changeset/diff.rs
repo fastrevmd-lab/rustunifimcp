@@ -45,9 +45,9 @@ pub fn diff_against_preimage(
     let changes = mutations
         .iter()
         .map(|mutation| {
-            // `before` comes from the pre-image, which is already projected
-            // through the per-kind allowlist at capture time (see
-            // `preimage.rs`). `after` is the staged mutation's own body --
+            // `before` comes from the pre-image, which is kept raw for drift
+            // detection and rollback, so it is projected through the per-kind
+            // allowlist here, at output (MEC-737 F1). `after` is the staged mutation's own body --
             // caller-supplied, not fetched from the controller by this
             // function -- but is projected the same way before it reaches
             // the model, so a body built by copying fields forward from an
@@ -59,10 +59,17 @@ pub fn diff_against_preimage(
                     (None, Some(crate::redact::project_by_kind_name(kind, body)))
                 }
                 StagedMutation::Update { kind, id, body } => (
-                    preimage.get_resource(id),
+                    preimage
+                        .get_resource(id)
+                        .map(|before| crate::redact::project_by_kind_name(kind, &before)),
                     Some(crate::redact::project_by_kind_name(kind, body)),
                 ),
-                StagedMutation::Delete { id, .. } => (preimage.get_resource(id), None),
+                StagedMutation::Delete { kind, id } => (
+                    preimage
+                        .get_resource(id)
+                        .map(|before| crate::redact::project_by_kind_name(kind, &before)),
+                    None,
+                ),
                 StagedMutation::Restore { backup_id } => {
                     // Restore overwrites the entire controller, so there's no meaningful
                     // before/after at the resource level. The backup_id is the "after".

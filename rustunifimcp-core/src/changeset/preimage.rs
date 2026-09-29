@@ -136,16 +136,14 @@ impl Preimage {
                         }
                     };
 
-                    // The pre-image is diffed and returned to the model
-                    // verbatim (see `diff.rs`'s `before`), so the raw
-                    // resource fetched here -- which, unlike
-                    // `unifi_get_resource`, has not passed through a typed
-                    // model parser -- is projected through the same
-                    // per-kind allowlist before it is kept. A WLAN's
-                    // `x_passphrase`, a VPN network's `x_secret` or
-                    // WireGuard private key, and a RADIUS profile's shared
-                    // secret all live in exactly this raw shape.
-                    data.push(crate::redact::project_resource(resource_kind, &resource));
+                    // Kept raw: drift detection (`preimage_matches`) compares
+                    // this against the live object and rollback writes it
+                    // back, so a projected copy would read every edit as stale
+                    // and roll back a stripped object (MEC-737 F1). It never
+                    // reaches the model raw -- `diff.rs` projects `before`
+                    // through the per-kind allowlist at output.
+                    let _ = resource_kind;
+                    data.push(resource);
                 }
             }
         }
