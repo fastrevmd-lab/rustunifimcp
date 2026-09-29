@@ -562,6 +562,20 @@ async fn run_inner() -> Result<()> {
         );
     }
 
+    // Direct-commit tools (unifi_device_action's `restart`, unifi_client_action's
+    // `block`/`unblock`/`reconnect`) mutate a device or client in one call with no
+    // change-set approval. Refused by default; logging here mirrors the lab-mode
+    // banner above.
+    let direct_commit = mecmcp_audit::DirectCommitPolicy::new(cli.allow_direct_commit);
+    direct_commit.log_startup("rustunifimcp");
+    if !cli.allow_direct_commit {
+        tracing::info!(
+            "direct-commit tools disabled: unifi_device_action's restart and \
+             unifi_client_action's block/unblock/reconnect are refused on stdio and HTTP \
+             alike. Use --allow-direct-commit to enable them."
+        );
+    }
+
     // Warn if --state-file is not provided.
     if cli.state_file.is_none() {
         tracing::warn!(
@@ -620,7 +634,13 @@ async fn run_inner() -> Result<()> {
     .map_err(|e| anyhow::anyhow!("failed to initialize the change-set coordinator: {e}"))?;
 
     // Build server.
-    let server = UnifiServer::new(Arc::clone(&registry), cli.lab_mode(), coordinator, recorder)?;
+    let server = UnifiServer::new(
+        Arc::clone(&registry),
+        cli.lab_mode(),
+        coordinator,
+        recorder,
+        direct_commit,
+    )?;
 
     // Determine transport.
     let served = match cli.common.transport {
@@ -1374,7 +1394,14 @@ mod tests {
         .unwrap();
 
         // Build a server for the reload handler.
-        let server = UnifiServer::new(Arc::clone(&registry), false, coordinator, None).unwrap();
+        let server = UnifiServer::new(
+            Arc::clone(&registry),
+            false,
+            coordinator,
+            None,
+            mecmcp_audit::DirectCommitPolicy::new(false),
+        )
+        .unwrap();
 
         // Should install successfully without a token store.
         let result = install_sighup_reload(registry, Some(server), None, None);
@@ -1426,7 +1453,14 @@ mod tests {
             None,
         )
         .unwrap();
-        let server = UnifiServer::new(Arc::clone(&registry), false, coordinator, None).unwrap();
+        let server = UnifiServer::new(
+            Arc::clone(&registry),
+            false,
+            coordinator,
+            None,
+            mecmcp_audit::DirectCommitPolicy::new(false),
+        )
+        .unwrap();
 
         let token_store = Arc::new(mecmcp_auth::TokenStoreFile::load(tokens_file.path()).unwrap());
 
@@ -1506,7 +1540,14 @@ mod tests {
             None,
         )
         .unwrap();
-        let server = UnifiServer::new(Arc::clone(&registry), false, coordinator, None).unwrap();
+        let server = UnifiServer::new(
+            Arc::clone(&registry),
+            false,
+            coordinator,
+            None,
+            mecmcp_audit::DirectCommitPolicy::new(false),
+        )
+        .unwrap();
 
         // Initial state: no controllers, no clients
         assert_eq!(registry.names().len(), 0);

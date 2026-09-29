@@ -84,7 +84,14 @@ async fn start_server_with_lab_mode(
         None,
     )
     .expect("coordinator");
-    let handler = UnifiServer::new(registry, lab_mode, coordinator, None).expect("server");
+    let handler = UnifiServer::new(
+        registry,
+        lab_mode,
+        coordinator,
+        None,
+        mecmcp_audit::DirectCommitPolicy::new(false),
+    )
+    .expect("server");
 
     let shutdown = CancellationToken::new();
     let plan = rustunifimcp::http_transport::build_http_router(

@@ -37,6 +37,28 @@ pub struct UnifiCli {
     #[arg(long = "lab-mode")]
     pub lab_mode: bool,
 
+    /// Allow direct-commit tools that mutate a device or client in one call
+    /// with no change-set approval.
+    ///
+    /// `unifi_device_action`'s `restart` and `unifi_client_action`'s `block`,
+    /// `unblock`, and `reconnect` act on the controller immediately -- there
+    /// is no change-set flow to route an operational command like "restart
+    /// this device" through. By default this server refuses those specific
+    /// actions rather than let a model decide a firewall action alone.
+    ///
+    /// This applies identically over stdio and HTTP: stdio carries no caller
+    /// context at all, so it is refused on exactly the same terms as an
+    /// authenticated HTTP session.
+    ///
+    /// **Residual risk**: an operator can set this flag. Doing so is logged
+    /// loudly at startup and every direct-commit call is recorded in the audit
+    /// trail (`direct_commit_allowed=true`), but no second-principal review
+    /// happens.
+    ///
+    /// Defaults to false (refuse). Spelled identically on every mecmcp server.
+    #[arg(long = "allow-direct-commit")]
+    pub allow_direct_commit: bool,
+
     /// Absolute path to the change-set and operation state file.
     ///
     /// Spelled `--state-file` on every mecmcp server, per
