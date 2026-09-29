@@ -158,6 +158,55 @@ fn stdio_allows_device_restart_with_the_flag() {
     );
 }
 
+/// F1 regression: `gate_direct_commit` used to call `scope.succeed()` and
+/// drop the scope as soon as the flag check passed -- before
+/// `ops::device_action` ever ran. That recorded `result=ok` whether or not
+/// the gated mutation actually happened, and always `result=ok` even if it
+/// went on to fail. With the flag set, `restart` passes the gate but then
+/// fails (nothing listens at `127.0.0.1:1` in this harness): the single
+/// audit record for this call must reflect that failure, not a premature
+/// success.
+#[test]
+fn stdio_gate_audit_reflects_the_actual_action_outcome_not_just_the_gate_check() {
+    let lines = stderr_for_request(&["--allow-direct-commit"], RESTART_REQUEST);
+
+    let audits = audit_lines(&lines);
+    let record = audits
+        .iter()
+        .find(|line| {
+            line.contains("unifi_device_action") && line.contains("direct_commit_allowed=true")
+        })
+        .unwrap_or_else(|| panic!("no direct-commit gate audit record among: {audits:#?}"));
+    assert!(
+        !record.contains("result=ok"),
+        "the audit record must not claim success before the gated action ran: {record}"
+    );
+    assert!(
+        record.contains("result=error"),
+        "the audit record must reflect the actual (failed) outcome of the mutation: {record}"
+    );
+}
+
+/// F2 regression: the direct-commit gate used to be reached with the raw,
+/// unvalidated `device`/`client` string, so a malformed value was written
+/// into the audit record's `devices` field before it was ever checked. MAC
+/// validation now runs before the gate builds an `AuditScope` at all, so a
+/// malformed MAC must never reach that gate or its audit record.
+#[test]
+fn stdio_malformed_mac_never_reaches_the_direct_commit_audit_record() {
+    let request = r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"unifi_device_action","arguments":{"controller":"home","device":"not-a-mac-address","action":"restart"}}}"#;
+    let lines = stderr_for_request(&["--allow-direct-commit"], request);
+
+    let audits = audit_lines(&lines);
+    assert!(
+        !audits
+            .iter()
+            .any(|line| line.contains("unifi_device_action") && line.contains("direct_commit")),
+        "a malformed MAC must be refused before the direct-commit gate runs, so no gate audit \
+         record should exist: {audits:#?}"
+    );
+}
+
 /// `block` is gated identically to `restart`.
 #[test]
 fn stdio_refuses_client_block_without_the_flag() {
