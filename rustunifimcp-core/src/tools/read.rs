@@ -658,7 +658,17 @@ fn project_stats(
         StatsSubject::Event => {
             let envelope = serde_json::json!({ "data": items });
             let parsed = parse_events(&envelope)?;
-            serde_json::to_value(parsed).map_err(|e| UnifiError::Malformed(e.to_string()))
+            let mut projected =
+                serde_json::to_value(parsed).map_err(|e| UnifiError::Malformed(e.to_string()))?;
+            // `msg` is unbounded controller free text (admin usernames,
+            // source IPs, client hostnames, SSIDs) that the typed model
+            // cannot narrow further without losing the description itself,
+            // so run it through the denylist-and-shape scan as defence in
+            // depth -- see `model::stats::Event`'s doc comment for why this
+            // kind cannot use the scan for its `key`/`event_type` field
+            // instead.
+            crate::redact::redact_in_place(&mut projected);
+            Ok(projected)
         }
         StatsSubject::Wlan => Ok(crate::redact::project_resource_list(
             crate::model::ResourceKind::Wlan,
@@ -1032,6 +1042,28 @@ mod tests {
         assert!(
             projected[0].get("key").is_none(),
             "the output must not carry a field literally named `key`"
+        );
+    }
+
+    /// `msg` is unbounded controller free text the typed `Event` model
+    /// cannot narrow further, so it must still go through the
+    /// denylist-and-shape scan as defence in depth (Percy's F3): a
+    /// secret-shaped value embedded in the message must not survive.
+    #[test]
+    fn event_msg_is_scanned_for_secret_shaped_content() {
+        use crate::testing::{DEFAULT_FIXTURE_VERSION, fixture};
+
+        let raw = fixture(DEFAULT_FIXTURE_VERSION, "stat_event");
+        let data = crate::model::unwrap_enveloped_data(&raw)
+            .expect("envelope")
+            .clone();
+
+        let projected =
+            super::project_stats(super::StatsSubject::Event, &data).expect("project events");
+        let rendered = projected.to_string();
+        assert!(
+            !rendered.contains("EXAMPLE-event-secret-fake1-AQ=="),
+            "a secret-shaped value in `msg` leaked through unscanned: {rendered}"
         );
     }
 

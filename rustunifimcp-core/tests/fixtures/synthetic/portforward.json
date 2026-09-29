@@ -12,7 +12,9 @@
       "dst_port": "2222",
       "fwd": "192.0.2.50",
       "fwd_port": "22",
-      "proto": "tcp"
+      "proto": "tcp",
+      "destination_ip": "203.0.113.10",
+      "log": false
     }
   ]
 }

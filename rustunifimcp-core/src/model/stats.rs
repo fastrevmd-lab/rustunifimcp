@@ -47,8 +47,10 @@ pub struct Event {
     /// Deserializes from the controller's `key`, but serializes back out as
     /// `event_type` -- the projected output must not carry a field literally
     /// named `key`, or the shared crate's denylist-and-shape scan (still run
-    /// as defence in depth; see `redact::project_events`) would redact its
-    /// value on the way out.
+    /// as defence in depth on `msg`; see
+    /// `tools::read::project_stats`'s `StatsSubject::Event` arm, which calls
+    /// `redact::redact_in_place` after this type's own projection) would
+    /// redact its value on the way out.
     #[serde(rename(serialize = "event_type", deserialize = "key"))]
     pub event_type: String,
     /// Subsystem the event belongs to (e.g., `"wlan"`, `"lan"`, `"wan"`).

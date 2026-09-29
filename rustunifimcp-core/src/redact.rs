@@ -163,6 +163,21 @@ const FIREWALL_RULE_FIELDS: FieldAllowlist = FieldAllowlist::new(&[
     "dst_address",
     "src_port",
     "dst_port",
+    "src_firewallgroup_ids",
+    "dst_firewallgroup_ids",
+    "src_networkconf_id",
+    "src_networkconf_type",
+    "dst_networkconf_id",
+    "dst_networkconf_type",
+    "src_mac_address",
+    "state_established",
+    "state_related",
+    "state_new",
+    "state_invalid",
+    "protocol_match_excepted",
+    "logging",
+    "ipsec",
+    "icmp_typename",
 ]);
 
 /// Fields the model may see for a [`ResourceKind::PortForward`].
@@ -173,9 +188,11 @@ const PORT_FORWARD_FIELDS: FieldAllowlist = FieldAllowlist::new(&[
     "pfwd_interface",
     "src",
     "dst_port",
+    "destination_ip",
     "fwd",
     "fwd_port",
     "proto",
+    "log",
 ]);
 
 /// Fields the model may see for a [`ResourceKind::StaticRoute`].
@@ -184,9 +201,11 @@ const STATIC_ROUTE_FIELDS: FieldAllowlist = FieldAllowlist::new(&[
     "name",
     "type",
     "enabled",
+    "static-route_type",
     "static-route_network",
     "static-route_nexthop",
     "static-route_distance",
+    "static-route_interface",
 ]);
 
 /// The allowlist for `kind`, or `None` for [`ResourceKind::FirewallPolicy`],
@@ -372,6 +391,8 @@ mod tests {
             "ruleset": "WAN_IN",
             "enabled": true,
             "action": "drop",
+            "dst_firewallgroup_ids": ["600000000000000000000101"],
+            "src_networkconf_type": "NETv4",
             "unexpected_field": "should not survive projection",
         }]);
 
@@ -379,6 +400,14 @@ mod tests {
         let rule = &projected[0];
         assert_eq!(rule["ruleset"], "WAN_IN");
         assert_eq!(rule["action"], "drop");
+        assert_eq!(
+            rule["dst_firewallgroup_ids"],
+            serde_json::json!(["600000000000000000000101"]),
+            "a group-matched rule must keep its group IDs -- an allowlist that \
+             only names the literal src_address/dst_address fields silently \
+             turns a group rule into an unscoped one"
+        );
+        assert_eq!(rule["src_networkconf_type"], "NETv4");
         assert!(
             rule.get("unexpected_field").is_none(),
             "an unnamed field must be dropped, not passed through"
@@ -397,6 +426,8 @@ mod tests {
         assert_eq!(forward["fwd"], "192.0.2.50");
         assert_eq!(forward["fwd_port"], "22");
         assert_eq!(forward["proto"], "tcp");
+        assert_eq!(forward["destination_ip"], "203.0.113.10");
+        assert_eq!(forward["log"], false);
     }
 
     /// Static routes keep the network/nexthop pair a route is meaningless
@@ -410,6 +441,12 @@ mod tests {
         let route = &projected[0];
         assert_eq!(route["static-route_network"], "198.51.100.0/24");
         assert_eq!(route["static-route_nexthop"], "192.0.2.1");
+        assert_eq!(
+            route["static-route_type"], "nexthop-route",
+            "the route type distinguishes a nexthop route from a blackhole \
+             or interface route -- dropping it makes every route look the \
+             same shape"
+        );
     }
 
     #[test]

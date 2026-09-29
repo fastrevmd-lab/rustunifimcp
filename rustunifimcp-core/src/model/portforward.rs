@@ -32,6 +32,13 @@ pub struct PortForward {
     /// Protocol (`"tcp"`, `"udp"`, `"tcp_udp"`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub proto: Option<String>,
+    /// WAN destination IP this rule applies to, on a multi-WAN controller
+    /// (as opposed to matching all WAN IPs).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub destination_ip: Option<String>,
+    /// Whether matches against this rule are logged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub log: Option<bool>,
 }
 
 /// Parses port forwards from the Private v1 API response.
@@ -60,5 +67,7 @@ mod tests {
             "the synthetic fixture must carry at least one port forward"
         );
         assert_eq!(forwards[0].fwd_port.as_deref(), Some("22"));
+        assert_eq!(forwards[0].destination_ip.as_deref(), Some("203.0.113.10"));
+        assert_eq!(forwards[0].log, Some(false));
     }
 }

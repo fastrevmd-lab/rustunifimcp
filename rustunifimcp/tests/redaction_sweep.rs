@@ -57,6 +57,7 @@ const FIXTURE_SECRETS: &[&str] = &[
     "EXAMPLE-radius-acct-secret-fake1",
     "EXAMPLE-policy-shared-secret-fake1",
     "EXAMPLE-802-1x-password-fake1",
+    "EXAMPLE-event-secret-fake1-AQ==",
 ];
 
 fn secure(path: &std::path::Path) {

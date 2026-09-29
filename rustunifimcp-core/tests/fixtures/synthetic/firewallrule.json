@@ -5,16 +5,25 @@
   "data": [
     {
       "_id": "000000000000000000000801",
-      "name": "Block guest to LAN",
+      "name": "Block guest group to LAN",
       "ruleset": "WAN_IN",
-      "rule_index": "2001",
+      "rule_index": 2001,
       "enabled": true,
       "action": "drop",
       "protocol": "all",
-      "src_address": "network",
-      "dst_address": "network",
+      "src_networkconf_id": "000000000000000000000601",
+      "src_networkconf_type": "NETv4",
+      "dst_firewallgroup_ids": ["600000000000000000000101"],
       "src_port": "",
-      "dst_port": ""
+      "dst_port": "",
+      "state_established": true,
+      "state_related": true,
+      "state_new": true,
+      "state_invalid": false,
+      "protocol_match_excepted": false,
+      "logging": false,
+      "ipsec": "match-none",
+      "icmp_typename": ""
     }
   ]
 }
