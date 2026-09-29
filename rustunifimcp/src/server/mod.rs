@@ -360,6 +360,33 @@ impl UnifiServer {
         }
     }
 
+    /// Whether `caller`'s tool scope would let it both stage and approve a
+    /// change set.
+    ///
+    /// Two-person control used to rest entirely on an operational convention
+    /// (CLAUDE.md: issue tokens that don't combine stage+approve rights) that
+    /// nothing enforced. `unifi_approve_change_set` refuses an approver who
+    /// *is* a set's owner, but that check says nothing about a second token
+    /// minted for a different principal name that nonetheless carries both
+    /// scopes -- such a token satisfies the owner check on every call and
+    /// still lets one credential complete the whole lifecycle alone.
+    ///
+    /// Checked here, at call time, rather than only at token issuance:
+    /// issuance can refuse minting such a token, but a token store loaded
+    /// from a hand-edited file never went through issuance at all. This is
+    /// the check a hand-edited store cannot bypass.
+    fn holds_combined_two_person_control_scope(
+        caller: Option<&mecmcp_auth::CallerCtx<NoGrant>>,
+    ) -> bool {
+        let Some(caller) = caller else {
+            return false;
+        };
+        caller.tools.allows_tool("unifi_stage_change", WRITE_TOOLS)
+            && caller
+                .tools
+                .allows_tool("unifi_approve_change_set", WRITE_TOOLS)
+    }
+
     /// Fetch a change set, refusing a controller that does not own it.
     ///
     /// The coordinator addresses a change set by `(id, device)` and refuses a
@@ -1247,6 +1274,15 @@ impl UnifiServer {
         ) {
             return tool_error(error);
         }
+        // Under --lab-mode a single operator may hold both scopes on purpose
+        // (issued with `token add --allow-self-approval`); the change-set
+        // lab-mode waiver then records the self-approval as a distinct fact.
+        if !self.lab_mode && Self::holds_combined_two_person_control_scope(caller.as_ref()) {
+            return tool_error(
+                "two-person control: this token's scope combines unifi_stage_change and \
+                 unifi_approve_change_set; issue separate tokens for staging and approving",
+            );
+        }
 
         // A draft on its first stage, or a change set already in the store.
         let draft = self.draft(&args.change_set_id, &args.controller);
@@ -1603,6 +1639,15 @@ impl UnifiServer {
             WRITE_TOOLS,
         ) {
             return tool_error(error);
+        }
+        // Under --lab-mode a single operator may hold both scopes on purpose
+        // (issued with `token add --allow-self-approval`); the change-set
+        // lab-mode waiver then records the self-approval as a distinct fact.
+        if !self.lab_mode && Self::holds_combined_two_person_control_scope(caller.as_ref()) {
+            return tool_error(
+                "two-person control: this token's scope combines unifi_stage_change and \
+                 unifi_approve_change_set; issue separate tokens for staging and approving",
+            );
         }
 
         let approver = Self::principal(caller.as_ref());
@@ -2151,6 +2196,81 @@ mod tests {
     use super::*;
     use rmcp::ServiceExt;
     use std::time::Duration;
+
+    /// Build a `CallerCtx` with the given tool scope, mirroring the pattern
+    /// `mecmcp-server::authorize`'s own tests use.
+    fn caller_with_tools(tools: mecmcp_auth::ScopeSet) -> mecmcp_auth::CallerCtx<NoGrant> {
+        mecmcp_auth::CallerCtx {
+            token_name: "caller".to_owned(),
+            devices: mecmcp_auth::ScopeSet::Wildcard,
+            tools,
+            grant: None,
+            provider: None,
+            provider_tier: None,
+            on_behalf_of: None,
+            actor_type: mecmcp_auth::ActorType::Human,
+            client_name: None,
+            model_id: None,
+            session_id: None,
+            request_id: uuid::Uuid::new_v4(),
+        }
+    }
+
+    /// The check this test guards: `unifi_stage_change` and
+    /// `unifi_approve_change_set` are both in `WRITE_TOOLS`, and this crate's
+    /// only means of reaching a write tool is an explicit allowlist naming
+    /// it (`ScopeSet::Wildcard` excludes every write tool). A token whose
+    /// allowlist names both must be refused at call time -- this is the
+    /// check a hand-edited token store cannot bypass, unlike the
+    /// issuance-time refusal in `main.rs`.
+    #[test]
+    fn a_token_scoped_to_both_stage_and_approve_is_refused_at_call_time() {
+        let caller = caller_with_tools(mecmcp_auth::ScopeSet::Allowlist(vec![
+            "unifi_stage_change".to_owned(),
+            "unifi_approve_change_set".to_owned(),
+        ]));
+        assert!(UnifiServer::holds_combined_two_person_control_scope(Some(
+            &caller
+        )));
+    }
+
+    /// Holding only one of the two scopes -- the normal shape for a staging
+    /// or an approving token -- must not be refused.
+    #[test]
+    fn a_token_scoped_to_only_one_changeset_control_tool_is_not_refused() {
+        let stager = caller_with_tools(mecmcp_auth::ScopeSet::Allowlist(vec![
+            "unifi_stage_change".to_owned(),
+        ]));
+        assert!(!UnifiServer::holds_combined_two_person_control_scope(Some(
+            &stager
+        )));
+
+        let approver = caller_with_tools(mecmcp_auth::ScopeSet::Allowlist(vec![
+            "unifi_approve_change_set".to_owned(),
+        ]));
+        assert!(!UnifiServer::holds_combined_two_person_control_scope(Some(
+            &approver
+        )));
+    }
+
+    /// A wildcard tool scope excludes every `WRITE_TOOLS` entry, so it can
+    /// never combine the two change-set control tools -- it cannot reach
+    /// either of them at all.
+    #[test]
+    fn a_wildcard_tool_scope_never_combines_the_two_control_tools() {
+        let caller = caller_with_tools(mecmcp_auth::ScopeSet::Wildcard);
+        assert!(!UnifiServer::holds_combined_two_person_control_scope(Some(
+            &caller
+        )));
+    }
+
+    /// The stdio path (`caller: None`) is documented elsewhere as authorized
+    /// for everything; this check must not contradict that by refusing a
+    /// `None` caller.
+    #[test]
+    fn a_none_caller_is_not_refused() {
+        assert!(!UnifiServer::holds_combined_two_person_control_scope(None));
+    }
 
     #[test]
     fn write_tools_is_not_empty() {

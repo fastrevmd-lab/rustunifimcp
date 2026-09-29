@@ -238,6 +238,12 @@ The secret is printed **once** and stored hashed. Two things worth knowing:
   `create_unifi_change_set` gets `insufficient_scope`. That is deliberate.
 - For a token that will call `unifi_approve_change_set`, add `--actor-type
   human`; agent and unattributed callers are refused.
+- **Two-person control is enforced on tokens.** A token whose scope combines
+  `unifi_stage_change` and `unifi_approve_change_set` is refused at issuance and,
+  if one reaches the store anyway, at call time. Issue separate staging and
+  approving tokens. The one exception is a **lab-mode** single operator: mint the
+  combined token with `--allow-self-approval` and run the server with
+  `--lab-mode`; the self-approval is then recorded as `approval_waiver=lab-mode`.
 
 ## 8. Verify
 
