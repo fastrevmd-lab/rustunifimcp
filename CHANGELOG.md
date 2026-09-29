@@ -6,7 +6,72 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+- **Added read coverage for legacy firewall rules, port forwards, static
+  routes, and the controller event log** (MEC-509). `unifi_list_resources`
+  and `unifi_get_resource` gain three new `kind`s: `firewall_rule` (the
+  pre-zone-based ruleset, `rest/firewallrule`), `port_forward`
+  (`rest/portforward`), and `static_route` (`rest/routing`) — all read-only
+  for now, projected through their own field allowlists like every other
+  kind. `unifi_query_stats` gains `subject=event` for the controller's event
+  log (`stat/event`), projected through a typed model rather than the
+  shared crate's denylist-and-shape scan: an event's type discriminator is
+  carried in a field literally named `key`, which that scan treats as an
+  exact-match secret-shaped name, so it is renamed to `event_type` on the
+  way out instead.
+- **Release supply chain hardening** (MEC-507): the `Release image` workflow now
+  publishes a CycloneDX SBOM per workspace crate as a release artifact,
+  cosign-signs the pushed image keylessly (GitHub OIDC, no key material),
+  attaches a SLSA build provenance attestation, and builds/publishes
+  `linux/arm64` alongside `linux/amd64` in one multi-arch manifest.
+  `cargo deny check` in CI now covers `advisories` and `licenses` as well as
+  `bans` and `sources`; that surfaced a yanked `chacha20 0.10.1` (bumped to
+  0.10.2) and an unallowed `CDLA-Permissive-2.0` license on
+  `webpki-root-certs`/`webpki-roots` (added to `deny.toml`'s allow list —
+  covers embedded Mozilla root cert data, not code, same allowance as
+  mecmcp/rustjunosmcp/rustproxmoxmcp). See
+  [docs/HOW-TO-SETUP-DOCKER.md](docs/HOW-TO-SETUP-DOCKER.md) for the
+  `cosign verify` / `gh attestation verify` recipes.
+- **Re-pinned the `mecmcp-*` crates from `v0.23.1` to `v0.24.1`** (MEC-504).
+  Brings in mecmcp#390 (the human-approver gate: `ChangesetCoordinator::approve_change_set`
+  now takes an `approver_actor_type: mecmcp_audit::ActorType` and refuses
+  anything but `Human`), mecmcp#377 (`/healthz` and `/readyz`, unauthenticated
+  and always mounted), mecmcp#387 (`mecmcp-http`'s configured private CA now
+  replaces the public root store instead of adding to it, and
+  `mecmcp-transport`'s `test_harness`/`test_client` moved behind a `test-util`
+  feature), and MEC-347 (`LimitsConfig::default()` now rate-limits by default:
+  50 requests/second and a burst of 100 per IP, 20/s and a burst of 40 per
+  token).
+- **`unifi_approve_change_set` now passes the caller's server-verified actor
+  type through to mecmcp's `ChangesetCoordinator::approve_change_set`.** A
+  change set cannot be approved by a caller whose token declares
+  `actor_type: agent`, or by an unattributed (stdio) caller — only a
+  distinct `actor_type: human` principal can approve.
+  **Upgrading:** every token minted before this release has `actor_type:
+  unknown` and can no longer approve change sets. Re-mint each approver's
+  token with `rustunifimcp token add ... --actor-type human`; other tokens
+  are unaffected. See [README § Change control](README.md#change-control).
+- **Per-IP and per-token rate limiting is now on by default over HTTP**, and
+  every `LimitsConfig` field is exposed as a CLI flag (`--max-requests-per-second-per-ip`
+  and friends — see `rustunifimcp --help`) instead of being hardcoded to
+  `LimitsConfig::default()`.
+- **Added `--enable-metrics`** to expose a Prometheus `/metrics` endpoint
+  (streamable-http only, off by default). As of `mecmcp-transport` 0.24.0,
+  `/metrics` is additionally restricted to loopback callers regardless of
+  this flag.
+- **`/healthz` and `/readyz`** are now served unauthenticated on every HTTP
+  deployment, mounted by `mecmcp-transport`'s router assembly. This server
+  wires in no readiness checks of its own, so `/readyz` reports ready
+  whenever the process is up.
 - Raised MSRV to 1.89
+- **`unifi_stage_change` now enforces a per-kind writable-field allowlist** (M11) —
+  a staged `create`/`update` body may only set the fields this server's read model
+  recognises for that kind, and a controller-managed `_id` is never writable for
+  any kind. This is a behavioural restriction: a body naming an unrecognised field,
+  or a non-object body, is now refused at staging (and again at apply, for a plan
+  that reached `Approved` before this check existed). The visible effect for
+  `traffic_route` is the most restrictive: this server's read model for that kind
+  carries only `name`, so a `traffic_route` write is now name-only — any other
+  field in the body is refused.
 - **Container images now publish to `ghcr.io/mechubsec/rustunifimcp`** —
   the repo moved to the mechubsec organization, and images are renamed to
   match. Older tags were copied from the previous name.
@@ -343,8 +408,8 @@ by fifteen hours. v0.2.0 closes that gap.
   must not be silently accepted — and was the only test for it. Enabled because
   `CanonicalEnvelope` in mecmcp 0.23.0 now carries `#[serde(deny_unknown_fields)]`.
 
-[unreleased]: https://github.com/fastrevmd-lab/rustunifimcp/compare/v0.3.2...HEAD
-[0.3.2]: https://github.com/fastrevmd-lab/rustunifimcp/compare/v0.3.1...v0.3.2
-[0.3.1]: https://github.com/fastrevmd-lab/rustunifimcp/compare/v0.3.0...v0.3.1
-[0.3.0]: https://github.com/fastrevmd-lab/rustunifimcp/compare/v0.2.0...v0.3.0
-[0.2.0]: https://github.com/fastrevmd-lab/rustunifimcp/releases/tag/v0.2.0
+[unreleased]: https://github.com/mechubsec/rustunifimcp/compare/v0.3.2...HEAD
+[0.3.2]: https://github.com/mechubsec/rustunifimcp/compare/v0.3.1...v0.3.2
+[0.3.1]: https://github.com/mechubsec/rustunifimcp/compare/v0.3.0...v0.3.1
+[0.3.0]: https://github.com/mechubsec/rustunifimcp/compare/v0.2.0...v0.3.0
+[0.2.0]: https://github.com/mechubsec/rustunifimcp/releases/tag/v0.2.0

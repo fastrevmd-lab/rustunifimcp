@@ -131,12 +131,12 @@ That is the real test of whether `mecmcp-changeset` generalises.
 Not 603 — the fleet was renumbered on 2026-08-12.
 
 ```
-980  unifi-mcp  pve2  192.168.1.203  tags: notmechub;protected
+980  unifi-mcp  pve2  203.0.113.203  tags: notmechub;protected
      enuno/unifi-mcp-server 0.2.5, /opt/unifi-mcp/venv
      ExecStart=/opt/unifi-mcp/venv/bin/unifi-mcp-server
      EnvironmentFile=/etc/unifi-mcp/unifi-mcp.env
      MCP_SERVER_TRANSPORT=http  MCP_SERVER_HOST=0.0.0.0  MCP_SERVER_PORT=30033
-     UNIFI_LOCAL_HOST=192.168.1.30  UNIFI_LOCAL_VERIFY_SSL=false
+     UNIFI_LOCAL_HOST=203.0.113.30  UNIFI_LOCAL_VERIFY_SSL=false
 ```
 
 980 is tagged `protected`. **Retirement means ceasing to depend on it, not
@@ -152,7 +152,7 @@ scheme stays honest, but no cloud client is written.
 
 ## Controller trust
 
-The controller at `192.168.1.30` presents:
+The controller at `203.0.113.30` presents:
 
 ```
 subject = CN=unifi.local
@@ -162,7 +162,7 @@ SAN     = DNS:unifi.local, DNS:localhost, DNS:[::1],
 notAfter = 2028-04-08
 ```
 
-`unifi.mechub.org` already resolves to `192.168.1.30`, but the certificate
+`unifi.mechub.org` already resolves to `203.0.113.30`, but the certificate
 carries neither that name nor that address. Combined with §2 — no verification
 bypass exists — **no `rustunifimcp` call to this controller can succeed until
 the certificate is replaced.** This blocks even the first fixture-recording
@@ -196,15 +196,15 @@ belongs in a window.
 
 | VMID | Name | Node | IP | Endpoint | Tags | Mode |
 |---|---|---|---|---|---|---|
-| 622 | `test-twoperson-unifi` | pve2 | 192.168.1.242 | `http://test-twoperson-unifi.mechub.org:30033/mcp` | `disposable;test;twoperson` | two-person |
-| 623 | `test-labmode-unifi` | pve2 | 192.168.1.243 | `http://test-labmode-unifi.mechub.org:30033/mcp` | `disposable;labmode;test` | `--lab-mode` |
-| 981 | `prod-unifimcp` | pve2 | 192.168.1.216 | `https://prod-unifimcp.mechub.org:30033/mcp` | see below | two-person, TLS |
+| 622 | `test-twoperson-unifi` | pve2 | 203.0.113.242 | `http://test-twoperson-unifi.mechub.org:30033/mcp` | `disposable;test;twoperson` | two-person |
+| 623 | `test-labmode-unifi` | pve2 | 203.0.113.243 | `http://test-labmode-unifi.mechub.org:30033/mcp` | `disposable;labmode;test` | `--lab-mode` |
+| 981 | `prod-unifimcp` | pve2 | 203.0.113.216 | `https://prod-unifimcp.mechub.org:30033/mcp` | see below | two-person, TLS |
 
 Conventions this follows, all read off the running fleet rather than invented:
 
 - **Matched pair per server.** 610–619 hold five such pairs; even VMID is
   two-person, odd is lab mode. 621 is skipped to preserve that parity — 620
-  `srx345-jump` is unrelated and sits on `192.168.101.50`.
+  `srx345-jump` is unrelated and sits on `198.51.100.50`.
 - **Test-rig IP = VMID − 380.** 610→.230 … 619→.239, so 622→.242, 623→.243.
   Both verified free.
 - **Production IPs are allocated ad hoc**; `.216` follows 971's `.215` and is
@@ -251,7 +251,7 @@ Shared code that renders approval prompts can then be honest per vendor instead
 of uniformly optimistic.
 
 **Blocks on:** nothing. **Output:** a `mecmcp` issue — filed 2026-08-26 as
-[mecmcp#335](https://github.com/fastrevmd-lab/mecmcp/issues/335).
+[mecmcp#335](https://github.com/mechubsec/mecmcp/issues/335).
 
 ### Phase 0b — Controller certificate
 

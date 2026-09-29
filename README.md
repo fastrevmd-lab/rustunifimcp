@@ -13,14 +13,14 @@
 ---
 
 `rustunifimcp` is the UniFi Network member of the mechub MCP server family. It
-does for UniFi what [`rustjunosmcp`](https://github.com/fastrevmd-lab/rustjunosmcp)
-does for Junos and [`rustpanosmcp`](https://github.com/fastrevmd-lab/rustpanosmcp)
+does for UniFi what [`rustjunosmcp`](https://github.com/mechubsec/rustjunosmcp)
+does for Junos and [`rustpanosmcp`](https://github.com/mechubsec/rustpanosmcp)
 does for PAN-OS: a curated, scoped, audited MCP surface over one vendor's
 management API.
 
 It is built **mecmcp-native** — no local authentication, transport, audit,
 policy, inventory, or change-control code at all. All of that comes from
-[`mecmcp`](https://github.com/fastrevmd-lab/mecmcp), the shared Rust foundation.
+[`mecmcp`](https://github.com/mechubsec/mecmcp), the shared Rust foundation.
 What is written here is the UniFi resource model, the tool surface, and the
 workflows. Nothing else.
 
@@ -83,6 +83,26 @@ scopes, no audit trail, and no rate limiting. Anything that can reach the port
 has unrestricted write access to the controller. `rustunifimcp` inherits the
 full `mecmcp` security layer instead.
 
+## Tool catalog
+
+The read primitives, the collapsed surface behind `unifi_list_resources` and
+`unifi_get_resource`. Every `kind` is projected through the allowlist or scan
+documented in `rustunifimcp-core::redact` before it reaches the model — see
+[Design highlights](#design-highlights) below.
+
+| Tool | Notes |
+|---|---|
+| `unifi_list_resources` | `kind` = `station \| device \| network \| wlan \| port_profile \| dhcp_reservation \| firewall_policy \| firewall_zone \| firewall_group \| firewall_rule \| port_forward \| static_route \| traffic_route \| radius_profile` |
+| `unifi_get_resource` | `kind`, `id` |
+| `unifi_query_stats` | `subject` = `site \| device \| station \| wlan \| flow \| event`, plus a time window |
+| `unifi_search` | Free-text across stations, devices, and sites |
+| `unifi_list_sites` | |
+
+`firewall_rule`, `port_forward`, and `static_route` (MEC-509) are the legacy
+(non-zone-based) ruleset, port forwarding rules, and static routes —
+read-only for now; no write route exists for them through
+`unifi_stage_change`. `subject=event` reaches the controller's event log.
+
 ## Design highlights
 
 **Three API surfaces, each labelled.** UniFi's supported Integration API is far
@@ -96,10 +116,26 @@ commit. The change-set lifecycle is implemented with client-side pre-image
 capture, local validation, sequential apply, and best-effort rollback — and the
 tool descriptions say so. An operator approving a UniFi change set is not
 getting commit-confirmed semantics, and the server does not pretend otherwise.
+`unifi_approve_change_set` requires a human approver: the server passes the
+caller's token `actor_type` through to mecmcp, which refuses any approval
+from an `agent` or unattributed (stdio) caller — only `actor_type: human`
+can approve. Mint the approver's token with `rustunifimcp token add ...
+--actor-type human`. `actor_type` is a claim the operator makes at mint
+time, not something the server proves; a token tagged `human` but handed to
+an LLM agent defeats the gate.
 
 **Multi-controller.** Controllers live in an inventory registry rather than
 environment variables, so one instance can front several and a token can be
 scoped to a subset.
+
+**HTTP defaults are metered, not open.** Per-IP and per-token request rates,
+concurrent session counts, and body-size limits are all enforced by default
+(`LimitsConfig::default()`); every limit is also a CLI flag (see
+`rustunifimcp --help`), so an operator can tune them without a fork. An
+unauthenticated `/healthz` (process up) and `/readyz` (no dependency checks
+configured, so "ready" tracks "up") are always mounted. `/metrics` is off by
+default (`--enable-metrics`) and, when enabled, restricted to loopback
+callers.
 
 ## License
 

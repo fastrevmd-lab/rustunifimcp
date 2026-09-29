@@ -7,6 +7,7 @@
 pub mod admin;
 pub mod changeset;
 pub mod ops;
+pub(crate) mod pagination;
 pub mod read;
 pub mod workflow;
 

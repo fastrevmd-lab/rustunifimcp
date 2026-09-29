@@ -2,25 +2,25 @@
 
 Guidance for Claude Code working in this repository.
 
-## Deployment: LXC 981 `prod-unifimcp` must always run with `--lab-mode`
+## Deployment: production instances must always run with `--lab-mode`
 
-The production instance is **LXC 981 `prod-unifimcp` on pve2**, `192.168.1.216`,
-serving `https://prod-unifimcp.mechub.org:30033/mcp`. It is tagged `protected`.
+A production instance of this server is tagged `protected`.
 
-**`--lab-mode` is required on this deployment and must never be dropped.** Without it
-the server exposes only its 12 read tools; the 12 write tools stay gated behind a
-second-principal approval that does not exist in a single-operator homelab. The
-symptom is silent — `unifimcp_status` reports `lab_mode: false` and the write tools
-simply are not advertised, so a caller sees a read-only server with no error
+**`--lab-mode` is required on production deployments and must never be dropped.**
+Without it the server exposes only its 12 read tools; the 12 write tools stay gated
+behind a second-principal approval that does not exist in a single-operator homelab.
+The symptom is silent — `unifimcp_status` reports `lab_mode: false` and the write
+tools simply are not advertised, so a caller sees a read-only server with no error
 explaining why.
 
-This was found on 2026-08-30: 981 was the **only** 900-band MCP container without it.
-Its siblings 950 `prod-junosmcp`, 951 `prod-sdcmcp`, 952 `prod-mistmcp`,
-960 `prod-panosmcp` and 971 `prod-proxmoxmcp` all had lab mode on. The whole 900 band
-is meant to run in lab mode.
+This was found on 2026-08-30: one production container was missing the flag while
+every sibling MCP deployment in the same fleet had lab mode on correctly. Any fleet
+of single-operator deployments of this kind is meant to run in lab mode across the
+board, so a new instance should be checked against its siblings rather than assumed
+correct.
 
-The flag lives in a **dedicated drop-in**, matching how 950 does it, so that an
-`install.sh` unit rewrite cannot silently drop it:
+The flag lives in a **dedicated drop-in**, matching how other instances in the fleet
+do it, so that an `install.sh` unit rewrite cannot silently drop it:
 
 ```
 /etc/systemd/system/rustunifimcp.service.d/labmode.conf
@@ -46,12 +46,12 @@ that `lab_mode` is `true`.** Two things that will mislead you if you skip that:
 gated, not missing — that distinction is the fastest way to tell a config problem from
 a capability gap.
 
-## Upgrading 981 past the change-set store swap
+## Upgrading past the change-set store swap
 
 The change-set state file changed shape when this server adopted
-`mecmcp-changeset`'s coordinator. 981 writes `/var/lib/unifimcp/changesets.json`, and a
-binary from before the swap wrote a bare `{"<id>": {...}}` map; the coordinator writes
-`{"version": n, "state": {...}}`.
+`mecmcp-changeset`'s coordinator. The server writes `/var/lib/unifimcp/changesets.json`,
+and a binary from before the swap wrote a bare `{"<id>": {...}}` map; the coordinator
+writes `{"version": n, "state": {...}}`.
 
 **The new binary refuses to start on the old file** and names the change sets in it.
 That is deliberate — not a bug to work around. Move the file aside and re-plan. The
@@ -93,6 +93,11 @@ recorded on a change set, and the `write_tool_count` in `unifimcp_status` is a s
 `WRITE_TOOLS.len()`, not a count of what is exposed. Both flags are needed on a
 single-operator deployment, for different reasons — the token scope decides what is
 *advertised*, lab mode decides whether an approval can proceed without a second person.
+Two-person control is also enforced on the token itself (MEC-503): a token combining
+`unifi_stage_change` and `unifi_approve_change_set` is refused at issuance unless minted
+with `--allow-self-approval`, and refused at call time unless the server runs with
+`--lab-mode`. A single-operator lab deployment needs both: the flag at issuance and
+`--lab-mode` on the server.
 
 Diagnosing it: probe `tools/list` directly rather than trusting the client. A client
 caches its tool list at connect time, so a `/mcp` reconnect that still shows 12 tools is

@@ -3,13 +3,13 @@
 Written 2026-07-24. Status: **approved, implementation deferred.**
 
 `rustunifimcp` is the UniFi Network member of the mechub MCP server family. It
-does for UniFi what [`rustjunosmcp`](https://github.com/fastrevmd-lab/rustjunosmcp)
-does for Junos and [`rustpanosmcp`](https://github.com/fastrevmd-lab/rustpanosmcp)
+does for UniFi what [`rustjunosmcp`](https://github.com/mechubsec/rustjunosmcp)
+does for Junos and [`rustpanosmcp`](https://github.com/mechubsec/rustpanosmcp)
 does for PAN-OS: a curated, scoped, audited MCP surface over one vendor's
 management API.
 
 Implementation is deliberately deferred until
-[`mecmcp`](https://github.com/fastrevmd-lab/mecmcp) is fully developed. This
+[`mecmcp`](https://github.com/mechubsec/mecmcp) is fully developed. This
 document records the decisions so that work can start cold. See
 [`PLAN.md`](../../../PLAN.md) for the phase sequence and its mecmcp gates.
 
@@ -121,9 +121,9 @@ cheaply.
 
 | Tool | Notes |
 |---|---|
-| `unifi_list_resources` | `kind` = `firewall_policy \| firewall_zone \| firewall_group \| network \| wlan \| port_profile \| dhcp_reservation \| traffic_route \| radius_profile \| station \| device \| voucher \| …` |
+| `unifi_list_resources` | `kind` = `firewall_policy \| firewall_zone \| firewall_group \| firewall_rule \| network \| wlan \| port_profile \| port_forward \| dhcp_reservation \| static_route \| traffic_route \| radius_profile \| station \| device \| voucher \| …` |
 | `unifi_get_resource` | `kind`, `id` |
-| `unifi_query_stats` | `subject` = `site \| device \| client \| wlan \| flow`, plus a time window |
+| `unifi_query_stats` | `subject` = `site \| device \| client \| wlan \| flow \| event`, plus a time window |
 | `unifi_search` | Free-text across clients, devices, and sites |
 | `unifi_list_sites` | |
 

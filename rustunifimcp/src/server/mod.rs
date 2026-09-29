@@ -1,6 +1,7 @@
 //! The MCP server handler.
 
-use mecmcp_auth::NoGrant;
+use crate::grant::UnifiGrant;
+use mecmcp_auth::Grant as _;
 use mecmcp_changeset::{
     ApplyHandle, ChangeSetRecord, ChangeSetState, ChangesetCoordinator, PreviewRecord,
     change_set_digest, preview_digest,
@@ -22,8 +23,9 @@ use rmcp::{
 use rustunifimcp_core::{
     changeset::{
         Preimage, StagedMutation, State, UnifiTransaction, ZoneIndex, actions_for,
-        apply_sequentially, check_zone_deletions, check_zone_references, diff_against_preimage,
-        fingerprint_of, mutations_of, preimage_of, referenced_zone_ids, validate_locally,
+        apply_sequentially, check_writable_fields, check_zone_deletions, check_zone_references,
+        diff_against_preimage, fingerprint_of, mutations_of, preimage_of, referenced_zone_ids,
+        validate_locally,
     },
     client::UnifiClient,
     error::UnifiError,
@@ -43,6 +45,134 @@ const RESULT_LIMITS: ResultLimits = ResultLimits {
     max_text_bytes: 512 * 1024,
     max_json_bytes: 512 * 1024,
 };
+
+/// Headroom subtracted from `RESULT_LIMITS.max_json_bytes` before shrinking a
+/// response, so the pretty-printed rendering `mecmcp_server` measures --
+/// which adds the MCP envelope around the value truncated here -- still lands
+/// inside the real limit rather than a value this module computed in
+/// isolation.
+const TRUNCATION_MARGIN_BYTES: usize = 8 * 1024;
+
+/// Render a tool result, shrinking an oversized list rather than refusing it.
+///
+/// `mecmcp_server::tool_result` refuses an oversized response outright by
+/// design: "a caller cannot tell a truncated result from a complete one." That
+/// is the right default for a single resource, which has no smaller true
+/// answer. It is the wrong one for a list tool pointed at a large site, which
+/// has an obvious smaller answer -- fewer items, explicitly marked as fewer --
+/// and refusing outright just means the operator learns nothing about a site
+/// too big to describe in 512 KiB. So the largest array in the response is
+/// shortened here, before the transport ever measures it, with a nested
+/// `truncation` marker naming how many of how many are shown. `tool_result`
+/// still has the final word: if even the shrunk response cannot fit, it
+/// refuses exactly as before, so this can only make an oversized answer
+/// smaller, never turn a correct refusal into a silent lie.
+fn json_tool_result<T: serde::Serialize>(value: T) -> CallToolResult {
+    let budget = RESULT_LIMITS
+        .max_json_bytes
+        .saturating_sub(TRUNCATION_MARGIN_BYTES);
+
+    match serde_json::to_value(&value) {
+        Ok(json) => tool_result(
+            Ok::<_, String>(shrink_largest_array(json, budget)),
+            ResultFormat::PrettyJson,
+            RESULT_LIMITS,
+        ),
+        Err(_) => tool_result(
+            Ok::<_, String>(value),
+            ResultFormat::PrettyJson,
+            RESULT_LIMITS,
+        ),
+    }
+}
+
+/// The rendered size `mecmcp_server::tool_result` would measure for `value`.
+fn rendered_len(value: &serde_json::Value) -> usize {
+    serde_json::to_string_pretty(value).map_or(usize::MAX, |s| s.len())
+}
+
+/// Shrink the largest top-level array in `value` until it fits `budget` bytes.
+///
+/// A bare array (`unifi_list_resources`'s shape) is wrapped under `data`; an
+/// object keeps its own keys and only the largest array-valued field is cut.
+/// Binary searches the largest prefix of that array whose rendering fits,
+/// rather than trimming one item at a time, so a response with thousands of
+/// items still costs a handful of serializations. Returns `value` unchanged
+/// if it already fits or has no array to shrink -- a scalar or single-object
+/// response has no smaller true answer, and is left for `tool_result`'s own
+/// refusal.
+///
+/// The marker lives under its own `truncation` key rather than top-level
+/// `truncated`/`shown`/`total` fields, because `unifi_query_stats` and the
+/// workflow reports already fill an object with `offset`/`limit`/`total` from
+/// [`crate::tools::pagination`] before this ever runs -- top-level fields
+/// here used to overwrite that site-wide `total` with the shrunk array's own
+/// length, so a caller advancing `offset` by the (now wrong) `limit` skipped
+/// items it never saw. Existing keys are never overwritten. `partial` is
+/// forced `true` when it is already present, since a shrunk response is
+/// partial by definition. When the object carries a numeric `offset`,
+/// `next_offset` names the correct cursor for the next call: `offset` plus
+/// however many of this field's items are actually shown, not `limit`, since
+/// the shrunk count is very likely a strict fraction of it.
+fn shrink_largest_array(value: serde_json::Value, budget: usize) -> serde_json::Value {
+    if rendered_len(&value) <= budget {
+        return value;
+    }
+
+    let (key, items, rest) = match value {
+        serde_json::Value::Array(items) => (None, items, serde_json::Map::new()),
+        serde_json::Value::Object(mut map) => {
+            let Some(key) = map
+                .iter()
+                .filter_map(|(k, v)| v.as_array().map(|a| (k.clone(), a.len())))
+                .max_by_key(|(_, len)| *len)
+                .map(|(k, _)| k)
+            else {
+                return serde_json::Value::Object(map);
+            };
+            let Some(serde_json::Value::Array(items)) = map.remove(&key) else {
+                unreachable!("key was chosen because its value is an array")
+            };
+            (Some(key), items, map)
+        }
+        other => return other,
+    };
+
+    let total = items.len();
+    let field = key.unwrap_or_else(|| "data".to_owned());
+    let offset = rest.get("offset").and_then(serde_json::Value::as_u64);
+    let build = |n: usize| -> serde_json::Value {
+        let mut map = rest.clone();
+        map.insert(field.clone(), serde_json::Value::Array(items[..n].to_vec()));
+        if map.contains_key("partial") {
+            map.insert("partial".to_owned(), serde_json::Value::Bool(true));
+        }
+        if let Some(offset) = offset {
+            map.insert(
+                "next_offset".to_owned(),
+                serde_json::json!(offset.saturating_add(n as u64)),
+            );
+        }
+        map.insert(
+            "truncation".to_owned(),
+            serde_json::json!({ "field": field, "shown": n, "of": total }),
+        );
+        serde_json::Value::Object(map)
+    };
+
+    let mut lo = 0usize;
+    let mut hi = total;
+    while lo < hi {
+        let mid = lo + (hi - lo).div_ceil(2);
+        if rendered_len(&build(mid)) <= budget {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+
+    build(lo)
+}
 
 /// Seconds since the Unix epoch.
 ///
@@ -201,13 +331,143 @@ impl UnifiServer {
     }
 
     /// Recover the caller from the request context.
-    fn caller(context: &RequestContext<RoleServer>) -> Option<mecmcp_auth::CallerCtx<NoGrant>> {
-        caller_from_extensions::<NoGrant>(&context.extensions).cloned()
+    fn caller(context: &RequestContext<RoleServer>) -> Option<mecmcp_auth::CallerCtx<UnifiGrant>> {
+        caller_from_extensions::<UnifiGrant>(&context.extensions).cloned()
     }
 
     /// The principal behind this call.
-    fn principal(caller: Option<&mecmcp_auth::CallerCtx<NoGrant>>) -> String {
+    fn principal(caller: Option<&mecmcp_auth::CallerCtx<UnifiGrant>>) -> String {
         caller.map_or_else(|| "unknown".to_owned(), |ctx| ctx.token_name.clone())
+    }
+
+    /// Require the caller's grant, if any, to permit writing to `site`.
+    ///
+    /// A caller with no grant (`grant: None`) is unrestricted by site: that
+    /// is the pre-MEC-508 default, and it is what every token minted before
+    /// per-site scoping existed carries, so this preserves their behavior
+    /// unchanged. A caller whose grant is `Some` must name `site` explicitly
+    /// -- a positive allowlist, so a widened default site is never assumed.
+    ///
+    /// The `None` caller (stdio) is also unrestricted, for the same reason
+    /// [`authorize_call`] treats it that way: stdio has no bearer token
+    /// because it has no network, and the process on the other end already
+    /// runs as whoever started it.
+    ///
+    /// # Errors
+    /// Returns [`UnifiError::SiteNotInScope`] if the caller's grant does not
+    /// name `site`.
+    fn authorize_site(
+        caller: Option<&mecmcp_auth::CallerCtx<UnifiGrant>>,
+        site: &str,
+    ) -> Result<(), UnifiError> {
+        let Some(caller) = caller else {
+            return Ok(());
+        };
+        let Some(grant) = &caller.grant else {
+            return Ok(());
+        };
+        if grant.allows_subject(site) {
+            Ok(())
+        } else {
+            Err(UnifiError::SiteNotInScope {
+                token: caller.token_name.clone(),
+                site: site.to_owned(),
+            })
+        }
+    }
+
+    /// Resolve the effective site for a write call, enforce the caller's
+    /// site grant against it, and audit the outcome either way.
+    ///
+    /// The audit event lives here rather than once per call site so a
+    /// handler cannot add a new site-scoped write tool and forget the audit
+    /// half of the check -- there is exactly one place that decides and
+    /// records which site a mutating call targeted.
+    ///
+    /// # Errors
+    /// Returns the boxed `CallToolResult` [`tool_error`] renders for
+    /// [`UnifiError::SiteNotInScope`], for a handler to `return *result`.
+    fn authorize_write_site(
+        caller: Option<&mecmcp_auth::CallerCtx<UnifiGrant>>,
+        tool: &str,
+        controller: &str,
+        client: &UnifiClient,
+        requested_site: Option<&str>,
+    ) -> Result<String, Box<CallToolResult>> {
+        let site = requested_site
+            .unwrap_or_else(|| client.default_site())
+            .to_owned();
+        let principal = Self::principal(caller);
+        if let Err(error) = Self::authorize_site(caller, &site) {
+            tracing::warn!(
+                target: "audit",
+                event = "unifi_site_write_denied",
+                tool = %tool,
+                controller = %controller,
+                site = %site,
+                principal = %principal,
+                "write denied: site not in caller's grant"
+            );
+            return Err(Box::new(tool_error(error)));
+        }
+        tracing::info!(
+            target: "audit",
+            event = "unifi_site_write",
+            tool = %tool,
+            controller = %controller,
+            site = %site,
+            principal = %principal,
+            "site-scoped write authorized"
+        );
+        Ok(site)
+    }
+
+    /// Map a caller's server-verified `mecmcp_auth::ActorType` to the
+    /// `mecmcp_audit::ActorType` mecmcp's `approve_change_set` requires.
+    ///
+    /// `None` -- no authenticated caller context, i.e. the stdio transport --
+    /// maps to `Unknown` rather than `Human`. Inventing `Human` for an
+    /// unattributed caller would let stdio silently satisfy the human-approver
+    /// gate; `Unknown` is the honest fact, and `approve_change_set` refuses it
+    /// exactly like it refuses `Agent`.
+    fn approver_actor_type(
+        caller: Option<&mecmcp_auth::CallerCtx<UnifiGrant>>,
+    ) -> mecmcp_audit::ActorType {
+        match caller {
+            Some(ctx) => match ctx.actor_type {
+                mecmcp_auth::ActorType::Human => mecmcp_audit::ActorType::Human,
+                mecmcp_auth::ActorType::Agent => mecmcp_audit::ActorType::Agent,
+                mecmcp_auth::ActorType::Unknown => mecmcp_audit::ActorType::Unknown,
+            },
+            None => mecmcp_audit::ActorType::Unknown,
+        }
+    }
+
+    /// Whether `caller`'s tool scope would let it both stage and approve a
+    /// change set.
+    ///
+    /// Two-person control used to rest entirely on an operational convention
+    /// (CLAUDE.md: issue tokens that don't combine stage+approve rights) that
+    /// nothing enforced. `unifi_approve_change_set` refuses an approver who
+    /// *is* a set's owner, but that check says nothing about a second token
+    /// minted for a different principal name that nonetheless carries both
+    /// scopes -- such a token satisfies the owner check on every call and
+    /// still lets one credential complete the whole lifecycle alone.
+    ///
+    /// Checked here, at call time, rather than only at token issuance:
+    /// issuance can refuse minting such a token, but a token store loaded
+    /// from a hand-edited file never went through issuance at all. This is
+    /// the check a hand-edited store cannot bypass.
+    fn holds_combined_two_person_control_scope(
+        caller: Option<&mecmcp_auth::CallerCtx<UnifiGrant>>,
+    ) -> bool {
+        let Some(caller) = caller else {
+            return false;
+        };
+        caller.tools.allows_tool("unifi_stage_change", WRITE_TOOLS)
+            && caller
+                .tools
+                .allows_tool("unifi_approve_change_set", WRITE_TOOLS)
     }
 
     /// Fetch a change set, refusing a controller that does not own it.
@@ -494,7 +754,7 @@ impl UnifiServer {
 impl UnifiServer {
     #[tool(
         name = "unifi_list_resources",
-        description = "List UniFi resources by type and site"
+        description = "List UniFi resources by type and site. Output is redacted: WLAN passphrases, VPN/RADIUS secrets, WireGuard private keys, and PPPoE passwords are stripped; identifying fields (name, VLAN, subnet, MAC/IP) remain."
     )]
     async fn unifi_list_resources(
         &self,
@@ -517,18 +777,14 @@ impl UnifiServer {
         };
 
         match read::list_resources(&client, &args).await {
-            Ok(json) => tool_result(
-                Ok::<_, String>(json),
-                ResultFormat::PrettyJson,
-                RESULT_LIMITS,
-            ),
+            Ok(json) => json_tool_result(json),
             Err(error) => tool_error(error),
         }
     }
 
     #[tool(
         name = "unifi_get_resource",
-        description = "Get a specific UniFi resource by type and id"
+        description = "Get a specific UniFi resource by type and id. Output is redacted: WLAN passphrases, VPN/RADIUS secrets, WireGuard private keys, and PPPoE passwords are stripped; identifying fields (name, VLAN, subnet, MAC/IP) remain."
     )]
     async fn unifi_get_resource(
         &self,
@@ -551,18 +807,14 @@ impl UnifiServer {
         };
 
         match read::get_resource(&client, &args).await {
-            Ok(json) => tool_result(
-                Ok::<_, String>(json),
-                ResultFormat::PrettyJson,
-                RESULT_LIMITS,
-            ),
+            Ok(json) => json_tool_result(json),
             Err(error) => tool_error(error),
         }
     }
 
     #[tool(
         name = "unifi_query_stats",
-        description = "Query statistics for UniFi resources"
+        description = "Query statistics for UniFi resources. Output is redacted: device/station stats are narrowed to their typed field set, site/WLAN/flow stats pass through a best-effort secret scan."
     )]
     async fn unifi_query_stats(
         &self,
@@ -585,18 +837,14 @@ impl UnifiServer {
         };
 
         match read::query_stats(&client, &args).await {
-            Ok(json) => tool_result(
-                Ok::<_, String>(json),
-                ResultFormat::PrettyJson,
-                RESULT_LIMITS,
-            ),
+            Ok(json) => json_tool_result(json),
             Err(error) => tool_error(error),
         }
     }
 
     #[tool(
         name = "unifi_search",
-        description = "Search UniFi resources with filters"
+        description = "Search UniFi resources with filters. Output is redacted: results are filtered on the same typed, secret-stripped shape unifi_list_resources returns."
     )]
     async fn unifi_search(
         &self,
@@ -619,11 +867,7 @@ impl UnifiServer {
         };
 
         match read::search(&client, &args).await {
-            Ok(json) => tool_result(
-                Ok::<_, String>(json),
-                ResultFormat::PrettyJson,
-                RESULT_LIMITS,
-            ),
+            Ok(json) => json_tool_result(json),
             Err(error) => tool_error(error),
         }
     }
@@ -653,11 +897,7 @@ impl UnifiServer {
         };
 
         match read::list_sites(&client, &args).await {
-            Ok(json) => tool_result(
-                Ok::<_, String>(json),
-                ResultFormat::PrettyJson,
-                RESULT_LIMITS,
-            ),
+            Ok(json) => json_tool_result(json),
             Err(error) => tool_error(error),
         }
     }
@@ -679,11 +919,7 @@ impl UnifiServer {
         }
 
         match admin::unifi_list_controllers(&self.registry).await {
-            Ok(json) => tool_result(
-                Ok::<_, String>(json),
-                ResultFormat::PrettyJson,
-                RESULT_LIMITS,
-            ),
+            Ok(json) => json_tool_result(json),
             Err(error) => tool_error(error),
         }
     }
@@ -702,12 +938,19 @@ impl UnifiServer {
             return tool_error(error);
         }
 
-        match admin::unifimcp_status(&self.registry, self.lab_mode).await {
-            Ok(json) => tool_result(
-                Ok::<_, String>(json),
-                ResultFormat::PrettyJson,
-                RESULT_LIMITS,
-            ),
+        // Reuses the clients this server already built rather than
+        // constructing a fresh one per controller per call: `UnifiClient::new`
+        // reads the credential from disk and stands up a whole connection
+        // pool, so status calls -- the tool an operator polls most often --
+        // were paying that cost on every controller on every call instead of
+        // reusing the pool the server already holds.
+        let clients = match self.clients.read() {
+            Ok(guard) => guard.clone(),
+            Err(_) => return tool_error("clients lock poisoned".to_owned()),
+        };
+
+        match admin::unifimcp_status(&clients, self.lab_mode).await {
+            Ok(json) => json_tool_result(json),
             Err(error) => tool_error(error),
         }
     }
@@ -729,11 +972,7 @@ impl UnifiServer {
         }
 
         match admin::unifi_add_controller("", "", "", None, None).await {
-            Ok(json) => tool_result(
-                Ok::<_, String>(json),
-                ResultFormat::PrettyJson,
-                RESULT_LIMITS,
-            ),
+            Ok(json) => json_tool_result(json),
             Err(error) => tool_error(error),
         }
     }
@@ -762,12 +1001,18 @@ impl UnifiServer {
             Err(result) => return *result,
         };
 
+        if let Err(result) = Self::authorize_write_site(
+            caller.as_ref(),
+            "unifi_device_action",
+            &args.controller,
+            &client,
+            args.site.as_deref(),
+        ) {
+            return *result;
+        }
+
         match ops::device_action(args, &client).await {
-            Ok(json) => tool_result(
-                Ok::<_, String>(json),
-                ResultFormat::PrettyJson,
-                RESULT_LIMITS,
-            ),
+            Ok(json) => json_tool_result(json),
             Err(error) => tool_error(error),
         }
     }
@@ -796,12 +1041,18 @@ impl UnifiServer {
             Err(result) => return *result,
         };
 
+        if let Err(result) = Self::authorize_write_site(
+            caller.as_ref(),
+            "unifi_client_action",
+            &args.controller,
+            &client,
+            args.site.as_deref(),
+        ) {
+            return *result;
+        }
+
         match ops::client_action(args, &client).await {
-            Ok(json) => tool_result(
-                Ok::<_, String>(json),
-                ResultFormat::PrettyJson,
-                RESULT_LIMITS,
-            ),
+            Ok(json) => json_tool_result(json),
             Err(error) => tool_error(error),
         }
     }
@@ -830,12 +1081,18 @@ impl UnifiServer {
             Err(result) => return *result,
         };
 
+        if let Err(result) = Self::authorize_write_site(
+            caller.as_ref(),
+            "unifi_backup_action",
+            &args.controller,
+            &client,
+            args.site.as_deref(),
+        ) {
+            return *result;
+        }
+
         match ops::backup_action(args, &client).await {
-            Ok(json) => tool_result(
-                Ok::<_, String>(json),
-                ResultFormat::PrettyJson,
-                RESULT_LIMITS,
-            ),
+            Ok(json) => json_tool_result(json),
             Err(error) => tool_error(error),
         }
     }
@@ -864,19 +1121,25 @@ impl UnifiServer {
             Err(result) => return *result,
         };
 
+        if let Err(result) = Self::authorize_write_site(
+            caller.as_ref(),
+            "unifi_run_speed_test",
+            &args.controller,
+            &client,
+            args.site.as_deref(),
+        ) {
+            return *result;
+        }
+
         match ops::run_speed_test(args, &client).await {
-            Ok(json) => tool_result(
-                Ok::<_, String>(json),
-                ResultFormat::PrettyJson,
-                RESULT_LIMITS,
-            ),
+            Ok(json) => json_tool_result(json),
             Err(error) => tool_error(error),
         }
     }
 
     #[tool(
         name = "unifi_site_health_report",
-        description = "Generate a site health report joining devices, health metrics, and statistics"
+        description = "Generate a site health report joining devices, health metrics, and statistics. Output is redacted: device fields are narrowed to the device allowlist, health/stats pass through a best-effort secret scan."
     )]
     async fn unifi_site_health_report(
         &self,
@@ -899,18 +1162,14 @@ impl UnifiServer {
         };
 
         match workflow::site_health_report(&client, &args).await {
-            Ok(report) => tool_result(
-                Ok::<_, String>(report),
-                ResultFormat::PrettyJson,
-                RESULT_LIMITS,
-            ),
+            Ok(report) => json_tool_result(report),
             Err(error) => tool_error(error),
         }
     }
 
     #[tool(
         name = "unifi_topology_report",
-        description = "Generate a network topology report joining edges, devices, and networks"
+        description = "Generate a network topology report joining edges, devices, and networks. Output is redacted: device and network fields are narrowed to their allowlists, so VPN/PSK/WireGuard secrets on a network are stripped."
     )]
     async fn unifi_topology_report(
         &self,
@@ -933,18 +1192,14 @@ impl UnifiServer {
         };
 
         match workflow::topology_report(&client, &args).await {
-            Ok(report) => tool_result(
-                Ok::<_, String>(report),
-                ResultFormat::PrettyJson,
-                RESULT_LIMITS,
-            ),
+            Ok(report) => json_tool_result(report),
             Err(error) => tool_error(error),
         }
     }
 
     #[tool(
         name = "unifi_traffic_flow_report",
-        description = "Generate a traffic flow report joining clients, statistics, and top applications"
+        description = "Generate a traffic flow report joining clients, statistics, and top applications. Output is redacted: client fields are narrowed to the station allowlist, joined flow stats pass through a best-effort secret scan."
     )]
     async fn unifi_traffic_flow_report(
         &self,
@@ -967,18 +1222,14 @@ impl UnifiServer {
         };
 
         match workflow::traffic_flow_report(&client, &args).await {
-            Ok(report) => tool_result(
-                Ok::<_, String>(report),
-                ResultFormat::PrettyJson,
-                RESULT_LIMITS,
-            ),
+            Ok(report) => json_tool_result(report),
             Err(error) => tool_error(error),
         }
     }
 
     #[tool(
         name = "unifi_firewall_audit",
-        description = "Audit firewall policies and zones for common misconfigurations"
+        description = "Audit firewall policies and zones for common misconfigurations. Output is redacted: a policy's open field set is scanned for secret-named fields and redacted in place rather than allowlisted, since custom fields are load-bearing for the audit."
     )]
     async fn unifi_firewall_audit(
         &self,
@@ -1001,18 +1252,14 @@ impl UnifiServer {
         };
 
         match workflow::firewall_audit(&client, &args).await {
-            Ok(report) => tool_result(
-                Ok::<_, String>(report),
-                ResultFormat::PrettyJson,
-                RESULT_LIMITS,
-            ),
+            Ok(report) => json_tool_result(report),
             Err(error) => tool_error(error),
         }
     }
 
     #[tool(
         name = "unifi_client_troubleshoot",
-        description = "Troubleshoot a client by correlating association, uplink, and firewall policy"
+        description = "Troubleshoot a client by correlating association, uplink, and firewall policy. Output is redacted: the station and device are narrowed to their allowlists, and any matched firewall policy is scanned for secret-named fields."
     )]
     async fn unifi_client_troubleshoot(
         &self,
@@ -1035,11 +1282,7 @@ impl UnifiServer {
         };
 
         match workflow::client_troubleshoot(&client, &args).await {
-            Ok(report) => tool_result(
-                Ok::<_, String>(report),
-                ResultFormat::PrettyJson,
-                RESULT_LIMITS,
-            ),
+            Ok(report) => json_tool_result(report),
             Err(error) => tool_error(error),
         }
     }
@@ -1154,6 +1397,15 @@ impl UnifiServer {
         ) {
             return tool_error(error);
         }
+        // Under --lab-mode a single operator may hold both scopes on purpose
+        // (issued with `token add --allow-self-approval`); the change-set
+        // lab-mode waiver then records the self-approval as a distinct fact.
+        if !self.lab_mode && Self::holds_combined_two_person_control_scope(caller.as_ref()) {
+            return tool_error(
+                "two-person control: this token's scope combines unifi_stage_change and \
+                 unifi_approve_change_set; issue separate tokens for staging and approving",
+            );
+        }
 
         // A draft on its first stage, or a change set already in the store.
         let draft = self.draft(&args.change_set_id, &args.controller);
@@ -1213,6 +1465,15 @@ impl UnifiServer {
                     StagedMutation::restore(backup_id)
                 }
             });
+        }
+
+        // Checked over the whole plan, not only the new mutations, and before
+        // the pre-image is captured: a mutation naming a read-only kind or a
+        // disallowed field must never enter a change set a human could
+        // approve, so it is refused here rather than left for
+        // unifi_validate_change_set, which a caller can skip entirely.
+        if let Err(e) = check_writable_fields(&mutations) {
+            return tool_error(format!("staged mutation refused: {e}"));
         }
 
         // Re-captured over the whole plan, not only the new mutations: the
@@ -1327,7 +1588,7 @@ impl UnifiServer {
 
     #[tool(
         name = "unifi_diff_change_set",
-        description = "Returns a diff showing what applying the change set would do"
+        description = "Returns a diff showing what applying the change set would do. Both sides of the diff are redacted: the pre-image and staged body are narrowed to the resource's allowlist before the diff is built."
     )]
     async fn unifi_diff_change_set(
         &self,
@@ -1403,6 +1664,15 @@ impl UnifiServer {
 
         if let Err(e) = validate_locally(&preimage, &mutations) {
             return tool_error(format!("local validation failed: {e}"));
+        }
+
+        // Schema constraints: a read-only kind or a disallowed field. Staging
+        // already refuses these, but a change set can outlive a server
+        // restart (it round-trips through --state-file), so a plan built
+        // before this check existed must still be caught by the tool whose
+        // description already promises "schema constraints".
+        if let Err(e) = check_writable_fields(&mutations) {
+            return tool_error(format!("schema constraints failed: {e}"));
         }
 
         // A zone this set deletes must not be left referenced by anything else
@@ -1493,6 +1763,15 @@ impl UnifiServer {
         ) {
             return tool_error(error);
         }
+        // Under --lab-mode a single operator may hold both scopes on purpose
+        // (issued with `token add --allow-self-approval`); the change-set
+        // lab-mode waiver then records the self-approval as a distinct fact.
+        if !self.lab_mode && Self::holds_combined_two_person_control_scope(caller.as_ref()) {
+            return tool_error(
+                "two-person control: this token's scope combines unifi_stage_change and \
+                 unifi_approve_change_set; issue separate tokens for staging and approving",
+            );
+        }
 
         let approver = Self::principal(caller.as_ref());
 
@@ -1519,6 +1798,20 @@ impl UnifiServer {
                  nothing to review. Create it again.",
             );
         };
+
+        // Belt-and-suspenders with the same check in `unifi_apply_change_set`:
+        // a plan staged before a writable-field rule tightened, or restored
+        // from `--state-file` into a build that tightened one, should not be
+        // approved into a state where only apply's check stands between it
+        // and the controller. An approver's signature should attest to a plan
+        // that can actually be applied.
+        let (approval_mutations, _) = match Self::plan_of(&record) {
+            Ok(plan) => plan,
+            Err(result) => return *result,
+        };
+        if let Err(e) = check_writable_fields(&approval_mutations) {
+            return tool_error(format!("approval refused: {e}"));
+        }
 
         // An approver who names the digest they read is bound to that plan. Not
         // naming one falls back to the stored digest, which makes the
@@ -1547,6 +1840,13 @@ impl UnifiServer {
         // so an approval must not run while a plan is half-published.
         let _approving = self.plan_lock.lock().await;
 
+        // Truthful, not permissive: a stdio caller carries no verified token
+        // entry, so its actor type is unknown rather than assumed human. mecmcp's
+        // `approve_change_set` refuses anything but `Human` (the house rule that
+        // a human approves), which is exactly the outcome an unattributed caller
+        // should get.
+        let approver_actor_type = Self::approver_actor_type(caller.as_ref());
+
         let outcome = if approver == record.owner {
             if !self.lab_mode {
                 return tool_error(
@@ -1568,6 +1868,7 @@ impl UnifiServer {
                     args.controller.clone(),
                     approver.clone(),
                     record.digest.clone(),
+                    approver_actor_type,
                 )
                 .await
         };
@@ -1720,6 +2021,27 @@ impl UnifiServer {
                 return *result;
             }
         };
+
+        // A change set can be staged before a writable-field rule tightens,
+        // or -- with `--state-file` -- survive a restart into a build that
+        // tightened one. Staging and `unifi_validate_change_set` already run
+        // this check, but neither is mandatory before apply, so the same
+        // refusal has to be enforced here too. Mirrors the `plan_of` error
+        // arm above: nothing has been written yet, so `Failed` is accurate.
+        if let Err(e) = check_writable_fields(&mutations) {
+            let mut abandoned = claimed;
+            abandoned.state = ChangeSetState::Failed;
+            if let Err(error) = self.coordinator.update_change_set(abandoned).await {
+                tracing::error!(
+                    change_set_id = %args.change_set_id,
+                    field = error.field(),
+                    message = error.message(),
+                    "a claimed change set could not be settled after its writable-field \
+                     check failed; it will stay Applying"
+                );
+            }
+            return tool_error(format!("apply refused: {e}"));
+        }
 
         let principal = Self::principal(caller.as_ref());
 
@@ -1972,7 +2294,7 @@ impl ServerHandler for UnifiServer {
         _request: Option<PaginatedRequestParams>,
         context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, rmcp::ErrorData> {
-        let caller = caller_from_extensions::<NoGrant>(&context.extensions);
+        let caller = caller_from_extensions::<UnifiGrant>(&context.extensions);
         let all_tools = self.tool_router.list_all();
         let visible = filter_tools_for_scope(all_tools, caller, WRITE_TOOLS);
         // `with_all_items` leaves `ttl_ms` and `cache_scope` unset, and both
@@ -1995,13 +2317,322 @@ impl ServerHandler for UnifiServer {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use rmcp::ServiceExt;
     use std::time::Duration;
+
+    /// Build a `CallerCtx` with the given tool scope, mirroring the pattern
+    /// `mecmcp-server::authorize`'s own tests use.
+    fn caller_with_tools(tools: mecmcp_auth::ScopeSet) -> mecmcp_auth::CallerCtx<UnifiGrant> {
+        mecmcp_auth::CallerCtx {
+            token_name: "caller".to_owned(),
+            devices: mecmcp_auth::ScopeSet::Wildcard,
+            tools,
+            grant: None,
+            provider: None,
+            provider_tier: None,
+            on_behalf_of: None,
+            actor_type: mecmcp_auth::ActorType::Human,
+            client_name: None,
+            model_id: None,
+            session_id: None,
+            request_id: uuid::Uuid::new_v4(),
+        }
+    }
+
+    /// Build a `CallerCtx` carrying the given site grant, for
+    /// `authorize_site` tests.
+    fn caller_with_site_grant(grant: Option<UnifiGrant>) -> mecmcp_auth::CallerCtx<UnifiGrant> {
+        mecmcp_auth::CallerCtx {
+            grant,
+            ..caller_with_tools(mecmcp_auth::ScopeSet::Wildcard)
+        }
+    }
+
+    /// A token scoped to `site-a` must be refused for `site-b` -- the
+    /// regression this issue exists for.
+    #[test]
+    fn authorize_site_refuses_a_site_outside_the_grant() {
+        let caller = caller_with_site_grant(Some(UnifiGrant {
+            sites: mecmcp_auth::ScopeSet::Allowlist(vec!["site-a".to_owned()]),
+        }));
+        assert!(UnifiServer::authorize_site(Some(&caller), "site-b").is_err());
+    }
+
+    /// A token scoped to more than one site must be authorized for each one.
+    #[test]
+    fn authorize_site_permits_each_site_in_a_multi_site_grant() {
+        let caller = caller_with_site_grant(Some(UnifiGrant {
+            sites: mecmcp_auth::ScopeSet::Allowlist(vec!["site-a".to_owned(), "site-b".to_owned()]),
+        }));
+        assert!(UnifiServer::authorize_site(Some(&caller), "site-a").is_ok());
+        assert!(UnifiServer::authorize_site(Some(&caller), "site-b").is_ok());
+        assert!(UnifiServer::authorize_site(Some(&caller), "site-c").is_err());
+    }
+
+    /// A caller with no grant at all is unrestricted by site -- the
+    /// pre-MEC-508 default that keeps existing tokens working unchanged.
+    #[test]
+    fn authorize_site_permits_any_site_with_no_grant() {
+        let caller = caller_with_site_grant(None);
+        assert!(UnifiServer::authorize_site(Some(&caller), "any-site").is_ok());
+    }
+
+    /// The stdio path (`caller: None`) is unrestricted, consistent with every
+    /// other authorization check in this module.
+    #[test]
+    fn authorize_site_permits_any_site_with_no_caller() {
+        assert!(UnifiServer::authorize_site(None, "any-site").is_ok());
+    }
+
+    /// A wildcard site grant permits every site, same as an absent grant --
+    /// `--sites '*'` and omitting the flag both authorize identically, just
+    /// through different representations.
+    #[test]
+    fn authorize_site_permits_any_site_with_a_wildcard_grant() {
+        let caller = caller_with_site_grant(Some(UnifiGrant {
+            sites: mecmcp_auth::ScopeSet::Wildcard,
+        }));
+        assert!(UnifiServer::authorize_site(Some(&caller), "site-a").is_ok());
+        assert!(UnifiServer::authorize_site(Some(&caller), "site-z").is_ok());
+    }
+
+    /// The check this test guards: `unifi_stage_change` and
+    /// `unifi_approve_change_set` are both in `WRITE_TOOLS`, and this crate's
+    /// only means of reaching a write tool is an explicit allowlist naming
+    /// it (`ScopeSet::Wildcard` excludes every write tool). A token whose
+    /// allowlist names both must be refused at call time -- this is the
+    /// check a hand-edited token store cannot bypass, unlike the
+    /// issuance-time refusal in `main.rs`.
+    #[test]
+    fn a_token_scoped_to_both_stage_and_approve_is_refused_at_call_time() {
+        let caller = caller_with_tools(mecmcp_auth::ScopeSet::Allowlist(vec![
+            "unifi_stage_change".to_owned(),
+            "unifi_approve_change_set".to_owned(),
+        ]));
+        assert!(UnifiServer::holds_combined_two_person_control_scope(Some(
+            &caller
+        )));
+    }
+
+    /// Holding only one of the two scopes -- the normal shape for a staging
+    /// or an approving token -- must not be refused.
+    #[test]
+    fn a_token_scoped_to_only_one_changeset_control_tool_is_not_refused() {
+        let stager = caller_with_tools(mecmcp_auth::ScopeSet::Allowlist(vec![
+            "unifi_stage_change".to_owned(),
+        ]));
+        assert!(!UnifiServer::holds_combined_two_person_control_scope(Some(
+            &stager
+        )));
+
+        let approver = caller_with_tools(mecmcp_auth::ScopeSet::Allowlist(vec![
+            "unifi_approve_change_set".to_owned(),
+        ]));
+        assert!(!UnifiServer::holds_combined_two_person_control_scope(Some(
+            &approver
+        )));
+    }
+
+    /// A wildcard tool scope excludes every `WRITE_TOOLS` entry, so it can
+    /// never combine the two change-set control tools -- it cannot reach
+    /// either of them at all.
+    #[test]
+    fn a_wildcard_tool_scope_never_combines_the_two_control_tools() {
+        let caller = caller_with_tools(mecmcp_auth::ScopeSet::Wildcard);
+        assert!(!UnifiServer::holds_combined_two_person_control_scope(Some(
+            &caller
+        )));
+    }
+
+    /// The stdio path (`caller: None`) is documented elsewhere as authorized
+    /// for everything; this check must not contradict that by refusing a
+    /// `None` caller.
+    #[test]
+    fn a_none_caller_is_not_refused() {
+        assert!(!UnifiServer::holds_combined_two_person_control_scope(None));
+    }
 
     #[test]
     fn write_tools_is_not_empty() {
         assert!(
             !WRITE_TOOLS.is_empty(),
             "WRITE_TOOLS must never be empty — an empty registry lets wildcards reach writes"
+        );
+    }
+
+    /// A response already under budget must pass through untouched -- no
+    /// `truncated` marker on an answer that was never shortened.
+    #[test]
+    fn a_response_within_budget_is_returned_whole() {
+        let value = serde_json::json!({ "data": [1, 2, 3] });
+        let out = shrink_largest_array(value.clone(), 10_000);
+        assert_eq!(out, value);
+    }
+
+    /// The reported defect: a response too large for the transport's budget
+    /// must come back shortened with a marker, not be handed to `tool_result`
+    /// unmodified where it would be refused outright.
+    #[test]
+    fn an_oversized_array_is_shortened_with_a_truncation_marker() {
+        let items: Vec<serde_json::Value> = (0..2000)
+            .map(|i| serde_json::json!({ "id": i, "note": "x".repeat(200) }))
+            .collect();
+        let value = serde_json::json!({ "devices": items, "partial": false });
+
+        let budget = 20_000;
+        let out = shrink_largest_array(value, budget);
+
+        assert!(
+            rendered_len(&out) <= budget,
+            "shrunk response still over budget"
+        );
+        assert_eq!(out["truncation"]["field"], serde_json::json!("devices"));
+        assert_eq!(out["truncation"]["of"], serde_json::json!(2000));
+
+        let shown = out["truncation"]["shown"]
+            .as_u64()
+            .expect("shown is a number") as usize;
+        assert!(shown < 2000, "nothing was actually dropped");
+        assert_eq!(
+            out["devices"]
+                .as_array()
+                .expect("devices is an array")
+                .len(),
+            shown,
+            "shown must match the array actually returned"
+        );
+
+        // `partial` was already present, so a shrunk response must say so.
+        assert_eq!(out["partial"], serde_json::json!(true));
+    }
+
+    /// A bare top-level array (`unifi_list_resources`'s shape) is wrapped
+    /// under `data` rather than dropped, so the truncation marker has
+    /// somewhere to live.
+    #[test]
+    fn a_bare_array_is_wrapped_under_data_when_shrunk() {
+        let items: Vec<serde_json::Value> = (0..2000)
+            .map(|i| serde_json::json!({ "id": i, "note": "x".repeat(200) }))
+            .collect();
+        let value = serde_json::Value::Array(items);
+
+        let out = shrink_largest_array(value, 20_000);
+
+        assert!(out["data"].is_array());
+        assert_eq!(out["truncation"]["field"], serde_json::json!("data"));
+        assert_eq!(out["truncation"]["of"], serde_json::json!(2000));
+    }
+
+    /// A single object with no array has no smaller true answer; it must be
+    /// left for `tool_result`'s own refusal rather than silently mangled.
+    #[test]
+    fn an_oversized_scalar_object_is_left_for_tool_result_to_refuse() {
+        let value = serde_json::json!({ "note": "x".repeat(1000) });
+        let out = shrink_largest_array(value.clone(), 10);
+        assert_eq!(out, value, "no array to shrink means no change");
+    }
+
+    /// Percy review F1 (MEC-549): the marker used to be written as top-level
+    /// `truncated`/`shown`/`total` fields, which collided with the
+    /// site-wide `total` that `unifi_query_stats` and the workflow reports
+    /// already fill in from `tools::pagination::paginate`. A caller advancing
+    /// `offset` by `limit` on the corrupted `total` would then skip whatever
+    /// sat between the shrunk count and the real page size. The site-wide
+    /// `total` must survive shrinking untouched, and the object must carry a
+    /// correct cursor for the next call.
+    #[test]
+    fn shrinking_a_paged_object_preserves_its_site_wide_total_and_cursor() {
+        let items: Vec<serde_json::Value> = (0..2000)
+            .map(|i| serde_json::json!({ "id": i, "note": "x".repeat(200) }))
+            .collect();
+        let value = serde_json::json!({
+            "data": items,
+            "offset": 100u64,
+            "limit": 2000,
+            "total": 50_000,
+        });
+
+        let budget = 20_000;
+        let out = shrink_largest_array(value, budget);
+
+        assert!(
+            rendered_len(&out) <= budget,
+            "shrunk response still over budget"
+        );
+        // The pagination cursor's site-wide total must not be clobbered by
+        // the shrunk array's own length.
+        assert_eq!(out["total"], serde_json::json!(50_000));
+        assert_eq!(out["offset"], serde_json::json!(100));
+
+        let shown = out["truncation"]["shown"]
+            .as_u64()
+            .expect("shown is a number");
+        assert!(shown < 2000, "nothing was actually dropped");
+        assert_eq!(
+            out["next_offset"],
+            serde_json::json!(100 + shown),
+            "next_offset must reflect what was actually shown, not the requested limit"
+        );
+    }
+
+    /// MEC-504: a stdio caller (no verified token entry) must map to
+    /// `Unknown`, never `Human`. `Human` is what mecmcp's
+    /// `approve_change_set` requires, so inventing it for an unattributed
+    /// caller would let stdio silently satisfy the human-approver gate.
+    #[test]
+    fn approver_actor_type_maps_stdio_to_unknown_not_human() {
+        assert_eq!(
+            UnifiServer::approver_actor_type(None),
+            mecmcp_audit::ActorType::Unknown
+        );
+    }
+
+    /// A token minted with `actor_type: agent` must carry `Agent` through to
+    /// the coordinator, not `Human` — an agent-held token must not be able to
+    /// approve its own change set by riding through this mapping.
+    #[test]
+    fn approver_actor_type_carries_agent_through_not_human() {
+        let caller = mecmcp_auth::CallerCtx::<UnifiGrant> {
+            token_name: "agent-token".to_owned(),
+            devices: mecmcp_auth::ScopeSet::Wildcard,
+            tools: mecmcp_auth::ScopeSet::Wildcard,
+            grant: None,
+            provider: None,
+            provider_tier: None,
+            on_behalf_of: None,
+            actor_type: mecmcp_auth::ActorType::Agent,
+            client_name: None,
+            model_id: None,
+            session_id: None,
+            request_id: uuid::Uuid::new_v4(),
+        };
+        assert_eq!(
+            UnifiServer::approver_actor_type(Some(&caller)),
+            mecmcp_audit::ActorType::Agent
+        );
+    }
+
+    /// A token minted with `actor_type: human` must carry `Human` through —
+    /// the one case `approve_change_set` actually accepts.
+    #[test]
+    fn approver_actor_type_carries_human_through() {
+        let caller = mecmcp_auth::CallerCtx::<UnifiGrant> {
+            token_name: "human-token".to_owned(),
+            devices: mecmcp_auth::ScopeSet::Wildcard,
+            tools: mecmcp_auth::ScopeSet::Wildcard,
+            grant: None,
+            provider: None,
+            provider_tier: None,
+            on_behalf_of: None,
+            actor_type: mecmcp_auth::ActorType::Human,
+            client_name: None,
+            model_id: None,
+            session_id: None,
+            request_id: uuid::Uuid::new_v4(),
+        };
+        assert_eq!(
+            UnifiServer::approver_actor_type(Some(&caller)),
+            mecmcp_audit::ActorType::Human
         );
     }
 
@@ -2202,7 +2833,13 @@ mod tests {
         let (id, digest) = (record.id.clone(), record.digest.clone());
         coordinator.insert_change_set(record).await.expect("insert");
         coordinator
-            .approve_change_set(id.clone(), "home".to_owned(), "bob".to_owned(), digest)
+            .approve_change_set(
+                id.clone(),
+                "home".to_owned(),
+                "bob".to_owned(),
+                digest,
+                mecmcp_audit::ActorType::Human,
+            )
             .await
             .expect("a second principal approves");
 
@@ -2234,7 +2871,13 @@ mod tests {
         // earlier of the two gates.
         assert!(
             coordinator
-                .approve_change_set(id.clone(), "home".to_owned(), "bob".to_owned(), digest)
+                .approve_change_set(
+                    id.clone(),
+                    "home".to_owned(),
+                    "bob".to_owned(),
+                    digest,
+                    mecmcp_audit::ActorType::Human
+                )
                 .await
                 .is_err(),
             "an expired change set must not be approvable"
@@ -2279,7 +2922,13 @@ mod tests {
 
         assert!(
             coordinator
-                .approve_change_set(id, "home".to_owned(), "bob".to_owned(), stale)
+                .approve_change_set(
+                    id,
+                    "home".to_owned(),
+                    "bob".to_owned(),
+                    stale,
+                    mecmcp_audit::ActorType::Human
+                )
                 .await
                 .is_err(),
             "an approval naming the old digest must not bind to the new plan"
@@ -2317,7 +2966,13 @@ mod tests {
         record.expires_at_unix = unix_seconds_now().saturating_add(2);
         coordinator.insert_change_set(record).await.expect("insert");
         coordinator
-            .approve_change_set(id.clone(), "home".to_owned(), "bob".to_owned(), digest)
+            .approve_change_set(
+                id.clone(),
+                "home".to_owned(),
+                "bob".to_owned(),
+                digest,
+                mecmcp_audit::ActorType::Human,
+            )
             .await
             .expect("approved inside the window");
 
@@ -2400,7 +3055,13 @@ mod tests {
         coordinator.insert_change_set(record).await.expect("insert");
 
         coordinator
-            .approve_change_set(id.clone(), "home".to_owned(), "bob".to_owned(), digest)
+            .approve_change_set(
+                id.clone(),
+                "home".to_owned(),
+                "bob".to_owned(),
+                digest,
+                mecmcp_audit::ActorType::Human,
+            )
             .await
             .expect("approve");
 
@@ -2485,5 +3146,166 @@ mod tests {
                 "write tool {tool} has no handler in this module"
             );
         }
+    }
+
+    /// A controller `client_for` can build a client for, but that this test
+    /// never actually reaches: every mutation below is refused before the
+    /// first controller read.
+    fn controller_registry() -> Arc<ControllerRegistry> {
+        let mut key = tempfile::NamedTempFile::new().expect("create api key file");
+        std::io::Write::write_all(&mut key, b"dummy-api-key\n").expect("write api key");
+        std::io::Write::flush(&mut key).expect("flush api key");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(key.path(), std::fs::Permissions::from_mode(0o600))
+                .expect("chmod 600");
+        }
+        let key_path = key.into_temp_path().keep().expect("persist api key file");
+
+        let mut controllers = tempfile::NamedTempFile::new().expect("create controllers file");
+        let body = format!(
+            r#"{{"version":1,"devices":{{"home":{{"endpoint":"https://unifi.example.org","site":"default","api_key_file":"{}","allow_private_api":true}}}}}}"#,
+            key_path.display()
+        );
+        std::io::Write::write_all(&mut controllers, body.as_bytes())
+            .expect("write controllers file");
+        std::io::Write::flush(&mut controllers).expect("flush controllers file");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(controllers.path(), std::fs::Permissions::from_mode(0o600))
+                .expect("chmod 600");
+        }
+
+        Arc::new(ControllerRegistry::load(controllers.path()).expect("load controllers"))
+    }
+
+    /// A `Planned` record carrying a `device` update -- the same shape
+    /// `unifi_stage_change` already refuses to create, which is exactly why
+    /// this cannot be built through the tool API. It stands in for a plan
+    /// staged before this check existed, or built by an older binary and
+    /// loaded back from `--state-file`.
+    fn device_update_record(owner: &str, controller: &str, ttl: u64) -> ChangeSetRecord {
+        let record = ChangeSetRecord {
+            id: crate::changeset_state::new_change_set_id(),
+            owner: owner.to_owned(),
+            device: controller.to_owned(),
+            expected_candidate_fingerprint: String::new(),
+            actions: Vec::new(),
+            digest: String::new(),
+            state: ChangeSetState::Planned,
+            approver: None,
+            approval: None,
+            expires_at_unix: unix_seconds_now().saturating_add(ttl),
+            operation_id: None,
+            policy_signature: String::new(),
+            targets: Vec::new(),
+            preview: None,
+            task_id: None,
+            apply_without_handle: false,
+        };
+        let staged = vec![StagedMutation::update(
+            "device",
+            "abc123",
+            serde_json::json!({ "name": "renamed-ap" }),
+        )];
+        UnifiServer::with_plan(
+            record,
+            &staged,
+            &Preimage::from_resources(Vec::new()),
+            "test",
+        )
+        .map_err(|_| "with_plan refused a device-update record")
+        .expect("with_plan plans a mutation check_writable_fields will separately refuse")
+    }
+
+    /// Drive one tool call over an in-process transport, the way a real MCP
+    /// client would.
+    async fn call(
+        handler: UnifiServer,
+        tool: &str,
+        arguments: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        let (server_transport, client_transport) = tokio::io::duplex(64 * 1024);
+        let server_task = tokio::spawn(async move {
+            handler
+                .serve(server_transport)
+                .await
+                .expect("server initialization")
+                .waiting()
+                .await
+        });
+        let client = ().serve(client_transport).await.expect("client initialization");
+        let result = client
+            .call_tool(
+                rmcp::model::CallToolRequestParams::new(tool.to_owned())
+                    .with_arguments(serde_json::from_value(arguments).expect("arguments")),
+            )
+            .await;
+        client.cancel().await.expect("client shutdown");
+        server_task.abort();
+
+        let result = result.map_err(|error| error.to_string())?;
+        let text = result.content[0]
+            .as_text()
+            .expect("text result")
+            .text
+            .clone();
+        if result.is_error == Some(true) {
+            return Err(text);
+        }
+        Ok(serde_json::from_str(&text).expect("JSON envelope"))
+    }
+
+    /// Staging and `unifi_validate_change_set` both refuse a `device`
+    /// mutation, which is exactly why a plan carrying one can only reach
+    /// `Approved` by being seeded directly -- the scenario `--state-file`
+    /// makes real. `unifi_apply_change_set` must refuse it too, settle the
+    /// record to `Failed` rather than leave it stuck `Applying`, and refuse
+    /// it *before* the controller is ever contacted: the controller endpoint
+    /// here is a placeholder no test in this module can reach, so any
+    /// outcome other than the writable-field refusal below would mean the
+    /// check ran too late.
+    #[tokio::test]
+    async fn apply_refuses_a_seeded_device_update_with_no_controller_call() {
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+        let coordinator = coordinator_at(None);
+        let record = device_update_record("alice", "home", 300);
+        let (id, digest) = (record.id.clone(), record.digest.clone());
+        coordinator.insert_change_set(record).await.expect("insert");
+        coordinator
+            .approve_change_set(
+                id.clone(),
+                "home".to_owned(),
+                "bob".to_owned(),
+                digest,
+                mecmcp_audit::ActorType::Human,
+            )
+            .await
+            .expect("a second principal approves");
+
+        let server = UnifiServer::new(controller_registry(), true, coordinator.clone(), None)
+            .expect("server");
+
+        let refused = call(
+            server,
+            "unifi_apply_change_set",
+            serde_json::json!({"controller": "home", "change_set_id": id}),
+        )
+        .await;
+        let error = refused.expect_err("a device write has no verified route");
+        assert!(error.contains("device"), "{error}");
+
+        let settled = coordinator
+            .change_set(&id, "home")
+            .await
+            .expect("the record must still be readable");
+        assert_eq!(
+            settled.state,
+            ChangeSetState::Failed,
+            "a claim that never wrote anything must not be left Applying"
+        );
     }
 }

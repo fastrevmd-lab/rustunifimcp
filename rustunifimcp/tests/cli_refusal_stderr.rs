@@ -130,6 +130,80 @@ fn off_loopback_without_allowed_host_names_the_flag() {
     assert!(!output.status.success(), "a refused CLI must exit non-zero");
 }
 
+/// `token add` must refuse to mint a token whose `--tools` combine both
+/// change-set control scopes, and must not touch the token store while
+/// refusing.
+///
+/// `run_inner` dispatches `token` subcommands from raw `argv` before
+/// `UnifiCli`/`clap::Parser` ever see them (see the comment above that
+/// dispatch in `main.rs`), so a unit test that calls
+/// `validate_token_command` or `TokenCli::parse_from` directly cannot notice
+/// if `run_inner` stops calling it. Running the real binary end to end is
+/// what actually proves the wiring holds.
+#[test]
+fn token_add_with_both_changeset_control_scopes_is_refused() {
+    let tokens = tokens_file();
+    let output = run(&[
+        "token",
+        "add",
+        "--tokens-file",
+        tokens.path().to_str().expect("utf-8 path"),
+        "--name",
+        "test",
+        "--devices",
+        "*",
+        "--tools",
+        "unifi_stage_change,unifi_approve_change_set",
+    ]);
+    let stderr = stderr_of(&output);
+
+    assert!(
+        stderr.contains("unifi_stage_change") && stderr.contains("unifi_approve_change_set"),
+        "the refusal must name both scopes, got:\n{stderr}"
+    );
+    assert!(
+        !output.status.success(),
+        "minting both scopes on one token must exit non-zero"
+    );
+
+    let stored = std::fs::read_to_string(tokens.path()).expect("read tokens file");
+    assert!(
+        !stored.contains("\"test\""),
+        "a refused token mint must not reach the token store: {stored}"
+    );
+}
+
+/// The single-scope case -- the normal way to issue a stage or approve
+/// token -- must still work end to end through the real binary.
+#[test]
+fn token_add_with_a_single_changeset_control_scope_is_allowed() {
+    let tokens = tokens_file();
+    let output = run(&[
+        "token",
+        "add",
+        "--tokens-file",
+        tokens.path().to_str().expect("utf-8 path"),
+        "--name",
+        "stager",
+        "--devices",
+        "*",
+        "--tools",
+        "unifi_stage_change",
+    ]);
+    let stderr = stderr_of(&output);
+
+    assert!(
+        output.status.success(),
+        "a single change-set control scope must be permitted, got stderr:\n{stderr}"
+    );
+
+    let stored = std::fs::read_to_string(tokens.path()).expect("read tokens file");
+    assert!(
+        stored.contains("\"stager\""),
+        "the permitted token must reach the token store: {stored}"
+    );
+}
+
 /// Ordering, not just wording.
 ///
 /// Validation must run before any file is read, so an argument mistake is
@@ -173,5 +247,36 @@ fn argument_errors_are_not_masked_by_config_errors() {
     assert!(
         !stderr.contains("group- or world-accessible"),
         "the inventory error masked the argument error:\n{stderr}"
+    );
+}
+
+/// MEC-503 F2: `--allow-self-approval` is the explicit, issuance-time opt-in
+/// for a lab-mode single operator; without it the combination is refused
+/// (see `token_add_with_both_changeset_control_scopes_is_refused`).
+#[test]
+fn token_add_with_both_scopes_and_allow_self_approval_is_accepted() {
+    let tokens = tokens_file();
+    let output = run(&[
+        "token",
+        "add",
+        "--tokens-file",
+        tokens.path().to_str().expect("utf-8 path"),
+        "--name",
+        "lab-operator",
+        "--devices",
+        "*",
+        "--tools",
+        "unifi_stage_change,unifi_approve_change_set",
+        "--allow-self-approval",
+    ]);
+    assert!(
+        output.status.success(),
+        "an explicit --allow-self-approval mint must succeed, stderr:\n{}",
+        stderr_of(&output)
+    );
+    let stored = std::fs::read_to_string(tokens.path()).expect("read tokens file");
+    assert!(
+        stored.contains("\"lab-operator\""),
+        "token must be stored: {stored}"
     );
 }

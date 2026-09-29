@@ -29,7 +29,7 @@ configuration writes until Phase 7 removes the last dependency on it.
 
 | Phase | What | Blocks on |
 |---|---|---|
-| **0a** | Upstream: `Atomicity` capability against `mecmcp-changeset` — filed as [mecmcp#335](https://github.com/fastrevmd-lab/mecmcp/issues/335) ✅ | — |
+| **0a** | Upstream: `Atomicity` capability against `mecmcp-changeset` — filed as [mecmcp#335](https://github.com/mechubsec/mecmcp/issues/335) ✅ | — |
 | **0b** | Controller certificate — issue `unifi.mechub.org`, install, renewal hook | — |
 | **0c** | Recorded fixtures + the legacy parity audit | 0b |
 | **1** | UniFi client and resource model; no MCP surface | 0c |
@@ -47,9 +47,9 @@ document. What follows is only what an operator needs at a glance.
 
 | VMID | Name | IP | Endpoint | Mode |
 |---|---|---|---|---|
-| 622 | `test-twoperson-unifi` | 192.168.1.242 | `http://test-twoperson-unifi.mechub.org:30033/mcp` | two-person |
-| 623 | `test-labmode-unifi` | 192.168.1.243 | `http://test-labmode-unifi.mechub.org:30033/mcp` | `--lab-mode` |
-| 981 | `prod-unifimcp` | 192.168.1.216 | `https://prod-unifimcp.mechub.org:30033/mcp` | two-person, TLS |
+| 622 | `test-twoperson-unifi` | 203.0.113.242 | `http://test-twoperson-unifi.mechub.org:30033/mcp` | two-person |
+| 623 | `test-labmode-unifi` | 203.0.113.243 | `http://test-labmode-unifi.mechub.org:30033/mcp` | `--lab-mode` |
+| 981 | `prod-unifimcp` | 203.0.113.216 | `https://prod-unifimcp.mechub.org:30033/mcp` | two-person, TLS |
 
 Both rigs are `disposable`-tagged. **981 is tagged `protected` only at Phase 7**
 — doing it earlier would make the guardrail block the rebuilds the earlier
@@ -63,7 +63,7 @@ means ceasing to depend on it, exactly as `rustproxmoxmcp` treats LXC 970.
 **There is no way to disable TLS verification.** `mecmcp-http` says so in its
 own documentation, and no `danger_accept_invalid_certs` exists anywhere in
 `mecmcp`. The controller's self-signed `CN=unifi.local` certificate does not
-cover `192.168.1.30`, so **Phase 0b blocks every call to the live controller**,
+cover `203.0.113.30`, so **Phase 0b blocks every call to the live controller**,
 including the first fixture capture.
 
 **A wildcard token is read-only — but only if the write-tool registry is

@@ -177,9 +177,9 @@ git add -A docs
 git commit -m "docs: record the upstream Atomicity issue number"
 ```
 
-**Verification:** `gh issue view 335 --repo fastrevmd-lab/mecmcp` shows the issue open. This task has no test — its deliverable is upstream.
+**Verification:** `gh issue view 335 --repo mechubsec/mecmcp` shows the issue open. This task has no test — its deliverable is upstream.
 
-**Done 2026-08-26 — [mecmcp#335](https://github.com/fastrevmd-lab/mecmcp/issues/335).** The filed issue argues from three quoted trait contracts rather than the one the plan anticipated: `fingerprint()` is defined over "the device's candidate configuration"; `stage()` requires that a partial failure "must revert the first action"; and `rollback(to: RollbackRef)` enumerates only Junos archives and PAN-OS candidate revert. UniFi satisfies none of the three. The proposal uses a **defaulted** `atomicity()` method so Junos and PAN-OS are unchanged and the change is non-breaking.
+**Done 2026-08-26 — [mecmcp#335](https://github.com/mechubsec/mecmcp/issues/335).** The filed issue argues from three quoted trait contracts rather than the one the plan anticipated: `fingerprint()` is defined over "the device's candidate configuration"; `stage()` requires that a partial failure "must revert the first action"; and `rollback(to: RollbackRef)` enumerates only Junos archives and PAN-OS candidate revert. UniFi satisfies none of the three. The proposal uses a **defaulted** `atomicity()` method so Junos and PAN-OS are unchanged and the change is non-breaking.
 
 ---
 
@@ -722,18 +722,18 @@ rcgen        = "0.14"
 tokio-rustls = "0.26"
 
 # mecmcp is consumed read-only at an exact pinned version. Do not relax the tag.
-mecmcp-audit     = { version = "0.23.0", git = "https://github.com/fastrevmd-lab/mecmcp", tag = "v0.23.0" }
-mecmcp-auth      = { version = "0.23.0", git = "https://github.com/fastrevmd-lab/mecmcp", tag = "v0.23.0" }
-mecmcp-changeset = { version = "0.23.0", git = "https://github.com/fastrevmd-lab/mecmcp", tag = "v0.23.0" }
-mecmcp-http      = { version = "0.23.0", git = "https://github.com/fastrevmd-lab/mecmcp", tag = "v0.23.0" }
-mecmcp-inventory = { version = "0.23.0", git = "https://github.com/fastrevmd-lab/mecmcp", tag = "v0.23.0" }
-mecmcp-job       = { version = "0.23.0", git = "https://github.com/fastrevmd-lab/mecmcp", tag = "v0.23.0" }
-mecmcp-openapi   = { version = "0.23.0", git = "https://github.com/fastrevmd-lab/mecmcp", tag = "v0.23.0" }
-mecmcp-policy    = { version = "0.23.0", git = "https://github.com/fastrevmd-lab/mecmcp", tag = "v0.23.0" }
-mecmcp-runtime   = { version = "0.23.0", git = "https://github.com/fastrevmd-lab/mecmcp", tag = "v0.23.0" }
-mecmcp-secret    = { version = "0.23.0", git = "https://github.com/fastrevmd-lab/mecmcp", tag = "v0.23.0" }
-mecmcp-server    = { version = "0.23.0", git = "https://github.com/fastrevmd-lab/mecmcp", tag = "v0.23.0" }
-mecmcp-transport = { version = "0.23.0", git = "https://github.com/fastrevmd-lab/mecmcp", tag = "v0.23.0" }
+mecmcp-audit     = { version = "0.23.0", git = "https://github.com/mechubsec/mecmcp", tag = "v0.23.0" }
+mecmcp-auth      = { version = "0.23.0", git = "https://github.com/mechubsec/mecmcp", tag = "v0.23.0" }
+mecmcp-changeset = { version = "0.23.0", git = "https://github.com/mechubsec/mecmcp", tag = "v0.23.0" }
+mecmcp-http      = { version = "0.23.0", git = "https://github.com/mechubsec/mecmcp", tag = "v0.23.0" }
+mecmcp-inventory = { version = "0.23.0", git = "https://github.com/mechubsec/mecmcp", tag = "v0.23.0" }
+mecmcp-job       = { version = "0.23.0", git = "https://github.com/mechubsec/mecmcp", tag = "v0.23.0" }
+mecmcp-openapi   = { version = "0.23.0", git = "https://github.com/mechubsec/mecmcp", tag = "v0.23.0" }
+mecmcp-policy    = { version = "0.23.0", git = "https://github.com/mechubsec/mecmcp", tag = "v0.23.0" }
+mecmcp-runtime   = { version = "0.23.0", git = "https://github.com/mechubsec/mecmcp", tag = "v0.23.0" }
+mecmcp-secret    = { version = "0.23.0", git = "https://github.com/mechubsec/mecmcp", tag = "v0.23.0" }
+mecmcp-server    = { version = "0.23.0", git = "https://github.com/mechubsec/mecmcp", tag = "v0.23.0" }
+mecmcp-transport = { version = "0.23.0", git = "https://github.com/mechubsec/mecmcp", tag = "v0.23.0" }
 ```
 
 And complete `[profile.release]`, which currently has only `codegen-units`:
@@ -3119,7 +3119,7 @@ The seven change-set tools over UniFi's non-atomic REST semantics. This is the p
 - [ ] **Step 1: Check whether Task 1's issue landed**
 
 ```bash
-gh issue view <NNN> --repo fastrevmd-lab/mecmcp
+gh issue view <NNN> --repo mechubsec/mecmcp
 ```
 
 If `Atomicity` shipped in a `mecmcp` release, bump the pin across all five files that carry it and declare the capability. If it did not, implement the declaration locally as a `rustunifimcp` type with a comment pointing at the issue, and **do not** work around its absence by describing UniFi change sets as though they were atomic.

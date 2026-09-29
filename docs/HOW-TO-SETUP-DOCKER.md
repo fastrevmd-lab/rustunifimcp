@@ -25,7 +25,7 @@ The image runs as numeric UID/GID `65532:65532` and has `ENTRYPOINT
 ["/usr/local/bin/rustunifimcp"]` with **no `CMD`**. Nothing is preset, so
 nothing can be silently lost when you pass your own arguments — unlike two
 sibling servers where config or audit flags live in `CMD` and disappear the
-moment a caller overrides anything (see fastrevmd-lab/mecmcp#357). The cost is
+moment a caller overrides anything (see mechubsec/mecmcp#357). The cost is
 that **you must supply every argument yourself**. The examples below are long
 because the image provides only the binary.
 
@@ -71,6 +71,17 @@ The secret prints **once** and is stored hashed. `--tools '*'` resolves to
 **read-only tools only**; write tools must be named explicitly, so a wildcard
 token calling a change-set tool gets `insufficient_scope`. That is deliberate.
 
+If this token will call `unifi_approve_change_set`, add `--actor-type
+human`: the server refuses approvals from any token whose actor type is
+`agent` or unset.
+
+Two-person control is enforced on tokens: a token combining
+`unifi_stage_change` and `unifi_approve_change_set` is refused at issuance and
+at call time, so issue separate staging and approving tokens. Only a lab-mode
+single operator may combine them: mint it with `--allow-self-approval` and run
+the server with `--lab-mode` (section 5); the self-approval is recorded as
+`approval_waiver=lab-mode`.
+
 Then lock the modes down:
 
 ```bash
@@ -111,6 +122,44 @@ image=$(docker inspect ghcr.io/mechubsec/rustunifimcp:0.4.0 \
 
 Record the digest value wherever the deployment is tracked — it identifies the
 exact bytes.
+
+**Verify the signature and provenance before running it.** Every image pushed
+by the `Release image` workflow is signed keylessly with
+[cosign](https://github.com/sigstore/cosign) via GitHub Actions OIDC — no key
+pair exists anywhere. Verification pins the signing identity to that exact
+workflow, so a signature from anywhere else (a fork, a different repo, a local
+build) fails:
+
+```bash
+cosign verify \
+  --certificate-identity-regexp '^https://github\.com/mechubsec/rustunifimcp/\.github/workflows/release-image\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$' \
+  --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+  "$image"
+```
+
+The same workflow also attaches a
+[SLSA build provenance attestation](https://docs.github.com/en/actions/security-guides/using-artifact-attestations-to-establish-provenance-for-builds),
+checkable with the GitHub CLI instead of cosign:
+
+```bash
+gh attestation verify "oci://$image" --repo mechubsec/rustunifimcp
+```
+
+The workflow also attaches a signed CycloneDX SBOM to the same digest,
+checkable the same way:
+
+```bash
+gh attestation verify "oci://$image" --repo mechubsec/rustunifimcp \
+  --predicate-type https://cyclonedx.org/bom
+```
+
+A failure in any of these checks means do not run it, not "probably fine."
+
+**Multi-arch:** the published manifest covers both `linux/amd64` and
+`linux/arm64` — `docker pull`/`docker run` resolve the matching platform
+automatically. `cosign verify` and `gh attestation verify` above check the
+manifest-list digest once; that one signature and one attestation cover both
+platform images underneath it.
 
 ## 4. Run it — two-person mode
 
@@ -222,7 +271,7 @@ into a `docker run` command; the shapes are different.
 **`Fatal: failed to serve HTTP router`** — the actual cause is usually a missing
 `--allowed-origin` on an off-loopback listener (`--host 0.0.0.0` or a LAN
 address). Binding anything other than loopback demands an explicit origin
-allow-list. The unhelpful error message is a known gap (fastrevmd-lab/mecmcp#358).
+allow-list. The unhelpful error message is a known gap (mechubsec/mecmcp#358).
 `--allowed-origin` lists the origins of browser applications that call this
 server; clients sending no Origin header (curl, non-browser MCP clients) are
 never matched against it. Note that this server validates its inventory before

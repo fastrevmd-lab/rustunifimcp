@@ -13,6 +13,7 @@ mecmcp-changeset.workspace = true
 mecmcp-http.workspace      = true
 mecmcp-inventory.workspace = true
 mecmcp-openapi.workspace   = true
+mecmcp-redact.workspace    = true
 mecmcp-secret.workspace    = true
 mecmcp-server.workspace    = true
 rmcp.workspace             = true
@@ -29,3 +30,9 @@ workspace = true
 
 [dev-dependencies]
 tempfile = "3.27.0"
+rcgen.workspace = true
+rustls.workspace = true
+tokio-rustls.workspace = true
+# Adds to the workspace tokio features for this crate's tests only: the private-CA
+# TLS harness below needs a raw TcpListener and AsyncRead/AsyncWriteExt.
+tokio = { workspace = true, features = ["net", "io-util"] }
