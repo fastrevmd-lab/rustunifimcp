@@ -136,7 +136,16 @@ impl Preimage {
                         }
                     };
 
-                    data.push(resource);
+                    // The pre-image is diffed and returned to the model
+                    // verbatim (see `diff.rs`'s `before`), so the raw
+                    // resource fetched here -- which, unlike
+                    // `unifi_get_resource`, has not passed through a typed
+                    // model parser -- is projected through the same
+                    // per-kind allowlist before it is kept. A WLAN's
+                    // `x_passphrase`, a VPN network's `x_secret` or
+                    // WireGuard private key, and a RADIUS profile's shared
+                    // secret all live in exactly this raw shape.
+                    data.push(crate::redact::project_resource(resource_kind, &resource));
                 }
             }
         }

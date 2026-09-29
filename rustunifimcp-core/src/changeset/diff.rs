@@ -45,11 +45,23 @@ pub fn diff_against_preimage(
     let changes = mutations
         .iter()
         .map(|mutation| {
+            // `before` comes from the pre-image, which is already projected
+            // through the per-kind allowlist at capture time (see
+            // `preimage.rs`). `after` is the staged mutation's own body --
+            // caller-supplied, not fetched from the controller by this
+            // function -- but is projected the same way before it reaches
+            // the model, so a body built by copying fields forward from an
+            // earlier raw read (e.g. an update that merges in unrelated
+            // fields from the resource it is patching) cannot carry a
+            // secret field the read path would have dropped.
             let (before, after) = match mutation {
-                StagedMutation::Create { body, .. } => (None, Some(body.clone())),
-                StagedMutation::Update { id, body, .. } => {
-                    (preimage.get_resource(id), Some(body.clone()))
+                StagedMutation::Create { kind, body } => {
+                    (None, Some(crate::redact::project_by_kind_name(kind, body)))
                 }
+                StagedMutation::Update { kind, id, body } => (
+                    preimage.get_resource(id),
+                    Some(crate::redact::project_by_kind_name(kind, body)),
+                ),
                 StagedMutation::Delete { id, .. } => (preimage.get_resource(id), None),
                 StagedMutation::Restore { backup_id } => {
                     // Restore overwrites the entire controller, so there's no meaningful

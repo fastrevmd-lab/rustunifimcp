@@ -227,18 +227,31 @@ mod tests {
                 .expect("a non-empty line has a first token")
                 .to_owned();
 
-            // A mecmcp dependency without a tag is the failure this guard exists to catch:
-            // the pin comment above these lines says the tag is what holds the version.
-            let tag_start = trimmed.find("tag = \"v").unwrap_or_else(|| {
+            // `mecmcp-redact` has not shipped in a tagged mecmcp release (see the
+            // comment above its line in the workspace manifest), so it is pinned by
+            // `rev` and carries no `tag = "vX.Y.Z"`. It still declares `version =
+            // "X.Y.Z"` alongside the `rev`, which is what is checked against
+            // `MECMCP_VERSION` here instead.
+            let (needle, needle_len) = if name == "mecmcp-redact" {
+                ("version = \"", "version = \"".len())
+            } else {
+                ("tag = \"v", "tag = \"v".len())
+            };
+
+            // A mecmcp dependency without the expected pin marker is the failure this
+            // guard exists to catch: the pin comment above these lines says the tag
+            // (or, for mecmcp-redact, the version) is what holds the version.
+            let marker_start = trimmed.find(needle).unwrap_or_else(|| {
                 panic!(
-                    "workspace Cargo.toml dependency `{name}` has no tag = \"vX.Y.Z\"; \
-                     every mecmcp-* dependency must be pinned by tag"
+                    "workspace Cargo.toml dependency `{name}` has no {needle}X.Y.Z\"; \
+                     every mecmcp-* dependency must be pinned by tag (or, for \
+                     mecmcp-redact, by version alongside its rev)"
                 )
             });
-            let value_start = tag_start + "tag = \"v".len();
+            let value_start = marker_start + needle_len;
             let value_len = trimmed[value_start..]
                 .find('"')
-                .expect("tag value must be closed with a quote");
+                .expect("pin value must be closed with a quote");
             pins.push((
                 name,
                 trimmed[value_start..value_start + value_len].to_owned(),

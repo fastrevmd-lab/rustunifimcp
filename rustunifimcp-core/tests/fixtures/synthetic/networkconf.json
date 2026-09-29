@@ -9,6 +9,30 @@
       "dhcpd_enabled": true,
       "dhcpd_start": "192.0.2.100",
       "dhcpd_stop": "192.0.2.200"
+    },
+    {
+      "_id": "000000000000000000000002",
+      "name": "Test Remote VPN",
+      "purpose": "remote-user-vpn",
+      "x_secret": "EXAMPLE-vpn-shared-secret-fake1",
+      "ike_version": "ikev2"
+    },
+    {
+      "_id": "000000000000000000000003",
+      "name": "Test WAN",
+      "purpose": "wan",
+      "wan_dns1": "192.0.2.1",
+      "wan_dns2": "192.0.2.2",
+      "wan_type": "pppoe",
+      "x_pppoe_username": "wan-account-fake1@example.net",
+      "x_pppoe_password": "EXAMPLE-pppoe-password-fake1"
+    },
+    {
+      "_id": "000000000000000000000004",
+      "name": "Test Site-to-Site VPN",
+      "purpose": "site-vpn",
+      "wireguard_private_key": "EXAMPLE-wireguard-private-key-fake1",
+      "x_ipsec_pre_shared_key": "EXAMPLE-ipsec-preshared-key-fake1"
     }
   ]
 }
