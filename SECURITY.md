@@ -6,13 +6,13 @@ Please **do not** open a public GitHub issue for a security vulnerability.
 
 Instead, use GitHub's private vulnerability reporting for this repository:
 
-https://github.com/fastrevmd-lab/rustunifimcp/security/advisories/new
+https://github.com/mechubsec/rustunifimcp/security/advisories/new
 
 Include what you'd include in a bug report — affected version, reproduction steps, and impact — but keep it in the private report, not a public issue, PR, or discussion.
 
 ## Scope
 
-`rustunifimcp` is an MCP server that authenticates to one or more UniFi Network controllers and exposes a curated, scoped set of read and write tools over MCP, with authentication, transport, audit, and change-control behavior supplied by the shared [`mecmcp`](https://github.com/fastrevmd-lab/mecmcp) crates. Vulnerability classes we especially want to hear about:
+`rustunifimcp` is an MCP server that authenticates to one or more UniFi Network controllers and exposes a curated, scoped set of read and write tools over MCP, with authentication, transport, audit, and change-control behavior supplied by the shared [`mecmcp`](https://github.com/mechubsec/mecmcp) crates. Vulnerability classes we especially want to hear about:
 
 - Anything that lets a caller reach a write tool, or exceed the scope granted to its token, without going through the intended auth/scope checks
 - Anything that lets a UniFi change set apply — or bypass its pre-image capture, local validation, or rollback steps — without the operator's explicit approval

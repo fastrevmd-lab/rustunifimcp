@@ -57,7 +57,7 @@ COPY --from=builder /build/target/release/rustunifimcp /usr/local/bin/rustunifim
 # Metadata
 LABEL org.opencontainers.image.title="rustunifimcp"
 LABEL org.opencontainers.image.description="UniFi Network MCP server"
-LABEL org.opencontainers.image.source="https://github.com/fastrevmd-lab/rustunifimcp"
+LABEL org.opencontainers.image.source="https://github.com/mechubsec/rustunifimcp"
 LABEL org.opencontainers.image.licenses="MIT"
 
 # ENTRYPOINT carries what must always hold: config paths and anything security-

@@ -13,14 +13,14 @@
 ---
 
 `rustunifimcp` is the UniFi Network member of the mechub MCP server family. It
-does for UniFi what [`rustjunosmcp`](https://github.com/fastrevmd-lab/rustjunosmcp)
-does for Junos and [`rustpanosmcp`](https://github.com/fastrevmd-lab/rustpanosmcp)
+does for UniFi what [`rustjunosmcp`](https://github.com/mechubsec/rustjunosmcp)
+does for Junos and [`rustpanosmcp`](https://github.com/mechubsec/rustpanosmcp)
 does for PAN-OS: a curated, scoped, audited MCP surface over one vendor's
 management API.
 
 It is built **mecmcp-native** — no local authentication, transport, audit,
 policy, inventory, or change-control code at all. All of that comes from
-[`mecmcp`](https://github.com/fastrevmd-lab/mecmcp), the shared Rust foundation.
+[`mecmcp`](https://github.com/mechubsec/mecmcp), the shared Rust foundation.
 What is written here is the UniFi resource model, the tool surface, and the
 workflows. Nothing else.
 
