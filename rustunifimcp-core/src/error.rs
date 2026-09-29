@@ -115,6 +115,19 @@ pub enum UnifiError {
     /// Credential load failure — bad mode, symlink, oversized, or absent.
     #[error(transparent)]
     Secret(#[from] mecmcp_secret::SecretError),
+
+    /// The caller's grant does not authorize writing to this site.
+    ///
+    /// Distinct from an unknown controller or an unknown resource: the token
+    /// authenticated and holds the tool and controller scope for this call,
+    /// but its site grant does not name the specific site the call targeted.
+    #[error("token '{token}' is not authorized to write to site '{site}'")]
+    SiteNotInScope {
+        /// Non-secret token name.
+        token: String,
+        /// The site the call targeted.
+        site: String,
+    },
 }
 
 impl From<mecmcp_http::HttpError> for UnifiError {
@@ -238,6 +251,10 @@ mod tests {
             UnifiError::Malformed("test error".to_owned()),
             UnifiError::ReferenceNotFound("test reference".to_owned()),
             UnifiError::WriteRefused("test refusal".to_owned()),
+            UnifiError::SiteNotInScope {
+                token: "lab".to_owned(),
+                site: "site-a".to_owned(),
+            },
             // Http variant with a URL-carrying error
             UnifiError::Http(mecmcp_http::HttpError::Timeout {
                 url: mecmcp_http::SafeUrl::from_unparsed("https://controller.example/api/test"),

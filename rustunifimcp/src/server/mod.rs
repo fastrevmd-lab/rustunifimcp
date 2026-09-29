@@ -1,6 +1,7 @@
 //! The MCP server handler.
 
-use mecmcp_auth::NoGrant;
+use crate::grant::UnifiGrant;
+use mecmcp_auth::Grant as _;
 use mecmcp_changeset::{
     ApplyHandle, ChangeSetRecord, ChangeSetState, ChangesetCoordinator, PreviewRecord,
     change_set_digest, preview_digest,
@@ -330,13 +331,95 @@ impl UnifiServer {
     }
 
     /// Recover the caller from the request context.
-    fn caller(context: &RequestContext<RoleServer>) -> Option<mecmcp_auth::CallerCtx<NoGrant>> {
-        caller_from_extensions::<NoGrant>(&context.extensions).cloned()
+    fn caller(context: &RequestContext<RoleServer>) -> Option<mecmcp_auth::CallerCtx<UnifiGrant>> {
+        caller_from_extensions::<UnifiGrant>(&context.extensions).cloned()
     }
 
     /// The principal behind this call.
-    fn principal(caller: Option<&mecmcp_auth::CallerCtx<NoGrant>>) -> String {
+    fn principal(caller: Option<&mecmcp_auth::CallerCtx<UnifiGrant>>) -> String {
         caller.map_or_else(|| "unknown".to_owned(), |ctx| ctx.token_name.clone())
+    }
+
+    /// Require the caller's grant, if any, to permit writing to `site`.
+    ///
+    /// A caller with no grant (`grant: None`) is unrestricted by site: that
+    /// is the pre-MEC-508 default, and it is what every token minted before
+    /// per-site scoping existed carries, so this preserves their behavior
+    /// unchanged. A caller whose grant is `Some` must name `site` explicitly
+    /// -- a positive allowlist, so a widened default site is never assumed.
+    ///
+    /// The `None` caller (stdio) is also unrestricted, for the same reason
+    /// [`authorize_call`] treats it that way: stdio has no bearer token
+    /// because it has no network, and the process on the other end already
+    /// runs as whoever started it.
+    ///
+    /// # Errors
+    /// Returns [`UnifiError::SiteNotInScope`] if the caller's grant does not
+    /// name `site`.
+    fn authorize_site(
+        caller: Option<&mecmcp_auth::CallerCtx<UnifiGrant>>,
+        site: &str,
+    ) -> Result<(), UnifiError> {
+        let Some(caller) = caller else {
+            return Ok(());
+        };
+        let Some(grant) = &caller.grant else {
+            return Ok(());
+        };
+        if grant.allows_subject(site) {
+            Ok(())
+        } else {
+            Err(UnifiError::SiteNotInScope {
+                token: caller.token_name.clone(),
+                site: site.to_owned(),
+            })
+        }
+    }
+
+    /// Resolve the effective site for a write call, enforce the caller's
+    /// site grant against it, and audit the outcome either way.
+    ///
+    /// The audit event lives here rather than once per call site so a
+    /// handler cannot add a new site-scoped write tool and forget the audit
+    /// half of the check -- there is exactly one place that decides and
+    /// records which site a mutating call targeted.
+    ///
+    /// # Errors
+    /// Returns the boxed `CallToolResult` [`tool_error`] renders for
+    /// [`UnifiError::SiteNotInScope`], for a handler to `return *result`.
+    fn authorize_write_site(
+        caller: Option<&mecmcp_auth::CallerCtx<UnifiGrant>>,
+        tool: &str,
+        controller: &str,
+        client: &UnifiClient,
+        requested_site: Option<&str>,
+    ) -> Result<String, Box<CallToolResult>> {
+        let site = requested_site
+            .unwrap_or_else(|| client.default_site())
+            .to_owned();
+        let principal = Self::principal(caller);
+        if let Err(error) = Self::authorize_site(caller, &site) {
+            tracing::warn!(
+                target: "audit",
+                event = "unifi_site_write_denied",
+                tool = %tool,
+                controller = %controller,
+                site = %site,
+                principal = %principal,
+                "write denied: site not in caller's grant"
+            );
+            return Err(Box::new(tool_error(error)));
+        }
+        tracing::info!(
+            target: "audit",
+            event = "unifi_site_write",
+            tool = %tool,
+            controller = %controller,
+            site = %site,
+            principal = %principal,
+            "site-scoped write authorized"
+        );
+        Ok(site)
     }
 
     /// Map a caller's server-verified `mecmcp_auth::ActorType` to the
@@ -348,7 +431,7 @@ impl UnifiServer {
     /// gate; `Unknown` is the honest fact, and `approve_change_set` refuses it
     /// exactly like it refuses `Agent`.
     fn approver_actor_type(
-        caller: Option<&mecmcp_auth::CallerCtx<NoGrant>>,
+        caller: Option<&mecmcp_auth::CallerCtx<UnifiGrant>>,
     ) -> mecmcp_audit::ActorType {
         match caller {
             Some(ctx) => match ctx.actor_type {
@@ -376,7 +459,7 @@ impl UnifiServer {
     /// from a hand-edited file never went through issuance at all. This is
     /// the check a hand-edited store cannot bypass.
     fn holds_combined_two_person_control_scope(
-        caller: Option<&mecmcp_auth::CallerCtx<NoGrant>>,
+        caller: Option<&mecmcp_auth::CallerCtx<UnifiGrant>>,
     ) -> bool {
         let Some(caller) = caller else {
             return false;
@@ -918,6 +1001,16 @@ impl UnifiServer {
             Err(result) => return *result,
         };
 
+        if let Err(result) = Self::authorize_write_site(
+            caller.as_ref(),
+            "unifi_device_action",
+            &args.controller,
+            &client,
+            args.site.as_deref(),
+        ) {
+            return *result;
+        }
+
         match ops::device_action(args, &client).await {
             Ok(json) => json_tool_result(json),
             Err(error) => tool_error(error),
@@ -947,6 +1040,16 @@ impl UnifiServer {
             Ok(client) => client,
             Err(result) => return *result,
         };
+
+        if let Err(result) = Self::authorize_write_site(
+            caller.as_ref(),
+            "unifi_client_action",
+            &args.controller,
+            &client,
+            args.site.as_deref(),
+        ) {
+            return *result;
+        }
 
         match ops::client_action(args, &client).await {
             Ok(json) => json_tool_result(json),
@@ -978,6 +1081,16 @@ impl UnifiServer {
             Err(result) => return *result,
         };
 
+        if let Err(result) = Self::authorize_write_site(
+            caller.as_ref(),
+            "unifi_backup_action",
+            &args.controller,
+            &client,
+            args.site.as_deref(),
+        ) {
+            return *result;
+        }
+
         match ops::backup_action(args, &client).await {
             Ok(json) => json_tool_result(json),
             Err(error) => tool_error(error),
@@ -1007,6 +1120,16 @@ impl UnifiServer {
             Ok(client) => client,
             Err(result) => return *result,
         };
+
+        if let Err(result) = Self::authorize_write_site(
+            caller.as_ref(),
+            "unifi_run_speed_test",
+            &args.controller,
+            &client,
+            args.site.as_deref(),
+        ) {
+            return *result;
+        }
 
         match ops::run_speed_test(args, &client).await {
             Ok(json) => json_tool_result(json),
@@ -2171,7 +2294,7 @@ impl ServerHandler for UnifiServer {
         _request: Option<PaginatedRequestParams>,
         context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, rmcp::ErrorData> {
-        let caller = caller_from_extensions::<NoGrant>(&context.extensions);
+        let caller = caller_from_extensions::<UnifiGrant>(&context.extensions);
         let all_tools = self.tool_router.list_all();
         let visible = filter_tools_for_scope(all_tools, caller, WRITE_TOOLS);
         // `with_all_items` leaves `ttl_ms` and `cache_scope` unset, and both
@@ -2199,7 +2322,7 @@ mod tests {
 
     /// Build a `CallerCtx` with the given tool scope, mirroring the pattern
     /// `mecmcp-server::authorize`'s own tests use.
-    fn caller_with_tools(tools: mecmcp_auth::ScopeSet) -> mecmcp_auth::CallerCtx<NoGrant> {
+    fn caller_with_tools(tools: mecmcp_auth::ScopeSet) -> mecmcp_auth::CallerCtx<UnifiGrant> {
         mecmcp_auth::CallerCtx {
             token_name: "caller".to_owned(),
             devices: mecmcp_auth::ScopeSet::Wildcard,
@@ -2214,6 +2337,63 @@ mod tests {
             session_id: None,
             request_id: uuid::Uuid::new_v4(),
         }
+    }
+
+    /// Build a `CallerCtx` carrying the given site grant, for
+    /// `authorize_site` tests.
+    fn caller_with_site_grant(grant: Option<UnifiGrant>) -> mecmcp_auth::CallerCtx<UnifiGrant> {
+        mecmcp_auth::CallerCtx {
+            grant,
+            ..caller_with_tools(mecmcp_auth::ScopeSet::Wildcard)
+        }
+    }
+
+    /// A token scoped to `site-a` must be refused for `site-b` -- the
+    /// regression this issue exists for.
+    #[test]
+    fn authorize_site_refuses_a_site_outside_the_grant() {
+        let caller = caller_with_site_grant(Some(UnifiGrant {
+            sites: mecmcp_auth::ScopeSet::Allowlist(vec!["site-a".to_owned()]),
+        }));
+        assert!(UnifiServer::authorize_site(Some(&caller), "site-b").is_err());
+    }
+
+    /// A token scoped to more than one site must be authorized for each one.
+    #[test]
+    fn authorize_site_permits_each_site_in_a_multi_site_grant() {
+        let caller = caller_with_site_grant(Some(UnifiGrant {
+            sites: mecmcp_auth::ScopeSet::Allowlist(vec!["site-a".to_owned(), "site-b".to_owned()]),
+        }));
+        assert!(UnifiServer::authorize_site(Some(&caller), "site-a").is_ok());
+        assert!(UnifiServer::authorize_site(Some(&caller), "site-b").is_ok());
+        assert!(UnifiServer::authorize_site(Some(&caller), "site-c").is_err());
+    }
+
+    /// A caller with no grant at all is unrestricted by site -- the
+    /// pre-MEC-508 default that keeps existing tokens working unchanged.
+    #[test]
+    fn authorize_site_permits_any_site_with_no_grant() {
+        let caller = caller_with_site_grant(None);
+        assert!(UnifiServer::authorize_site(Some(&caller), "any-site").is_ok());
+    }
+
+    /// The stdio path (`caller: None`) is unrestricted, consistent with every
+    /// other authorization check in this module.
+    #[test]
+    fn authorize_site_permits_any_site_with_no_caller() {
+        assert!(UnifiServer::authorize_site(None, "any-site").is_ok());
+    }
+
+    /// A wildcard site grant permits every site, same as an absent grant --
+    /// `--sites '*'` and omitting the flag both authorize identically, just
+    /// through different representations.
+    #[test]
+    fn authorize_site_permits_any_site_with_a_wildcard_grant() {
+        let caller = caller_with_site_grant(Some(UnifiGrant {
+            sites: mecmcp_auth::ScopeSet::Wildcard,
+        }));
+        assert!(UnifiServer::authorize_site(Some(&caller), "site-a").is_ok());
+        assert!(UnifiServer::authorize_site(Some(&caller), "site-z").is_ok());
     }
 
     /// The check this test guards: `unifi_stage_change` and
@@ -2412,7 +2592,7 @@ mod tests {
     /// approve its own change set by riding through this mapping.
     #[test]
     fn approver_actor_type_carries_agent_through_not_human() {
-        let caller = mecmcp_auth::CallerCtx::<NoGrant> {
+        let caller = mecmcp_auth::CallerCtx::<UnifiGrant> {
             token_name: "agent-token".to_owned(),
             devices: mecmcp_auth::ScopeSet::Wildcard,
             tools: mecmcp_auth::ScopeSet::Wildcard,
@@ -2436,7 +2616,7 @@ mod tests {
     /// the one case `approve_change_set` actually accepts.
     #[test]
     fn approver_actor_type_carries_human_through() {
-        let caller = mecmcp_auth::CallerCtx::<NoGrant> {
+        let caller = mecmcp_auth::CallerCtx::<UnifiGrant> {
             token_name: "human-token".to_owned(),
             devices: mecmcp_auth::ScopeSet::Wildcard,
             tools: mecmcp_auth::ScopeSet::Wildcard,
