@@ -115,8 +115,8 @@ Pull first if not already present, then capture the resolved digest (RepoDigests
 is empty if the image has not been pulled):
 
 ```bash
-docker pull ghcr.io/fastrevmd-lab/rustunifimcp:0.4.0
-image=$(docker inspect ghcr.io/fastrevmd-lab/rustunifimcp:0.4.0 \
+docker pull ghcr.io/mechubsec/rustunifimcp:0.4.0
+image=$(docker inspect ghcr.io/mechubsec/rustunifimcp:0.4.0 \
     --format '{{index .RepoDigests 0}}')
 ```
 
@@ -132,7 +132,7 @@ build) fails:
 
 ```bash
 cosign verify \
-  --certificate-identity-regexp '^https://github\.com/fastrevmd-lab/rustunifimcp/\.github/workflows/release-image\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$' \
+  --certificate-identity-regexp '^https://github\.com/mechubsec/rustunifimcp/\.github/workflows/release-image\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$' \
   --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
   "$image"
 ```
@@ -142,10 +142,18 @@ The same workflow also attaches a
 checkable with the GitHub CLI instead of cosign:
 
 ```bash
-gh attestation verify "oci://$image" --repo fastrevmd-lab/rustunifimcp
+gh attestation verify "oci://$image" --repo mechubsec/rustunifimcp
 ```
 
-A failure in either check means do not run it, not "probably fine."
+The workflow also attaches a signed CycloneDX SBOM to the same digest,
+checkable the same way:
+
+```bash
+gh attestation verify "oci://$image" --repo mechubsec/rustunifimcp \
+  --predicate-type https://cyclonedx.org/bom
+```
+
+A failure in any of these checks means do not run it, not "probably fine."
 
 **Multi-arch:** the published manifest covers both `linux/amd64` and
 `linux/arm64` — `docker pull`/`docker run` resolve the matching platform

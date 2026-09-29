@@ -35,6 +35,7 @@ jobs:
           retention-days: 90
 
   build-and-push:
+    needs: sbom
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -153,4 +154,20 @@ jobs:
         with:
           subject-name: ghcr.io/${{ github.repository }}
           subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+      - name: Download SBOM
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: sbom-cyclonedx
+
+      # Binds the SBOM to the image digest as a signed attestation instead of
+      # a plain workflow-run artifact, so it doesn't expire and travels with
+      # the image rather than needing to be found separately.
+      - name: Attest SBOM
+        uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e # v4.1.0
+        with:
+          subject-name: ghcr.io/${{ github.repository }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          sbom-path: rustunifimcp/rustunifimcp.cdx.json
           push-to-registry: true
