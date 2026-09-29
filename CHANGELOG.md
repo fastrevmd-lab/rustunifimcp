@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 - Raised MSRV to 1.89
+- **Container images now publish to `ghcr.io/mechubsec/rustunifimcp`** —
+  the repo moved to the mechubsec organization, and images are renamed to
+  match. Older tags were copied from the previous name.
 
 ## [0.4.0] - 2026-09-16
 

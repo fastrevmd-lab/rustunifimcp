@@ -43,12 +43,12 @@ the old binary has been replaced — an outage, not a build failure.
 Take the binary from the release image, which CI builds against the right glibc:
 
 ```bash
-docker create --name ux ghcr.io/fastrevmd-lab/rustunifimcp:0.4.0
+docker create --name ux ghcr.io/mechubsec/rustunifimcp:0.4.0
 docker cp ux:/usr/local/bin/rustunifimcp ./rustunifimcp
 docker rm ux
 ```
 
-No docker? `skopeo copy docker://ghcr.io/fastrevmd-lab/rustunifimcp:0.4.0 dir:/tmp/img`
+No docker? `skopeo copy docker://ghcr.io/mechubsec/rustunifimcp:0.4.0 dir:/tmp/img`
 then find the layer containing `usr/local/bin/rustunifimcp` and untar it.
 
 ## 2. Assemble the install package

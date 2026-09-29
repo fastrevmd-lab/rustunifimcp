@@ -104,8 +104,8 @@ Pull first if not already present, then capture the resolved digest (RepoDigests
 is empty if the image has not been pulled):
 
 ```bash
-docker pull ghcr.io/fastrevmd-lab/rustunifimcp:0.4.0
-image=$(docker inspect ghcr.io/fastrevmd-lab/rustunifimcp:0.4.0 \
+docker pull ghcr.io/mechubsec/rustunifimcp:0.4.0
+image=$(docker inspect ghcr.io/mechubsec/rustunifimcp:0.4.0 \
     --format '{{index .RepoDigests 0}}')
 ```
 
