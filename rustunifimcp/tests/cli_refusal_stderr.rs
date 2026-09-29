@@ -249,3 +249,34 @@ fn argument_errors_are_not_masked_by_config_errors() {
         "the inventory error masked the argument error:\n{stderr}"
     );
 }
+
+/// MEC-503 F2: `--allow-self-approval` is the explicit, issuance-time opt-in
+/// for a lab-mode single operator; without it the combination is refused
+/// (see `token_add_with_both_changeset_control_scopes_is_refused`).
+#[test]
+fn token_add_with_both_scopes_and_allow_self_approval_is_accepted() {
+    let tokens = tokens_file();
+    let output = run(&[
+        "token",
+        "add",
+        "--tokens-file",
+        tokens.path().to_str().expect("utf-8 path"),
+        "--name",
+        "lab-operator",
+        "--devices",
+        "*",
+        "--tools",
+        "unifi_stage_change,unifi_approve_change_set",
+        "--allow-self-approval",
+    ]);
+    assert!(
+        output.status.success(),
+        "an explicit --allow-self-approval mint must succeed, stderr:\n{}",
+        stderr_of(&output)
+    );
+    let stored = std::fs::read_to_string(tokens.path()).expect("read tokens file");
+    assert!(
+        stored.contains("\"lab-operator\""),
+        "token must be stored: {stored}"
+    );
+}

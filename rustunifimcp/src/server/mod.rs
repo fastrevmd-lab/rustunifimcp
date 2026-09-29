@@ -1203,7 +1203,10 @@ impl UnifiServer {
         ) {
             return tool_error(error);
         }
-        if Self::holds_combined_two_person_control_scope(caller.as_ref()) {
+        // Under --lab-mode a single operator may hold both scopes on purpose
+        // (issued with `token add --allow-self-approval`); the change-set
+        // lab-mode waiver then records the self-approval as a distinct fact.
+        if !self.lab_mode && Self::holds_combined_two_person_control_scope(caller.as_ref()) {
             return tool_error(
                 "two-person control: this token's scope combines unifi_stage_change and \
                  unifi_approve_change_set; issue separate tokens for staging and approving",
@@ -1566,7 +1569,10 @@ impl UnifiServer {
         ) {
             return tool_error(error);
         }
-        if Self::holds_combined_two_person_control_scope(caller.as_ref()) {
+        // Under --lab-mode a single operator may hold both scopes on purpose
+        // (issued with `token add --allow-self-approval`); the change-set
+        // lab-mode waiver then records the self-approval as a distinct fact.
+        if !self.lab_mode && Self::holds_combined_two_person_control_scope(caller.as_ref()) {
             return tool_error(
                 "two-person control: this token's scope combines unifi_stage_change and \
                  unifi_approve_change_set; issue separate tokens for staging and approving",

@@ -66,17 +66,24 @@ fn mint_token(path: &std::path::Path, name: &str, tools: &[&str]) -> String {
 async fn start_server(
     token_store: Arc<TokenStoreFile<NoGrant>>,
 ) -> (String, CancellationToken, tokio::task::JoinHandle<()>) {
+    start_server_with_lab_mode(token_store, false).await
+}
+
+async fn start_server_with_lab_mode(
+    token_store: Arc<TokenStoreFile<NoGrant>>,
+    lab_mode: bool,
+) -> (String, CancellationToken, tokio::task::JoinHandle<()>) {
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
     let registry = empty_registry();
     let coordinator = rustunifimcp::changeset_state::build_coordinator(
         None,
         Duration::from_secs(300),
-        false,
+        lab_mode,
         None,
     )
     .expect("coordinator");
-    let handler = UnifiServer::new(registry, false, coordinator, None).expect("server");
+    let handler = UnifiServer::new(registry, lab_mode, coordinator, None).expect("server");
 
     let shutdown = CancellationToken::new();
     let plan = rustunifimcp::http_transport::build_http_router(
@@ -172,6 +179,68 @@ async fn a_token_with_both_scopes_is_refused_calling_stage_change() {
             && text.contains("unifi_stage_change")
             && text.contains("unifi_approve_change_set"),
         "the refusal must name both scopes, got: {text}"
+    );
+
+    shutdown.cancel();
+    task.abort();
+}
+
+/// MEC-503 F2: under `--lab-mode` a single operator's combined-scope token is
+/// deliberately allowed (the change-set waiver records the self-approval), so
+/// the call-time two-person refusal must not fire.
+#[tokio::test]
+async fn lab_mode_does_not_refuse_a_combined_scope_token() {
+    let tokens_dir = tempfile::tempdir().expect("tempdir");
+    let tokens_path = tokens_dir.path().join("tokens.json");
+    let bearer = mint_token(
+        &tokens_path,
+        "lab-operator",
+        &["unifi_stage_change", "unifi_approve_change_set"],
+    );
+    let store = Arc::new(TokenStoreFile::<NoGrant>::load(&tokens_path).expect("load store"));
+
+    let (base_url, shutdown, task) = start_server_with_lab_mode(store, true).await;
+
+    let session_id = tokio::task::spawn_blocking({
+        let base_url = base_url.clone();
+        let bearer = bearer.clone();
+        move || {
+            McpClient::new(base_url)
+                .expect("client")
+                .with_bearer(bearer)
+                .initialize()
+                .expect("initialize")
+        }
+    })
+    .await
+    .expect("blocking task");
+
+    let result = tokio::task::spawn_blocking(move || {
+        McpClient::new(base_url)
+            .expect("client")
+            .with_bearer(bearer)
+            .tools_call(
+                &session_id,
+                "unifi_stage_change",
+                serde_json::json!({
+                    "controller": "home",
+                    "change_set_id": "does-not-matter",
+                    "mutations": [],
+                }),
+            )
+            .expect("tools/call")
+    })
+    .await
+    .expect("blocking task");
+
+    let text = result["content"][0]["text"].as_str().unwrap_or_default();
+    assert!(
+        !text.contains("two-person control"),
+        "lab mode must not apply the call-time two-person refusal, got: {text}"
+    );
+    assert!(
+        !text.is_empty(),
+        "the call must still get a real answer: {result}"
     );
 
     shutdown.cancel();

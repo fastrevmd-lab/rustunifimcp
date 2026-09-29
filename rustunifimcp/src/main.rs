@@ -51,6 +51,14 @@ fn reject_combined_two_person_control_scope(tools: &[String]) -> Result<()> {
 /// As [`reject_combined_two_person_control_scope`].
 fn validate_token_command(command: &TokenCommand) -> Result<()> {
     match command {
+        TokenCommand::Add {
+            allow_self_approval: true,
+            ..
+        }
+        | TokenCommand::SetScope {
+            allow_self_approval: true,
+            ..
+        } => Ok(()),
         TokenCommand::Add { tools, .. } => reject_combined_two_person_control_scope(tools),
         TokenCommand::SetScope {
             tools: Some(tools), ..
@@ -73,6 +81,7 @@ fn token_command_to_action(command: TokenCommand) -> (TokenAction, Option<NoGran
             provider_tier,
             on_behalf_of,
             actor_type,
+            allow_self_approval: _,
             server_pid,
         } => (
             TokenAction::Add {
@@ -119,6 +128,7 @@ fn token_command_to_action(command: TokenCommand) -> (TokenAction, Option<NoGran
             devices,
             tools,
             yes,
+            allow_self_approval: _,
             server_pid,
         } => (
             TokenAction::SetScopes {
@@ -1010,6 +1020,7 @@ mod tests {
             provider_tier: None,
             on_behalf_of: None,
             actor_type: None,
+            allow_self_approval: false,
             server_pid: None,
         };
 
@@ -1169,6 +1180,7 @@ mod tests {
             devices: Some(vec!["*".to_string()]),
             tools: Some(vec!["*".to_string()]),
             yes: false,
+            allow_self_approval: false,
             server_pid: None,
         };
 
