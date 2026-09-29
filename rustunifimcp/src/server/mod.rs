@@ -1,6 +1,7 @@
 //! The MCP server handler.
 
-use mecmcp_auth::NoGrant;
+use crate::grant::UnifiGrant;
+use mecmcp_auth::Grant as _;
 use mecmcp_changeset::{
     ApplyHandle, ChangeSetRecord, ChangeSetState, ChangesetCoordinator, PreviewRecord,
     change_set_digest, preview_digest,
@@ -230,6 +231,10 @@ pub struct UnifiServer {
     /// the coordinator already allows one pending change set per principal per
     /// controller, so these paths are near-serial anyway.
     plan_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Whether direct-commit tools (`unifi_device_action`'s `restart`,
+    /// `unifi_client_action`'s `block`/`unblock`/`reconnect`) may run without
+    /// change-set approval. Set via `--allow-direct-commit`; off by default.
+    direct_commit: mecmcp_audit::DirectCommitPolicy,
     /// Tool router.
     tool_router: ToolRouter<Self>,
 }
@@ -264,6 +269,7 @@ impl UnifiServer {
         lab_mode: bool,
         coordinator: Arc<ChangesetCoordinator>,
         evidence: Option<Arc<mecmcp_audit::recorder::EvidenceRecorder>>,
+        direct_commit: mecmcp_audit::DirectCommitPolicy,
     ) -> Result<Self, UnifiError> {
         let clients = Self::build_clients(&registry)?;
         Ok(Self {
@@ -274,6 +280,7 @@ impl UnifiServer {
             drafts: Arc::new(std::sync::RwLock::new(BTreeMap::new())),
             evidence,
             plan_lock: Arc::new(tokio::sync::Mutex::new(())),
+            direct_commit,
             tool_router: Self::unifi_tool_router(),
         })
     }
@@ -330,13 +337,138 @@ impl UnifiServer {
     }
 
     /// Recover the caller from the request context.
-    fn caller(context: &RequestContext<RoleServer>) -> Option<mecmcp_auth::CallerCtx<NoGrant>> {
-        caller_from_extensions::<NoGrant>(&context.extensions).cloned()
+    fn caller(context: &RequestContext<RoleServer>) -> Option<mecmcp_auth::CallerCtx<UnifiGrant>> {
+        caller_from_extensions::<UnifiGrant>(&context.extensions).cloned()
     }
 
     /// The principal behind this call.
-    fn principal(caller: Option<&mecmcp_auth::CallerCtx<NoGrant>>) -> String {
+    fn principal(caller: Option<&mecmcp_auth::CallerCtx<UnifiGrant>>) -> String {
         caller.map_or_else(|| "unknown".to_owned(), |ctx| ctx.token_name.clone())
+    }
+
+    /// Require the caller's grant, if any, to permit writing to `site`.
+    ///
+    /// A caller with no grant (`grant: None`) is unrestricted by site: that
+    /// is the pre-MEC-508 default, and it is what every token minted before
+    /// per-site scoping existed carries, so this preserves their behavior
+    /// unchanged. A caller whose grant is `Some` must name `site` explicitly
+    /// -- a positive allowlist, so a widened default site is never assumed.
+    ///
+    /// The `None` caller (stdio) is also unrestricted, for the same reason
+    /// [`authorize_call`] treats it that way: stdio has no bearer token
+    /// because it has no network, and the process on the other end already
+    /// runs as whoever started it.
+    ///
+    /// # Errors
+    /// Returns [`UnifiError::SiteNotInScope`] if the caller's grant does not
+    /// name `site`.
+    fn authorize_site(
+        caller: Option<&mecmcp_auth::CallerCtx<UnifiGrant>>,
+        site: &str,
+    ) -> Result<(), UnifiError> {
+        let Some(caller) = caller else {
+            return Ok(());
+        };
+        let Some(grant) = &caller.grant else {
+            return Ok(());
+        };
+        if grant.allows_subject(site) {
+            Ok(())
+        } else {
+            Err(UnifiError::SiteNotInScope {
+                token: caller.token_name.clone(),
+                site: site.to_owned(),
+            })
+        }
+    }
+
+    /// Resolve the effective site for a write call, enforce the caller's
+    /// site grant against it, and audit the outcome either way.
+    ///
+    /// The audit event lives here rather than once per call site so a
+    /// handler cannot add a new site-scoped write tool and forget the audit
+    /// half of the check -- there is exactly one place that decides and
+    /// records which site a mutating call targeted.
+    ///
+    /// # Errors
+    /// Returns the boxed `CallToolResult` [`tool_error`] renders for
+    /// [`UnifiError::SiteNotInScope`], for a handler to `return *result`.
+    fn authorize_write_site(
+        caller: Option<&mecmcp_auth::CallerCtx<UnifiGrant>>,
+        tool: &str,
+        controller: &str,
+        client: &UnifiClient,
+        requested_site: Option<&str>,
+    ) -> Result<String, Box<CallToolResult>> {
+        let site = requested_site
+            .unwrap_or_else(|| client.default_site())
+            .to_owned();
+        let principal = Self::principal(caller);
+        if let Err(error) = Self::authorize_site(caller, &site) {
+            tracing::warn!(
+                target: "audit",
+                event = "unifi_site_write_denied",
+                tool = %tool,
+                controller = %controller,
+                site = %site,
+                principal = %principal,
+                "write denied: site not in caller's grant"
+            );
+            return Err(Box::new(tool_error(error)));
+        }
+        tracing::info!(
+            target: "audit",
+            event = "unifi_site_write",
+            tool = %tool,
+            controller = %controller,
+            site = %site,
+            principal = %principal,
+            "site-scoped write authorized"
+        );
+        Ok(site)
+    }
+
+    /// Enforce the direct-commit gate for an operational action that mutates
+    /// a device or client in one call with no change-set approval, and audit
+    /// the outcome.
+    ///
+    /// Refuses unless the server was started with `--allow-direct-commit`.
+    /// Unlike [`authorize_write_site`](Self::authorize_write_site), which
+    /// logs through this crate's own `tracing`-based audit convention, this
+    /// emits its event through `mecmcp_audit::AuditScope` -- the same
+    /// mechanism `mecmcp_audit::DirectCommitPolicy::check` requires and the
+    /// one `rustjunosmcp` uses for the identical gate, so the two servers'
+    /// direct-commit records share one shape.
+    ///
+    /// On refusal the returned `CallToolResult` is final and the `AuditScope`
+    /// has already been dropped (and so emitted) recording the denial. On
+    /// success the caller gets back the *live* `AuditScope` instead of a
+    /// dropped one: it must call [`AuditScope::succeed`] or
+    /// [`AuditScope::fail`] once the gated device/client mutation has
+    /// actually run, then let it drop. Finalizing here -- before the caller
+    /// has performed the mutation -- would record `result=ok` for a call that
+    /// had not executed yet, and still `result=ok` if it went on to fail.
+    ///
+    /// # Errors
+    /// Returns the boxed `CallToolResult` [`tool_error`] renders for
+    /// [`mecmcp_audit::DirectCommitRefused`], for a handler to `return *result`.
+    fn gate_direct_commit(
+        &self,
+        caller: Option<&mecmcp_auth::CallerCtx<UnifiGrant>>,
+        tool: &'static str,
+        action: &'static str,
+        target: &str,
+    ) -> Result<mecmcp_audit::AuditScope, Box<CallToolResult>> {
+        let mut scope = match caller {
+            Some(ctx) => {
+                mecmcp_audit::AuditScope::from_caller(ctx, tool, action, vec![target.to_owned()])
+            }
+            None => mecmcp_audit::AuditScope::stdio(tool, action, vec![target.to_owned()]),
+        };
+        match self.direct_commit.check(&mut scope) {
+            Ok(()) => Ok(scope),
+            Err(error) => Err(Box::new(tool_error(error))),
+        }
     }
 
     /// Map a caller's server-verified `mecmcp_auth::ActorType` to the
@@ -348,7 +480,7 @@ impl UnifiServer {
     /// gate; `Unknown` is the honest fact, and `approve_change_set` refuses it
     /// exactly like it refuses `Agent`.
     fn approver_actor_type(
-        caller: Option<&mecmcp_auth::CallerCtx<NoGrant>>,
+        caller: Option<&mecmcp_auth::CallerCtx<UnifiGrant>>,
     ) -> mecmcp_audit::ActorType {
         match caller {
             Some(ctx) => match ctx.actor_type {
@@ -376,7 +508,7 @@ impl UnifiServer {
     /// from a hand-edited file never went through issuance at all. This is
     /// the check a hand-edited store cannot bypass.
     fn holds_combined_two_person_control_scope(
-        caller: Option<&mecmcp_auth::CallerCtx<NoGrant>>,
+        caller: Option<&mecmcp_auth::CallerCtx<UnifiGrant>>,
     ) -> bool {
         let Some(caller) = caller else {
             return false;
@@ -671,7 +803,7 @@ impl UnifiServer {
 impl UnifiServer {
     #[tool(
         name = "unifi_list_resources",
-        description = "List UniFi resources by type and site"
+        description = "List UniFi resources by type and site. Output is redacted: WLAN passphrases, VPN/RADIUS secrets, WireGuard private keys, and PPPoE passwords are stripped; identifying fields (name, VLAN, subnet, MAC/IP) remain."
     )]
     async fn unifi_list_resources(
         &self,
@@ -701,7 +833,7 @@ impl UnifiServer {
 
     #[tool(
         name = "unifi_get_resource",
-        description = "Get a specific UniFi resource by type and id"
+        description = "Get a specific UniFi resource by type and id. Output is redacted: WLAN passphrases, VPN/RADIUS secrets, WireGuard private keys, and PPPoE passwords are stripped; identifying fields (name, VLAN, subnet, MAC/IP) remain."
     )]
     async fn unifi_get_resource(
         &self,
@@ -731,7 +863,7 @@ impl UnifiServer {
 
     #[tool(
         name = "unifi_query_stats",
-        description = "Query statistics for UniFi resources"
+        description = "Query statistics for UniFi resources. Output is redacted: device/station stats are narrowed to their typed field set, site/WLAN/flow stats pass through a best-effort secret scan."
     )]
     async fn unifi_query_stats(
         &self,
@@ -761,7 +893,7 @@ impl UnifiServer {
 
     #[tool(
         name = "unifi_search",
-        description = "Search UniFi resources with filters"
+        description = "Search UniFi resources with filters. Output is redacted: results are filtered on the same typed, secret-stripped shape unifi_list_resources returns."
     )]
     async fn unifi_search(
         &self,
@@ -918,7 +1050,70 @@ impl UnifiServer {
             Err(result) => return *result,
         };
 
-        match ops::device_action(args, &client).await {
+        if let Err(result) = Self::authorize_write_site(
+            caller.as_ref(),
+            "unifi_device_action",
+            &args.controller,
+            &client,
+            args.site.as_deref(),
+        ) {
+            return *result;
+        }
+
+        // Validated before the gate below reads `args.device` into the audit
+        // record: an unvalidated MAC would otherwise let a caller write an
+        // arbitrary string into that record before it was ever checked.
+        if let Err(error) = args.validate() {
+            return tool_error(error);
+        }
+
+        // `restart`, `adopt`, `upgrade`, and `port_action` each mutate the
+        // device in one call with no change-set approval. `locate` is exempt:
+        // it is self-reverting and carries no lasting effect. Whether a
+        // variant is gated is decided by `DeviceAction::requires_direct_commit`
+        // below -- an exhaustive match in `rustunifimcp-core` that is a
+        // compile error there until a future variant says explicitly whether
+        // it belongs in the gate. `#[non_exhaustive]` still forces a wildcard
+        // here for the display name only, which carries no gating decision.
+        let action_name = match args.action {
+            ops::DeviceAction::Restart => "restart",
+            ops::DeviceAction::Adopt => "adopt",
+            ops::DeviceAction::Upgrade => "upgrade",
+            ops::DeviceAction::PortAction => "port_action",
+            ops::DeviceAction::Locate => "locate",
+            _ => "unknown",
+        };
+        let mut gate_scope = if args.action.requires_direct_commit() {
+            match self.gate_direct_commit(
+                caller.as_ref(),
+                "unifi_device_action",
+                action_name,
+                &args.device,
+            ) {
+                Ok(scope) => Some(scope),
+                Err(result) => return *result,
+            }
+        } else {
+            None
+        };
+        if let Some(scope) = gate_scope.as_mut() {
+            if let Some(firmware_version) = args.firmware_version.as_deref() {
+                scope.meta("firmware_version", firmware_version.to_owned());
+            }
+            if let Some(port_index) = args.port_index {
+                scope.meta("port_idx", u64::from(port_index));
+            }
+        }
+
+        let result = ops::device_action(args, &client).await;
+        if let Some(scope) = gate_scope.as_mut() {
+            match &result {
+                Ok(_) => scope.succeed(),
+                Err(error) => scope.fail(error),
+            }
+        }
+
+        match result {
             Ok(json) => json_tool_result(json),
             Err(error) => tool_error(error),
         }
@@ -926,7 +1121,7 @@ impl UnifiServer {
 
     #[tool(
         name = "unifi_client_action",
-        description = "Execute an operational action on a client (block, unblock, reconnect, authorize, limit_bandwidth)"
+        description = "Execute an operational action on a client (block, unblock, reconnect)"
     )]
     async fn unifi_client_action(
         &self,
@@ -948,7 +1143,99 @@ impl UnifiServer {
             Err(result) => return *result,
         };
 
-        match ops::client_action(args, &client).await {
+        if let Err(result) = Self::authorize_write_site(
+            caller.as_ref(),
+            "unifi_client_action",
+            &args.controller,
+            &client,
+            args.site.as_deref(),
+        ) {
+            return *result;
+        }
+
+        // Validated before the gate below reads `args.client` into the audit
+        // record: an unvalidated MAC would otherwise let a caller write an
+        // arbitrary string into that record before it was ever checked.
+        if let Err(error) = args.validate() {
+            return tool_error(error);
+        }
+
+        // `block`, `unblock`, and `reconnect` mutate the client in one call
+        // with no change-set approval. Whether a variant is gated is decided by
+        // `ClientAction::requires_direct_commit` below -- an exhaustive match
+        // in `rustunifimcp-core` that is a compile error there until a future
+        // variant says explicitly whether it belongs in the gate.
+        // `#[non_exhaustive]` still forces a wildcard here for the display
+        // name only, which carries no gating decision.
+        let action_name = match args.action {
+            ops::ClientAction::Block => "block",
+            ops::ClientAction::Unblock => "unblock",
+            ops::ClientAction::Reconnect => "reconnect",
+            _ => "unknown",
+        };
+        let mut gate_scope = if args.action.requires_direct_commit() {
+            match self.gate_direct_commit(
+                caller.as_ref(),
+                "unifi_client_action",
+                action_name,
+                &args.client,
+            ) {
+                Ok(scope) => Some(scope),
+                Err(result) => return *result,
+            }
+        } else {
+            None
+        };
+
+        let result = ops::client_action(args, &client).await;
+        if let Some(scope) = gate_scope.as_mut() {
+            match &result {
+                Ok(_) => scope.succeed(),
+                Err(error) => scope.fail(error),
+            }
+        }
+
+        match result {
+            Ok(json) => json_tool_result(json),
+            Err(error) => tool_error(error),
+        }
+    }
+
+    #[tool(
+        name = "unifi_backup_action",
+        description = "Execute a backup action (trigger, list). `trigger` starts an asynchronous, non-idempotent job on the controller: if the request times out, do not retry it, since the controller may still complete the job and a retry can leave duplicate backup files behind. `restore` is not an operational action — it is governed by the change-set lifecycle (Phase 6): `unifi_create_change_set` -> `unifi_stage_change` -> `unifi_approve_change_set` -> `unifi_apply_change_set`."
+    )]
+    async fn unifi_backup_action(
+        &self,
+        Parameters(args): Parameters<ops::BackupActionArgs>,
+        context: RequestContext<RoleServer>,
+    ) -> CallToolResult {
+        let caller = Self::caller(&context);
+        if let Err(error) = authorize_call(
+            caller.as_ref(),
+            "unifi_backup_action",
+            Some(&args.controller),
+            WRITE_TOOLS,
+        ) {
+            return tool_error(error);
+        }
+
+        let client = match self.client_for(&args.controller) {
+            Ok(client) => client,
+            Err(result) => return *result,
+        };
+
+        if let Err(result) = Self::authorize_write_site(
+            caller.as_ref(),
+            "unifi_backup_action",
+            &args.controller,
+            &client,
+            args.site.as_deref(),
+        ) {
+            return *result;
+        }
+
+        match ops::backup_action(args, &client).await {
             Ok(json) => json_tool_result(json),
             Err(error) => tool_error(error),
         }
@@ -956,7 +1243,7 @@ impl UnifiServer {
 
     #[tool(
         name = "unifi_site_health_report",
-        description = "Generate a site health report joining devices, health metrics, and statistics"
+        description = "Generate a site health report joining devices, health metrics, and statistics. Output is redacted: device fields are narrowed to the device allowlist, health/stats pass through a best-effort secret scan."
     )]
     async fn unifi_site_health_report(
         &self,
@@ -986,7 +1273,7 @@ impl UnifiServer {
 
     #[tool(
         name = "unifi_topology_report",
-        description = "Generate a network topology report joining edges, devices, and networks"
+        description = "Generate a network topology report joining edges, devices, and networks. Output is redacted: device and network fields are narrowed to their allowlists, so VPN/PSK/WireGuard secrets on a network are stripped."
     )]
     async fn unifi_topology_report(
         &self,
@@ -1016,7 +1303,7 @@ impl UnifiServer {
 
     #[tool(
         name = "unifi_traffic_flow_report",
-        description = "Generate a traffic flow report joining clients, statistics, and top applications"
+        description = "Generate a traffic flow report joining clients, statistics, and top applications. Output is redacted: client fields are narrowed to the station allowlist, joined flow stats pass through a best-effort secret scan."
     )]
     async fn unifi_traffic_flow_report(
         &self,
@@ -1046,7 +1333,7 @@ impl UnifiServer {
 
     #[tool(
         name = "unifi_client_troubleshoot",
-        description = "Troubleshoot a client by correlating association, uplink, and firewall policy"
+        description = "Troubleshoot a client by correlating association, uplink, and firewall policy. Output is redacted: the station and device are narrowed to their allowlists, and any matched firewall policy is scanned for secret-named fields."
     )]
     async fn unifi_client_troubleshoot(
         &self,
@@ -1375,7 +1662,7 @@ impl UnifiServer {
 
     #[tool(
         name = "unifi_diff_change_set",
-        description = "Returns a diff showing what applying the change set would do"
+        description = "Returns a diff showing what applying the change set would do. Both sides of the diff are redacted: the pre-image and staged body are narrowed to the resource's allowlist before the diff is built."
     )]
     async fn unifi_diff_change_set(
         &self,
@@ -2081,7 +2368,7 @@ impl ServerHandler for UnifiServer {
         _request: Option<PaginatedRequestParams>,
         context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, rmcp::ErrorData> {
-        let caller = caller_from_extensions::<NoGrant>(&context.extensions);
+        let caller = caller_from_extensions::<UnifiGrant>(&context.extensions);
         let all_tools = self.tool_router.list_all();
         let visible = filter_tools_for_scope(all_tools, caller, WRITE_TOOLS);
         // `with_all_items` leaves `ttl_ms` and `cache_scope` unset, and both
@@ -2109,7 +2396,7 @@ mod tests {
 
     /// Build a `CallerCtx` with the given tool scope, mirroring the pattern
     /// `mecmcp-server::authorize`'s own tests use.
-    fn caller_with_tools(tools: mecmcp_auth::ScopeSet) -> mecmcp_auth::CallerCtx<NoGrant> {
+    fn caller_with_tools(tools: mecmcp_auth::ScopeSet) -> mecmcp_auth::CallerCtx<UnifiGrant> {
         mecmcp_auth::CallerCtx {
             token_name: "caller".to_owned(),
             devices: mecmcp_auth::ScopeSet::Wildcard,
@@ -2124,6 +2411,63 @@ mod tests {
             session_id: None,
             request_id: uuid::Uuid::new_v4(),
         }
+    }
+
+    /// Build a `CallerCtx` carrying the given site grant, for
+    /// `authorize_site` tests.
+    fn caller_with_site_grant(grant: Option<UnifiGrant>) -> mecmcp_auth::CallerCtx<UnifiGrant> {
+        mecmcp_auth::CallerCtx {
+            grant,
+            ..caller_with_tools(mecmcp_auth::ScopeSet::Wildcard)
+        }
+    }
+
+    /// A token scoped to `site-a` must be refused for `site-b` -- the
+    /// regression this issue exists for.
+    #[test]
+    fn authorize_site_refuses_a_site_outside_the_grant() {
+        let caller = caller_with_site_grant(Some(UnifiGrant {
+            sites: mecmcp_auth::ScopeSet::Allowlist(vec!["site-a".to_owned()]),
+        }));
+        assert!(UnifiServer::authorize_site(Some(&caller), "site-b").is_err());
+    }
+
+    /// A token scoped to more than one site must be authorized for each one.
+    #[test]
+    fn authorize_site_permits_each_site_in_a_multi_site_grant() {
+        let caller = caller_with_site_grant(Some(UnifiGrant {
+            sites: mecmcp_auth::ScopeSet::Allowlist(vec!["site-a".to_owned(), "site-b".to_owned()]),
+        }));
+        assert!(UnifiServer::authorize_site(Some(&caller), "site-a").is_ok());
+        assert!(UnifiServer::authorize_site(Some(&caller), "site-b").is_ok());
+        assert!(UnifiServer::authorize_site(Some(&caller), "site-c").is_err());
+    }
+
+    /// A caller with no grant at all is unrestricted by site -- the
+    /// pre-MEC-508 default that keeps existing tokens working unchanged.
+    #[test]
+    fn authorize_site_permits_any_site_with_no_grant() {
+        let caller = caller_with_site_grant(None);
+        assert!(UnifiServer::authorize_site(Some(&caller), "any-site").is_ok());
+    }
+
+    /// The stdio path (`caller: None`) is unrestricted, consistent with every
+    /// other authorization check in this module.
+    #[test]
+    fn authorize_site_permits_any_site_with_no_caller() {
+        assert!(UnifiServer::authorize_site(None, "any-site").is_ok());
+    }
+
+    /// A wildcard site grant permits every site, same as an absent grant --
+    /// `--sites '*'` and omitting the flag both authorize identically, just
+    /// through different representations.
+    #[test]
+    fn authorize_site_permits_any_site_with_a_wildcard_grant() {
+        let caller = caller_with_site_grant(Some(UnifiGrant {
+            sites: mecmcp_auth::ScopeSet::Wildcard,
+        }));
+        assert!(UnifiServer::authorize_site(Some(&caller), "site-a").is_ok());
+        assert!(UnifiServer::authorize_site(Some(&caller), "site-z").is_ok());
     }
 
     /// The check this test guards: `unifi_stage_change` and
@@ -2322,7 +2666,7 @@ mod tests {
     /// approve its own change set by riding through this mapping.
     #[test]
     fn approver_actor_type_carries_agent_through_not_human() {
-        let caller = mecmcp_auth::CallerCtx::<NoGrant> {
+        let caller = mecmcp_auth::CallerCtx::<UnifiGrant> {
             token_name: "agent-token".to_owned(),
             devices: mecmcp_auth::ScopeSet::Wildcard,
             tools: mecmcp_auth::ScopeSet::Wildcard,
@@ -2346,7 +2690,7 @@ mod tests {
     /// the one case `approve_change_set` actually accepts.
     #[test]
     fn approver_actor_type_carries_human_through() {
-        let caller = mecmcp_auth::CallerCtx::<NoGrant> {
+        let caller = mecmcp_auth::CallerCtx::<UnifiGrant> {
             token_name: "human-token".to_owned(),
             devices: mecmcp_auth::ScopeSet::Wildcard,
             tools: mecmcp_auth::ScopeSet::Wildcard,
@@ -3016,8 +3360,14 @@ mod tests {
             .await
             .expect("a second principal approves");
 
-        let server = UnifiServer::new(controller_registry(), true, coordinator.clone(), None)
-            .expect("server");
+        let server = UnifiServer::new(
+            controller_registry(),
+            true,
+            coordinator.clone(),
+            None,
+            mecmcp_audit::DirectCommitPolicy::new(false),
+        )
+        .expect("server");
 
         let refused = call(
             server,

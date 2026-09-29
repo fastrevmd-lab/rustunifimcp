@@ -211,7 +211,14 @@ pub async fn site_health_report(
     {
         Ok(devices) => {
             let devices_data = crate::model::unwrap_enveloped_data(&devices)?;
-            devices_result = devices_data.to_vec();
+            // Raw Integration API devices, not the typed model this crate's
+            // read path parses through -- projected here through the same
+            // per-kind allowlist so this workflow join carries the same
+            // guarantee `unifi_list_resources` does.
+            devices_result = devices_data
+                .iter()
+                .map(|d| crate::redact::project_resource(ResourceKind::Device, d))
+                .collect();
         }
         Err(UnifiError::SurfaceRequiresConfig { .. }) => {
             omitted.push("devices: controller has Integration API disabled".to_owned());
@@ -235,7 +242,11 @@ pub async fn site_health_report(
     {
         Ok(health) => {
             let health_data = crate::model::unwrap_enveloped_data(&health)?;
-            health_result = serde_json::Value::Array(health_data.to_vec());
+            // `stat/health` has no `ResourceKind` and so no allowlist; run it
+            // through the shared crate's denylist-and-shape scan as the
+            // defensive net instead.
+            health_result =
+                crate::redact::redact_owned(&serde_json::Value::Array(health_data.to_vec()));
         }
         Err(UnifiError::SurfaceRequiresConfig { .. }) => {
             omitted.push("health: controller has allow_private_api disabled".to_owned());
@@ -360,7 +371,10 @@ pub async fn topology_report(
     {
         Ok(devices) => {
             let devices_data = crate::model::unwrap_enveloped_data(&devices)?;
-            devices_result = devices_data.to_vec();
+            devices_result = devices_data
+                .iter()
+                .map(|d| crate::redact::project_resource(ResourceKind::Device, d))
+                .collect();
         }
         Err(UnifiError::SurfaceRequiresConfig { .. }) => {
             omitted.push("devices: controller has Integration API disabled".to_owned());
@@ -383,7 +397,13 @@ pub async fn topology_report(
     {
         Ok(networks) => {
             let networks_data = crate::model::unwrap_enveloped_data(&networks)?;
-            networks_result = networks_data.to_vec();
+            // Networks carry `x_secret`, WireGuard private keys, and PPPoE
+            // passwords in this exact raw shape -- projected through the
+            // network allowlist before it becomes part of the report.
+            networks_result = networks_data
+                .iter()
+                .map(|n| crate::redact::project_resource(ResourceKind::Network, n))
+                .collect();
         }
         Err(UnifiError::SurfaceRequiresConfig { .. }) => {
             omitted.push("networks: controller has allow_private_api disabled".to_owned());
@@ -452,7 +472,13 @@ pub async fn traffic_flow_report(
     {
         Ok(clients) => {
             let clients_data = crate::model::unwrap_enveloped_data(&clients)?;
-            clients_result = clients_data.to_vec();
+            // Projected here (not only in `join_clients_with_stats`, which is
+            // never reached when the stats leg below is refused) so a
+            // partial report carries the same guarantee a complete one does.
+            clients_result = clients_data
+                .iter()
+                .map(|c| crate::redact::project_resource(ResourceKind::Station, c))
+                .collect();
         }
         Err(UnifiError::SurfaceRequiresConfig { .. }) => {
             omitted.push("clients: controller has Integration API disabled".to_owned());
@@ -692,7 +718,10 @@ pub fn build_client_troubleshoot(
         .find(|s| s.get("mac").and_then(|v| v.as_str()) == Some(mac))
         .ok_or_else(|| UnifiError::Malformed(format!("station {mac} not found on site {site}")))?;
 
-    let association = Some(station.clone());
+    let association = Some(crate::redact::project_resource(
+        ResourceKind::Station,
+        station,
+    ));
 
     // Find the uplink device by matching the station's last_uplink_mac
     let uplink_device =
@@ -700,7 +729,7 @@ pub fn build_client_troubleshoot(
             devices_data
                 .iter()
                 .find(|d| d.get("macAddress").and_then(|v| v.as_str()) == Some(uplink_mac))
-                .cloned()
+                .map(|d| crate::redact::project_resource(ResourceKind::Device, d))
         } else {
             None
         };
@@ -756,7 +785,11 @@ pub fn build_client_troubleshoot(
                         .iter()
                         .any(|&zone_id| Some(zone_id) == source_zone || Some(zone_id) == dest_zone)
                 })
-                .cloned()
+                // A firewall policy's open field set is redacted, not
+                // allowlisted (see `crate::redact`'s module doc): a policy
+                // this server does not control the shape of can still carry
+                // a secret-named field in an operator's custom rule.
+                .map(|p| crate::redact::project_resource(ResourceKind::FirewallPolicy, p))
                 .collect();
 
             matching_policies
@@ -796,6 +829,12 @@ pub fn first_station_mac(stations: &serde_json::Value) -> Option<String> {
 }
 
 /// Join devices with their statistics by MAC address.
+///
+/// `devices` is projected through the [`ResourceKind::Device`] allowlist
+/// before the join, and the joined `stats` blob -- which has no allowlist of
+/// its own -- goes through the shared crate's denylist-and-shape scan, so
+/// neither side of the join can reintroduce a field the read path would have
+/// dropped.
 fn join_devices_with_stats(
     devices: &[serde_json::Value],
     stats: &[serde_json::Value],
@@ -803,14 +842,14 @@ fn join_devices_with_stats(
     devices
         .iter()
         .map(|device| {
-            let mut enriched = device.clone();
+            let mut enriched = crate::redact::project_resource(ResourceKind::Device, device);
             if let Some(mac) = device.get("macAddress").and_then(|v| v.as_str())
                 && let Some(stat) = stats
                     .iter()
                     .find(|s| s.get("mac").and_then(|v| v.as_str()) == Some(mac))
                 && let Some(obj) = enriched.as_object_mut()
             {
-                obj.insert("stats".to_owned(), stat.clone());
+                obj.insert("stats".to_owned(), crate::redact::redact_owned(stat));
             }
             enriched
         })
@@ -818,6 +857,10 @@ fn join_devices_with_stats(
 }
 
 /// Join clients with their statistics by MAC address.
+///
+/// Same treatment as [`join_devices_with_stats`]: `clients` is projected
+/// through the [`ResourceKind::Station`] allowlist before the join, and the
+/// joined `flowStats` blob goes through the denylist-and-shape scan.
 fn join_clients_with_stats(
     clients: &[serde_json::Value],
     stats: &[serde_json::Value],
@@ -825,14 +868,14 @@ fn join_clients_with_stats(
     clients
         .iter()
         .map(|client| {
-            let mut enriched = client.clone();
+            let mut enriched = crate::redact::project_resource(ResourceKind::Station, client);
             if let Some(mac) = client.get("macAddress").and_then(|v| v.as_str())
                 && let Some(stat) = stats
                     .iter()
                     .find(|s| s.get("mac").and_then(|v| v.as_str()) == Some(mac))
                 && let Some(obj) = enriched.as_object_mut()
             {
-                obj.insert("flowStats".to_owned(), stat.clone());
+                obj.insert("flowStats".to_owned(), crate::redact::redact_owned(stat));
             }
             enriched
         })

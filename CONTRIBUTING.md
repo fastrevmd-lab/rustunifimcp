@@ -1,6 +1,6 @@
 # Contributing to rustunifimcp
 
-Thanks for considering a contribution. `rustunifimcp` is the UniFi Network member of the [mechub](https://github.com/fastrevmd-lab) family of open-source, self-hosted network-security automation tooling. It is built **mecmcp-native**: authentication, transport, audit, policy, inventory, and change control all come from [`mecmcp`](https://github.com/mechubsec/mecmcp); this repo contributes the UniFi resource model, tool surface, and workflows. See [README.md](README.md) for what the server does and [CLAUDE.md](CLAUDE.md) for operational detail on the reference deployment.
+Thanks for considering a contribution. `rustunifimcp` is the UniFi Network member of the [mechub](https://github.com/mechubsec) family of open-source, self-hosted network-security automation tooling. It is built **mecmcp-native**: authentication, transport, audit, policy, inventory, and change control all come from [`mecmcp`](https://github.com/mechubsec/mecmcp); this repo contributes the UniFi resource model, tool surface, and workflows. See [README.md](README.md) for what the server does and [CLAUDE.md](CLAUDE.md) for operational detail on the reference deployment.
 
 ## Before you start
 

@@ -127,9 +127,9 @@ cheaply.
 
 | Tool | Notes |
 |---|---|
-| `unifi_list_resources` | `kind` = `firewall_policy \| firewall_zone \| firewall_group \| network \| wlan \| port_profile \| dhcp_reservation \| traffic_route \| radius_profile \| station \| device \| voucher \| …` |
+| `unifi_list_resources` | `kind` = `firewall_policy \| firewall_zone \| firewall_group \| firewall_rule \| network \| wlan \| port_profile \| port_forward \| dhcp_reservation \| static_route \| traffic_route \| radius_profile \| station \| device \| voucher \| …` |
 | `unifi_get_resource` | `kind`, `id` |
-| `unifi_query_stats` | `subject` = `site \| device \| client \| wlan \| flow`, plus a time window |
+| `unifi_query_stats` | `subject` = `site \| device \| client \| wlan \| flow \| event`, plus a time window |
 | `unifi_search` | Free-text across clients, devices, and sites |
 | `unifi_list_sites` | |
 

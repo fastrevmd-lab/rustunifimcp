@@ -22,7 +22,8 @@
       "mac": "02:00:00:02:01:03",
       "use_fixedip": true,
       "fixed_ip": "192.0.2.52",
-      "hostname": "client-03"
+      "hostname": "client-03",
+      "x_password": "EXAMPLE-802-1x-password-fake1"
     },
     {
       "_id": "00000000000000000000042f",

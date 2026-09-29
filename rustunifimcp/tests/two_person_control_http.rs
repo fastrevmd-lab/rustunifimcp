@@ -14,8 +14,9 @@
 //! hand-edited-store scenario the call-time check exists for) at a real,
 //! authenticated HTTP endpoint, and calls both tools end to end.
 
-use mecmcp_auth::{KnownNames, NoGrant, ScopeSet, TokenStoreFile};
+use mecmcp_auth::{KnownNames, ScopeSet, TokenStoreFile};
 use mecmcp_transport::{LimitsConfig, serve_router, test_client::McpClient};
+use rustunifimcp::grant::UnifiGrant;
 use rustunifimcp::server::UnifiServer;
 use rustunifimcp_core::inventory::ControllerRegistry;
 use rustunifimcp_core::tools::TOOL_NAMES;
@@ -50,7 +51,7 @@ fn mint_token(path: &std::path::Path, name: &str, tools: &[&str]) -> String {
         devices: None,
         tools: TOOL_NAMES,
     };
-    let secret = TokenStoreFile::<NoGrant>::add(
+    let secret = TokenStoreFile::<UnifiGrant>::add(
         path,
         name,
         ScopeSet::Wildcard,
@@ -64,13 +65,13 @@ fn mint_token(path: &std::path::Path, name: &str, tools: &[&str]) -> String {
 /// Start the real authenticated HTTP router on loopback and return its base
 /// URL plus the tasks to keep alive.
 async fn start_server(
-    token_store: Arc<TokenStoreFile<NoGrant>>,
+    token_store: Arc<TokenStoreFile<UnifiGrant>>,
 ) -> (String, CancellationToken, tokio::task::JoinHandle<()>) {
     start_server_with_lab_mode(token_store, false).await
 }
 
 async fn start_server_with_lab_mode(
-    token_store: Arc<TokenStoreFile<NoGrant>>,
+    token_store: Arc<TokenStoreFile<UnifiGrant>>,
     lab_mode: bool,
 ) -> (String, CancellationToken, tokio::task::JoinHandle<()>) {
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
@@ -83,7 +84,14 @@ async fn start_server_with_lab_mode(
         None,
     )
     .expect("coordinator");
-    let handler = UnifiServer::new(registry, lab_mode, coordinator, None).expect("server");
+    let handler = UnifiServer::new(
+        registry,
+        lab_mode,
+        coordinator,
+        None,
+        mecmcp_audit::DirectCommitPolicy::new(false),
+    )
+    .expect("server");
 
     let shutdown = CancellationToken::new();
     let plan = rustunifimcp::http_transport::build_http_router(
@@ -133,7 +141,7 @@ async fn a_token_with_both_scopes_is_refused_calling_stage_change() {
         "both-scopes",
         &["unifi_stage_change", "unifi_approve_change_set"],
     );
-    let store = Arc::new(TokenStoreFile::<NoGrant>::load(&tokens_path).expect("load store"));
+    let store = Arc::new(TokenStoreFile::<UnifiGrant>::load(&tokens_path).expect("load store"));
 
     let (base_url, shutdown, task) = start_server(store).await;
 
@@ -197,7 +205,7 @@ async fn lab_mode_does_not_refuse_a_combined_scope_token() {
         "lab-operator",
         &["unifi_stage_change", "unifi_approve_change_set"],
     );
-    let store = Arc::new(TokenStoreFile::<NoGrant>::load(&tokens_path).expect("load store"));
+    let store = Arc::new(TokenStoreFile::<UnifiGrant>::load(&tokens_path).expect("load store"));
 
     let (base_url, shutdown, task) = start_server_with_lab_mode(store, true).await;
 
@@ -257,7 +265,7 @@ async fn a_token_with_both_scopes_is_refused_calling_approve_change_set() {
         "both-scopes",
         &["unifi_stage_change", "unifi_approve_change_set"],
     );
-    let store = Arc::new(TokenStoreFile::<NoGrant>::load(&tokens_path).expect("load store"));
+    let store = Arc::new(TokenStoreFile::<UnifiGrant>::load(&tokens_path).expect("load store"));
 
     let (base_url, shutdown, task) = start_server(store).await;
 
@@ -316,7 +324,7 @@ async fn a_token_with_only_stage_scope_is_not_refused_by_two_person_control() {
     let tokens_dir = tempfile::tempdir().expect("tempdir");
     let tokens_path = tokens_dir.path().join("tokens.json");
     let bearer = mint_token(&tokens_path, "stager", &["unifi_stage_change"]);
-    let store = Arc::new(TokenStoreFile::<NoGrant>::load(&tokens_path).expect("load store"));
+    let store = Arc::new(TokenStoreFile::<UnifiGrant>::load(&tokens_path).expect("load store"));
 
     let (base_url, shutdown, task) = start_server(store).await;
 

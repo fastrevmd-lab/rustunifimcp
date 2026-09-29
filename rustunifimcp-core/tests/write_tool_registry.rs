@@ -23,13 +23,14 @@ fn the_write_tool_registry_holds_exactly_the_mutating_tools() {
     let mut actual: Vec<&str> = WRITE_TOOLS.to_vec();
     actual.sort_unstable();
 
-    // Phase 3 registers the two operational tools (`unifi_backup_action` and
-    // `unifi_run_speed_test` were removed as unwired stubs -- see MEC-505).
+    // Phase 3 registers the three operational tools (`unifi_run_speed_test`
+    // was removed as an unwired stub -- see MEC-505).
     // Phase 6 adds the seven change-set tools. Extend this list in the task
     // that adds them, never ahead of it -- a name here with no tool behind it
     // is not a guard.
     let mut expected = vec![
         "unifi_add_controller",
+        "unifi_backup_action",
         "unifi_client_action",
         "unifi_device_action",
         "unifi_create_change_set",
@@ -71,7 +72,7 @@ fn every_mutating_name_is_in_the_write_registry() {
     // Tools that match a verb but are genuinely read-only. Each entry must
     // carry a comment explaining why it is safe.
     const READ_ONLY_ALLOWLIST: &[&str] = &[
-        // None yet. The operational tools (`*_action`, `run_speed_test`) and
+        // None yet. The operational tools (`*_action`) and
         // `add_controller` are all genuine writes.
     ];
 

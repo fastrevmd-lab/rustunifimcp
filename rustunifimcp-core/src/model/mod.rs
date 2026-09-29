@@ -14,9 +14,11 @@ use crate::error::UnifiError;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+pub mod backup;
 pub mod device;
 pub mod firewall;
 pub mod network;
+pub mod portforward;
 pub mod routing;
 pub mod site;
 pub mod station;
@@ -70,6 +72,12 @@ pub enum ResourceKind {
     TrafficRoute,
     /// A RADIUS profile.
     RadiusProfile,
+    /// A legacy (non-zone-based) firewall rule.
+    FirewallRule,
+    /// A port forwarding rule.
+    PortForward,
+    /// A static route.
+    StaticRoute,
 }
 
 impl ResourceKind {
@@ -87,6 +95,9 @@ impl ResourceKind {
         Self::FirewallGroup,
         Self::TrafficRoute,
         Self::RadiusProfile,
+        Self::FirewallRule,
+        Self::PortForward,
+        Self::StaticRoute,
     ];
 
     /// Which API surface this kind is served from.
@@ -99,7 +110,10 @@ impl ResourceKind {
             | Self::PortProfile
             | Self::DhcpReservation
             | Self::FirewallGroup
-            | Self::RadiusProfile => ApiSurface::PrivateV1,
+            | Self::RadiusProfile
+            | Self::FirewallRule
+            | Self::PortForward
+            | Self::StaticRoute => ApiSurface::PrivateV1,
             Self::FirewallPolicy | Self::FirewallZone | Self::TrafficRoute => ApiSurface::PrivateV2,
         }
     }
@@ -119,6 +133,9 @@ impl ResourceKind {
             Self::FirewallPolicy => "/proxy/network/v2/api/site/{site}/firewall-policies",
             Self::FirewallZone => "/proxy/network/v2/api/site/{site}/firewall/zone",
             Self::TrafficRoute => "/proxy/network/v2/api/site/{site}/trafficroutes",
+            Self::FirewallRule => "/proxy/network/api/s/{site}/rest/firewallrule",
+            Self::PortForward => "/proxy/network/api/s/{site}/rest/portforward",
+            Self::StaticRoute => "/proxy/network/api/s/{site}/rest/routing",
         }
     }
 }

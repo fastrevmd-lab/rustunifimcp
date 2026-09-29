@@ -63,6 +63,8 @@ pub enum StatsSubject {
     Wlan,
     /// Per-flow statistics.
     Flow,
+    /// The controller event log.
+    Event,
 }
 
 /// Arguments to `unifi_query_stats`.
@@ -130,13 +132,14 @@ fn parse_resource_list(
 ) -> Result<serde_json::Value, UnifiError> {
     use crate::model::device::parse_devices;
     use crate::model::firewall::{
-        parse_firewall_groups, parse_firewall_policies, parse_firewall_zones,
+        parse_firewall_groups, parse_firewall_policies, parse_firewall_rules, parse_firewall_zones,
     };
     use crate::model::network::{
         parse_dhcp_reservations, parse_networks, parse_port_profiles, parse_radius_profiles,
         parse_wlans,
     };
-    use crate::model::routing::parse_traffic_routes;
+    use crate::model::portforward::parse_port_forwards;
+    use crate::model::routing::{parse_routes, parse_traffic_routes};
     use crate::model::station::parse_stations;
 
     match kind {
@@ -184,6 +187,18 @@ fn parse_resource_list(
             let parsed = parse_radius_profiles(raw)?;
             serde_json::to_value(parsed).map_err(|e| UnifiError::Malformed(e.to_string()))
         }
+        ResourceKind::FirewallRule => {
+            let parsed = parse_firewall_rules(raw)?;
+            serde_json::to_value(parsed).map_err(|e| UnifiError::Malformed(e.to_string()))
+        }
+        ResourceKind::PortForward => {
+            let parsed = parse_port_forwards(raw)?;
+            serde_json::to_value(parsed).map_err(|e| UnifiError::Malformed(e.to_string()))
+        }
+        ResourceKind::StaticRoute => {
+            let parsed = parse_routes(raw)?;
+            serde_json::to_value(parsed).map_err(|e| UnifiError::Malformed(e.to_string()))
+        }
     }
 }
 
@@ -225,8 +240,13 @@ pub async fn list_resources(
         .await?;
 
     let parsed = parse_resource_list(args.kind, &raw)?;
+    let paged = apply_page_if_upstream_ignored_it(surface, &page, parsed);
 
-    Ok(apply_page_if_upstream_ignored_it(surface, &page, parsed))
+    // Every resource kind is projected through its declared allowlist before
+    // it reaches the model, in addition to (not instead of) the narrowing the
+    // typed model parser already did. This is the explicit, testable
+    // guarantee: see `crate::redact`.
+    Ok(crate::redact::project_resource_list(args.kind, &paged))
 }
 
 /// Applies `offset`/`limit` locally on the surfaces that discard them.
@@ -273,13 +293,14 @@ fn parse_single_resource(
 ) -> Result<serde_json::Value, UnifiError> {
     use crate::model::device::parse_devices;
     use crate::model::firewall::{
-        parse_firewall_groups, parse_firewall_policies, parse_firewall_zones,
+        parse_firewall_groups, parse_firewall_policies, parse_firewall_rules, parse_firewall_zones,
     };
     use crate::model::network::{
         parse_dhcp_reservations, parse_networks, parse_port_profiles, parse_radius_profiles,
         parse_wlans,
     };
-    use crate::model::routing::parse_traffic_routes;
+    use crate::model::portforward::parse_port_forwards;
+    use crate::model::routing::{parse_routes, parse_traffic_routes};
     use crate::model::station::parse_stations;
 
     // A single-resource GET does not always answer in the collection's shape.
@@ -356,6 +377,18 @@ fn parse_single_resource(
             let parsed = parse_radius_profiles(raw)?;
             serde_json::to_value(parsed).map_err(|e| UnifiError::Malformed(e.to_string()))?
         }
+        ResourceKind::FirewallRule => {
+            let parsed = parse_firewall_rules(raw)?;
+            serde_json::to_value(parsed).map_err(|e| UnifiError::Malformed(e.to_string()))?
+        }
+        ResourceKind::PortForward => {
+            let parsed = parse_port_forwards(raw)?;
+            serde_json::to_value(parsed).map_err(|e| UnifiError::Malformed(e.to_string()))?
+        }
+        ResourceKind::StaticRoute => {
+            let parsed = parse_routes(raw)?;
+            serde_json::to_value(parsed).map_err(|e| UnifiError::Malformed(e.to_string()))?
+        }
     };
 
     // If parsing returned an array with one item, return that item; otherwise return as-is
@@ -402,7 +435,13 @@ pub async fn get_resource(
         .get(surface, &template, &[("site", site), ("id", &args.id)], &[])
         .await?;
 
-    parse_single_resource(args.kind, &raw)
+    let parsed = parse_single_resource(args.kind, &raw)?;
+    // `project_resource_list` rather than `project_resource`: `parsed` is
+    // normally a single object, but `parse_single_resource` falls back to
+    // returning an unreduced array for a shape it could not collapse to one
+    // item, and `project_many` handles both without dropping the array to
+    // `Null` the way a plain single-object projection would.
+    Ok(crate::redact::project_resource_list(args.kind, &parsed))
 }
 
 /// Query statistics for a subject.
@@ -433,6 +472,7 @@ pub async fn query_stats(
         StatsSubject::Station => "/proxy/network/api/s/{site}/stat/sta",
         StatsSubject::Wlan => "/proxy/network/api/s/{site}/stat/wlan",
         StatsSubject::Flow => "/proxy/network/api/s/{site}/stat/flow",
+        StatsSubject::Event => "/proxy/network/api/s/{site}/stat/event",
     };
 
     let mut query = Vec::new();
@@ -456,9 +496,10 @@ pub async fn query_stats(
 
     let data = crate::model::unwrap_enveloped_data(&raw)?.clone();
     let page = crate::tools::pagination::paginate(data, args.offset, args.limit)?;
+    let projected = project_stats(args.subject, &page.items)?;
 
     Ok(serde_json::json!({
-        "data": page.items,
+        "data": projected,
         "offset": page.offset,
         "limit": page.limit,
         "total": page.total,
@@ -570,6 +611,75 @@ async fn scan_and_filter<S: PagedSource>(
     })
 }
 
+/// Narrow a page of stats items to the fields the model may see.
+///
+/// `Device`, `Station`, and `Event` route through the typed models in
+/// `model::stats` -- an allowlist by construction, since a struct with no
+/// catch-all field silently drops anything it does not name. All three
+/// parsers expect an enveloped `{"data": [...]}` shape, so `items` (already
+/// sliced to the requested page by [`query_stats`]) is re-wrapped before
+/// parsing. `Event` in particular could not use the shared crate's
+/// denylist-and-shape scan the way `Site`/`Flow` below do: a UniFi event's
+/// type discriminator lives in a field literally named `key`
+/// (`"EVT_WU_Connected"`), which the scan denylists as an exact match to
+/// catch WireGuard/API keys named plainly elsewhere -- it would have stripped
+/// the one field that says what kind of event this is, on every event. The
+/// typed model instead renames it to `event_type` on the way out (see
+/// `model::stats::Event`), sidestepping the collision.
+///
+/// `Wlan` has no typed stats model, but `stat/wlan` answers with the same
+/// shape as the `wlanconf` resource merged with runtime counters, so it
+/// routes through `redact::project_resource_list(ResourceKind::Wlan, ..)` --
+/// the same allowlist the config read path uses -- rather than the
+/// denylist-and-shape scan: the scan alone cannot catch `x_iapp_key` (see the
+/// allowlist's doc comment), and this endpoint carries that field in every
+/// real response. Neither `Site` nor `Flow` has a comparable typed shape to
+/// project through (their fields are aggregate counters that vary by
+/// controller version), so those fall back to the shared crate's
+/// denylist-and-shape scan, the defensive net rather than the strong
+/// allowlist guarantee.
+fn project_stats(
+    subject: StatsSubject,
+    items: &[serde_json::Value],
+) -> Result<serde_json::Value, UnifiError> {
+    use crate::model::stats::{parse_device_stats, parse_events, parse_station_stats};
+
+    match subject {
+        StatsSubject::Device => {
+            let envelope = serde_json::json!({ "data": items });
+            let parsed = parse_device_stats(&envelope)?;
+            serde_json::to_value(parsed).map_err(|e| UnifiError::Malformed(e.to_string()))
+        }
+        StatsSubject::Station => {
+            let envelope = serde_json::json!({ "data": items });
+            let parsed = parse_station_stats(&envelope)?;
+            serde_json::to_value(parsed).map_err(|e| UnifiError::Malformed(e.to_string()))
+        }
+        StatsSubject::Event => {
+            let envelope = serde_json::json!({ "data": items });
+            let parsed = parse_events(&envelope)?;
+            let mut projected =
+                serde_json::to_value(parsed).map_err(|e| UnifiError::Malformed(e.to_string()))?;
+            // `msg` is unbounded controller free text (admin usernames,
+            // source IPs, client hostnames, SSIDs) that the typed model
+            // cannot narrow further without losing the description itself,
+            // so run it through the denylist-and-shape scan as defence in
+            // depth -- see `model::stats::Event`'s doc comment for why this
+            // kind cannot use the scan for its `key`/`event_type` field
+            // instead.
+            crate::redact::redact_in_place(&mut projected);
+            Ok(projected)
+        }
+        StatsSubject::Wlan => Ok(crate::redact::project_resource_list(
+            crate::model::ResourceKind::Wlan,
+            &serde_json::Value::Array(items.to_vec()),
+        )),
+        StatsSubject::Site | StatsSubject::Flow => Ok(crate::redact::redact_owned(
+            &serde_json::Value::Array(items.to_vec()),
+        )),
+    }
+}
+
 /// Search across stations, devices, and sites.
 ///
 /// Merges results from the Integration API's client and device endpoints and
@@ -618,7 +728,9 @@ pub async fn search(
     .await
     {
         Ok(result) => {
-            stations_results = result.items;
+            let envelope = serde_json::json!({ "data": result.items });
+            let parsed = crate::model::station::parse_stations(&envelope)?;
+            stations_results = to_value_vec(&parsed)?;
             if result.capped {
                 omitted.push(format!(
                     "stations: scanned first {SEARCH_SCAN_CAP} of \u{2265}{SEARCH_SCAN_CAP}; \
@@ -651,7 +763,9 @@ pub async fn search(
     .await
     {
         Ok(result) => {
-            devices_results = result.items;
+            let envelope = serde_json::json!({ "data": result.items });
+            let parsed = crate::model::device::parse_devices(&envelope)?;
+            devices_results = to_value_vec(&parsed)?;
             if result.capped {
                 omitted.push(format!(
                     "devices: scanned first {SEARCH_SCAN_CAP} of \u{2265}{SEARCH_SCAN_CAP}; \
@@ -681,8 +795,9 @@ pub async fn search(
         .await
     {
         Ok(sites) => {
-            let sites_data = crate::model::unwrap_enveloped_data(&sites)?;
-            sites_results = filter_by_query(sites_data, &args.query, limit as usize);
+            let parsed = crate::model::site::parse_sites(&sites)?;
+            let values = to_value_vec(&parsed)?;
+            sites_results = filter_by_query(&values, &args.query, limit as usize);
         }
         Err(UnifiError::SurfaceRequiresConfig { .. }) => {
             omitted.push("sites: controller has allow_private_api disabled".to_owned());
@@ -716,6 +831,19 @@ pub async fn search(
     Ok(results)
 }
 
+/// Serialize a `Vec<T>` of parsed, typed resources to a `Vec<Value>`.
+///
+/// `unifi_search` filters on the JSON rendering of each item, and it must
+/// filter on the same narrowed shape `unifi_list_resources` returns -- the
+/// typed model, not the raw controller payload it was fetched from -- or a
+/// search result carries fields the equivalent list call would have dropped.
+fn to_value_vec<T: serde::Serialize>(items: &[T]) -> Result<Vec<serde_json::Value>, UnifiError> {
+    items
+        .iter()
+        .map(|item| serde_json::to_value(item).map_err(|e| UnifiError::Malformed(e.to_string())))
+        .collect()
+}
+
 /// Filter results by a query string.
 fn filter_by_query(
     items: &[serde_json::Value],
@@ -744,14 +872,20 @@ pub async fn list_sites(
     client: &UnifiClient,
     _args: &ListSitesArgs,
 ) -> Result<serde_json::Value, UnifiError> {
-    client
+    let raw = client
         .get(
             ApiSurface::Supported,
             "/proxy/network/integration/v1/sites",
             &[],
             &[],
         )
-        .await
+        .await?;
+
+    // Routed through the typed `Site` model rather than returned as the raw
+    // controller payload: `Site` names only `id`, `internalReference`, and
+    // `name`, which is itself an allowlist by construction.
+    let parsed = crate::model::site::parse_sites(&raw)?;
+    serde_json::to_value(parsed).map_err(|e| UnifiError::Malformed(e.to_string()))
 }
 
 #[cfg(test)]
@@ -869,6 +1003,68 @@ mod tests {
         let parsed: super::QueryStatsArgs = serde_json::from_str(raw).expect("valid args");
         assert_eq!(parsed.offset, Some(40));
         assert_eq!(parsed.limit, Some(20));
+    }
+
+    /// `unifi_query_stats(subject=event)` reaches the controller event log.
+    #[test]
+    fn query_stats_args_accepts_the_event_subject() {
+        let raw = r#"{"controller":"home","subject":"event"}"#;
+        let parsed: super::QueryStatsArgs = serde_json::from_str(raw).expect("valid args");
+        assert_eq!(parsed.subject, super::StatsSubject::Event);
+    }
+
+    /// The controller event log must reach the model through the typed
+    /// `model::stats::Event` parser, which renames the controller's `key`
+    /// field to `event_type` -- a field literally named `key` would be
+    /// redacted by the shared crate's denylist scan (see that struct's doc
+    /// comment), so a bare pass-through here would silently drop the one
+    /// field that says what kind of event this is.
+    #[test]
+    fn event_stats_survive_projection_with_the_key_field_renamed() {
+        use crate::testing::{DEFAULT_FIXTURE_VERSION, fixture};
+
+        let raw = fixture(DEFAULT_FIXTURE_VERSION, "stat_event");
+        let data = crate::model::unwrap_enveloped_data(&raw)
+            .expect("envelope")
+            .clone();
+
+        let projected =
+            super::project_stats(super::StatsSubject::Event, &data).expect("project events");
+        let rendered = projected.to_string();
+        assert!(
+            rendered.contains("EVT_WU_Connected"),
+            "the event's type must survive projection"
+        );
+        assert_eq!(
+            projected[0]["event_type"], "EXAMPLE-EVT_WU_Connected",
+            "the controller's `key` field must be renamed to `event_type`"
+        );
+        assert!(
+            projected[0].get("key").is_none(),
+            "the output must not carry a field literally named `key`"
+        );
+    }
+
+    /// `msg` is unbounded controller free text the typed `Event` model
+    /// cannot narrow further, so it must still go through the
+    /// denylist-and-shape scan as defence in depth (Percy's F3): a
+    /// secret-shaped value embedded in the message must not survive.
+    #[test]
+    fn event_msg_is_scanned_for_secret_shaped_content() {
+        use crate::testing::{DEFAULT_FIXTURE_VERSION, fixture};
+
+        let raw = fixture(DEFAULT_FIXTURE_VERSION, "stat_event");
+        let data = crate::model::unwrap_enveloped_data(&raw)
+            .expect("envelope")
+            .clone();
+
+        let projected =
+            super::project_stats(super::StatsSubject::Event, &data).expect("project events");
+        let rendered = projected.to_string();
+        assert!(
+            !rendered.contains("EXAMPLE-event-secret-fake1-AQ=="),
+            "a secret-shaped value in `msg` leaked through unscanned: {rendered}"
+        );
     }
 
     /// Search result shape must include partial and omitted fields.
@@ -1083,6 +1279,9 @@ mod tests {
                     ResourceKind::FirewallPolicy => "policies",
                     ResourceKind::FirewallZone => "zones",
                     ResourceKind::TrafficRoute => "traffic_routes",
+                    ResourceKind::FirewallRule => "firewallrule",
+                    ResourceKind::PortForward => "portforward",
+                    ResourceKind::StaticRoute => "routing",
                 };
 
                 if is_absent(&version, fixture_name) {

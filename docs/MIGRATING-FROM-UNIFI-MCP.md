@@ -49,7 +49,7 @@ named gap.
 
 ### Reached through read primitives and workflows instead of directly
 
-The 21-tool surface collapses ~130 legacy tools. **5 read primitives** take a
+The 22-tool surface collapses ~130 legacy tools. **5 read primitives** take a
 `kind` enum; **4 workflows** return aggregated data; the rest are admin,
 operational, and change-set tools.
 
@@ -67,7 +67,7 @@ operational, and change-set tools.
 | `search_devices` | `unifi_search` |
 | `list_port_profiles` | `unifi_list_resources kind=port_profile` |
 | `get_device_details` | `unifi_get_resource kind=device` |
-| `execute_port_action` | none — see "No equivalent, by decision" below |
+| `execute_port_action` | `unifi_device_action action=port_action` — PoE power-cycle only, behind `--allow-direct-commit`; port enable/disable is a configuration change and goes through the change-set lifecycle |
 | `list_firewall_zones_v2` | `unifi_list_resources kind=firewall_zone` |
 | `get_device_by_mac` | `unifi_search` or `unifi_get_resource kind=device` |
 | `get_port_profile` | `unifi_get_resource kind=port_profile` |
@@ -101,9 +101,9 @@ Configuration writes (6 tools, 6 calls) are **gap (accepted)** until Phase 6:
 |---|---|
 | `restore` action in the legacy backup tool | **None.** Overwrites the entire controller configuration, so it is governed by the change-set lifecycle from Phase 6, not an operational action. |
 | `unifi_add_controller` | **Returns a hand-edit instruction.** `/etc/unifimcp` is read-only to the service under `ProtectSystem=strict`, and the fleet prefers a narrow sandbox over a working `add_*` tool. |
-| `adopt`, `upgrade` device actions | **Not in the advertised catalog.** The controller returns `{"meta":{"rc":"ok"}}` for commands that do not exist (verified live — it validates the device but not the command), so a guessed spelling would look like success. `unifi_device_action`'s action enum only admits `restart` and `locate`, the two with a confirmed spelling; the rest stay out until confirmed rather than shipping as a silent no-op. |
-| `authorize`, `limit_bandwidth` client actions | Same reasoning — `unifi_client_action`'s action enum only admits `block`, `unblock`, `reconnect`. |
-| Backup trigger/list/download/validate, and the speed test | **No tool at all.** These shipped briefly as `unifi_backup_action` and `unifi_run_speed_test` but always returned an error for every action — no endpoint spelling has been verified from a live controller. Removed rather than left advertised and non-functional; see `docs/PARITY-AUDIT.md` for what would need to be confirmed before either is reintroduced. |
+| `authorize`, `limit_bandwidth` client actions | **Not in the advertised catalog.** The controller returns `{"meta":{"rc":"ok"}}` for commands that do not exist (verified live — it validates the client but not the command), so a guessed spelling would look like success. `unifi_client_action`'s action enum only admits `block`, `unblock`, `reconnect`; the rest stay out until confirmed rather than shipping as a silent no-op. |
+| Backup download/validate | **Not offered.** `unifi_backup_action` admits only `list` and `trigger`; `download` and `validate` would move a raw `.unf` file rather than JSON, which this server does not support, and no `validate` command is confirmed on the controller at all. |
+| Speed test | **No tool at all.** `unifi_run_speed_test` shipped briefly but always returned an error — no endpoint spelling has been verified from a live controller. Removed rather than left advertised and non-functional; see `docs/PARITY-AUDIT.md` for what would need to be confirmed before it is reintroduced. |
 
 ### Here but not there
 
@@ -111,16 +111,17 @@ Configuration writes (6 tools, 6 calls) are **gap (accepted)** until Phase 6:
 `unifi_query_stats` · `unifi_search` · `unifi_site_health_report` ·
 `unifi_topology_report` · `unifi_traffic_flow_report` ·
 `unifi_client_troubleshoot` · `unifi_device_action` · `unifi_client_action` ·
-`unifi_add_controller` · `unifi_list_controllers` · `unifimcp_status` ·
+`unifi_backup_action` · `unifi_add_controller` · `unifi_list_controllers` · `unifimcp_status` ·
 plus the seven-tool change-set lifecycle (Phase 6).
 
 ## Before you cut over
 
 1. **Name every tool in the token scope.** `tools: ["*"]` deliberately
    **excludes mutating tools**, so a wildcard token reaches only 11 of the
-   21-tool surface: the 5 read primitives, 2 admin tools (`unifi_list_controllers`,
+   22-tool surface: the 5 read primitives, 2 admin tools (`unifi_list_controllers`,
    `unifimcp_status` — `unifi_add_controller` is a write), and 4 workflows.
-   **`unifi_device_action` and every change-set tool require explicit grants.**
+   **The three operational tools (`unifi_device_action`, `unifi_client_action`,
+   `unifi_backup_action`) and every change-set tool require explicit grants.**
    Use `token set-scopes --name N --tools ...` — it changes scopes without
    reissuing the secret.
 2. **Grant the action tiers you need.** `read`, `low`, `destructive`. A grant
@@ -160,7 +161,7 @@ primitive or workflow.
   a Let's Encrypt certificate for exactly this reason.
 
 - **A wildcard token is read-only.** `tools: ["*"]` grants no mutating tool.
-  Verified live: a wildcard token sees 11 of 21 tools, cannot see
+  Verified live: a wildcard token sees 11 of 22 tools, cannot see
   `unifi_device_action` in `tools/list`, and its invocation does not flash an
   AP's locate LED — while an explicitly-scoped operator token does. The legacy
   server has no equivalent: anything that can reach its port has unrestricted

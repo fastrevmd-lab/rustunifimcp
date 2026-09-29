@@ -90,6 +90,9 @@ fn writable_fields(kind: ResourceKind) -> Option<&'static [&'static str]> {
             "logging",
         ]),
         ResourceKind::TrafficRoute => Some(&["name"]),
+        // MEC-509 added these as read-only kinds; no write route exists for
+        // them yet, same posture as `Station`/`Device` above.
+        ResourceKind::FirewallRule | ResourceKind::PortForward | ResourceKind::StaticRoute => None,
     }
 }
 

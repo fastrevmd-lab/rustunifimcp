@@ -54,11 +54,12 @@ separate decision for its owner.
 
 Parity against the legacy surface is recorded in
 [`docs/PARITY-AUDIT.md`](docs/PARITY-AUDIT.md): of 33 legacy tools in the usage
-window, 31 are covered and verified against the live controller, and two are
-accepted gaps (`set_device_port_overrides` — no verified write route on
-10.5.67 — and `execute_port_action`, removed from the advertised catalog
-because no command spelling has been confirmed from a live controller without
-disrupting a switch port in use).
+window, 31 are covered and verified against the live controller, one is
+built but unverified (`execute_port_action`, reachable as
+`unifi_device_action action=port_action` — PoE power-cycle only, behind
+`--allow-direct-commit`, and not exercised live because it would disrupt a
+switch port in use), and one is an accepted gap (`set_device_port_overrides`
+— no verified write route on 10.5.67).
 
 | Document | What it is |
 |---|---|
@@ -75,16 +76,45 @@ API client with two problems this project exists to fix.
 
 **Tool sprawl.** Its registry auto-registers every public async function in
 `src/tools/` by reflection — 205 functions across 37 modules become roughly
-**270 MCP tools**. Nobody chose that number. `rustunifimcp` targets **21**:
+**270 MCP tools**. Nobody chose that number. `rustunifimcp` targets **22**:
 typed read primitives over a resource enum, a change-control lifecycle, scoped
 operational actions, and four workflows that earn their names. Every one of
-the 21 does real work end to end — none is advertised and then refuses or
+the 22 does real work end to end — none is advertised and then refuses or
 returns an empty result on every call.
 
 **No MCP-layer security.** It listens on plain HTTP with no bearer token, no
 scopes, no audit trail, and no rate limiting. Anything that can reach the port
 has unrestricted write access to the controller. `rustunifimcp` inherits the
 full `mecmcp` security layer instead.
+
+## Tool catalog
+
+The read primitives, the collapsed surface behind `unifi_list_resources` and
+`unifi_get_resource`. Every `kind` is projected through the allowlist or scan
+documented in `rustunifimcp-core::redact` before it reaches the model — see
+[Design highlights](#design-highlights) below.
+
+| Tool | Notes |
+|---|---|
+| `unifi_list_resources` | `kind` = `station \| device \| network \| wlan \| port_profile \| dhcp_reservation \| firewall_policy \| firewall_zone \| firewall_group \| firewall_rule \| port_forward \| static_route \| traffic_route \| radius_profile` |
+| `unifi_get_resource` | `kind`, `id` |
+| `unifi_query_stats` | `subject` = `site \| device \| station \| wlan \| flow \| event`, plus a time window |
+| `unifi_search` | Free-text across stations, devices, and sites |
+| `unifi_list_sites` | |
+
+`firewall_rule`, `port_forward`, and `static_route` (MEC-509) are the legacy
+(non-zone-based) ruleset, port forwarding rules, and static routes —
+read-only for now; no write route exists for them through
+`unifi_stage_change`. `subject=event` reaches the controller's event log.
+
+`unifi_backup_action` (MEC-516) wires `list` and `trigger`: `list` returns
+the controller's retained backups, capped at 100 entries with a `truncated`
+marker like every other list-shaped tool; `trigger` starts a new backup.
+`download` and `validate` are not offered at all (MEC-505: removed from the
+action enum rather than advertised and refused) — both would need to move a
+raw `.unf` file rather than JSON, which this server does not yet support.
+`restore` is refused permanently; restoring a backup overwrites the entire
+configuration, so it goes through the change-set lifecycle instead.
 
 ## Design highlights
 

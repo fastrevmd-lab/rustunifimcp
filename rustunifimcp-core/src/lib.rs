@@ -13,6 +13,7 @@ pub mod client;
 pub mod error;
 pub mod inventory;
 pub mod model;
+pub mod redact;
 pub mod testing;
 pub mod tools;
 pub mod version;

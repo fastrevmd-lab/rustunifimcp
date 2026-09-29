@@ -1,14 +1,16 @@
 //! The MCP tool surface.
 //!
-//! 21 tools, against roughly 270 on the server this replaces. The shape
+//! 22 tools, against roughly 270 on the server this replaces. The shape
 //! follows the mechub family: typed primitives, a change-control lifecycle, and
 //! a small number of workflows that earn their names.
 //!
-//! Every tool here does real work end to end. `unifi_backup_action`,
-//! `unifi_run_speed_test`, and `unifi_firewall_audit` used to be advertised
-//! alongside these but always returned an error or an empty result — removed
-//! rather than left half-implemented. See `docs/MIGRATING-FROM-UNIFI-MCP.md`
-//! for what each would need before it could ship.
+//! Every tool here does real work end to end. `unifi_run_speed_test` and
+//! `unifi_firewall_audit` used to be advertised alongside these but always
+//! returned an error or an empty result — removed rather than left
+//! half-implemented, as were the unwired sub-actions of the operational
+//! tools (`authorize`, `limit_bandwidth`, backup `download`/`validate`). See
+//! `docs/MIGRATING-FROM-UNIFI-MCP.md` for what each would need before it
+//! could ship.
 
 pub mod admin;
 pub mod changeset;
@@ -32,9 +34,10 @@ pub const TOOL_NAMES: &[&str] = &[
     "unifi_list_controllers",
     "unifi_add_controller",
     "unifimcp_status",
-    // Operations (2)
+    // Operations (3)
     "unifi_device_action",
     "unifi_client_action",
+    "unifi_backup_action",
     // Workflows (4)
     "unifi_site_health_report",
     "unifi_topology_report",
@@ -63,6 +66,7 @@ pub const WRITE_TOOLS: &[&str] = &[
     // Phase 3 — operational actions
     "unifi_device_action",
     "unifi_client_action",
+    "unifi_backup_action",
     // Phase 6 — change-set lifecycle
     "unifi_create_change_set",
     "unifi_stage_change",
