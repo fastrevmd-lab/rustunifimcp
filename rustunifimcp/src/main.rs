@@ -13,6 +13,60 @@ use rustunifimcp::server::UnifiServer;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
+/// The two tools whose combination on one token defeats two-person control:
+/// a token holding both could stage and approve the same change set.
+///
+/// Refused here at issuance. `UnifiServer::holds_combined_two_person_control_scope`
+/// re-checks the same combination at call time, because a token store loaded
+/// from a hand-edited file never went through this check at all.
+const TWO_PERSON_CONTROL_TOOLS: (&str, &str) = ("unifi_stage_change", "unifi_approve_change_set");
+
+/// Refuse minting or widening a token whose tool scope would combine both
+/// change-set control tools.
+///
+/// # Errors
+/// Returns an error naming both tools if `tools` contains both.
+fn reject_combined_two_person_control_scope(tools: &[String]) -> Result<()> {
+    let (stage, approve) = TWO_PERSON_CONTROL_TOOLS;
+    let has = |name: &str| tools.iter().any(|t| t == name);
+    if has(stage) && has(approve) {
+        bail!(
+            "refusing to grant a token both `{stage}` and `{approve}`: two-person control \
+             requires the staging and approving tokens to differ. Issue separate tokens."
+        );
+    }
+    Ok(())
+}
+
+/// Refuse a token command that would mint or widen a token combining both
+/// change-set control scopes.
+///
+/// This is the single point `run_inner` calls before dispatching a `token`
+/// subcommand, so a test driving it through [`TokenCli::parse_from`] exercises
+/// exactly the check that stands between argv and the token store -- including
+/// clap's comma-splitting of `--tools` -- rather than the helper function in
+/// isolation.
+///
+/// # Errors
+/// As [`reject_combined_two_person_control_scope`].
+fn validate_token_command(command: &TokenCommand) -> Result<()> {
+    match command {
+        TokenCommand::Add {
+            allow_self_approval: true,
+            ..
+        }
+        | TokenCommand::SetScope {
+            allow_self_approval: true,
+            ..
+        } => Ok(()),
+        TokenCommand::Add { tools, .. } => reject_combined_two_person_control_scope(tools),
+        TokenCommand::SetScope {
+            tools: Some(tools), ..
+        } => reject_combined_two_person_control_scope(tools),
+        _ => Ok(()),
+    }
+}
+
 /// Convert `TokenCommand` to `TokenAction`.
 ///
 /// UniFi uses `NoGrant`, so no vendor grant is built.
@@ -27,6 +81,7 @@ fn token_command_to_action(command: TokenCommand) -> (TokenAction, Option<NoGran
             provider_tier,
             on_behalf_of,
             actor_type,
+            allow_self_approval: _,
             server_pid,
         } => (
             TokenAction::Add {
@@ -73,6 +128,7 @@ fn token_command_to_action(command: TokenCommand) -> (TokenAction, Option<NoGran
             devices,
             tools,
             yes,
+            allow_self_approval: _,
             server_pid,
         } => (
             TokenAction::SetScopes {
@@ -372,6 +428,8 @@ async fn run_inner() -> Result<()> {
             .chain(args.iter().skip(2).cloned())
             .collect::<Vec<_>>();
         let token_cli = TokenCli::parse_from(token_args);
+
+        validate_token_command(&token_cli.command)?;
 
         // Install a subscriber before dispatching. `run_with_grant` emits the
         // scope change as a `target: "audit"` event, and this path returns
@@ -962,6 +1020,7 @@ mod tests {
             provider_tier: None,
             on_behalf_of: None,
             actor_type: None,
+            allow_self_approval: false,
             server_pid: None,
         };
 
@@ -971,6 +1030,99 @@ mod tests {
             TokenAction::Add { name, .. } => assert_eq!(name, "test"),
             _ => panic!("expected TokenAction::Add"),
         }
+    }
+
+    /// A token minted with both `unifi_stage_change` and
+    /// `unifi_approve_change_set` in its tool scope could stage and approve
+    /// the same change set alone, defeating two-person control. Issuance
+    /// must refuse it rather than depend on the operational convention in
+    /// CLAUDE.md that nothing enforced.
+    #[test]
+    fn minting_a_token_with_both_changeset_control_scopes_is_refused() {
+        let error = reject_combined_two_person_control_scope(&[
+            "unifi_stage_change".to_string(),
+            "unifi_approve_change_set".to_string(),
+        ])
+        .expect_err("both scopes on one token must be refused");
+        let message = error.to_string();
+        assert!(message.contains("unifi_stage_change"), "{message}");
+        assert!(message.contains("unifi_approve_change_set"), "{message}");
+    }
+
+    /// Holding only one of the two scopes -- the normal case -- must not be
+    /// refused, and neither must an unrelated tool list.
+    #[test]
+    fn minting_a_token_with_only_one_changeset_control_scope_is_allowed() {
+        reject_combined_two_person_control_scope(&["unifi_stage_change".to_string()])
+            .expect("staging alone must be permitted");
+        reject_combined_two_person_control_scope(&["unifi_approve_change_set".to_string()])
+            .expect("approving alone must be permitted");
+        reject_combined_two_person_control_scope(&["unifi_get_change_set".to_string()])
+            .expect("an unrelated tool must be permitted");
+    }
+
+    /// Drives the refusal through the same entry point `run_inner` calls --
+    /// `TokenCli::parse_from` followed by `validate_token_command` -- rather
+    /// than calling `reject_combined_two_person_control_scope` directly. That
+    /// distinction matters: this is the only test that would notice if
+    /// `run_inner` ever stopped calling `validate_token_command`, or if clap's
+    /// `--tools` comma-splitting ever changed shape.
+    #[test]
+    fn token_add_cli_with_both_changeset_control_scopes_in_one_tools_flag_is_refused() {
+        let cli = TokenCli::parse_from([
+            "rustunifimcp",
+            "add",
+            "--tokens-file",
+            "/tmp/tokens.json",
+            "--name",
+            "test",
+            "--devices",
+            "*",
+            "--tools",
+            "unifi_stage_change,unifi_approve_change_set",
+        ]);
+        let error = validate_token_command(&cli.command)
+            .expect_err("both scopes on one token must be refused");
+        let message = error.to_string();
+        assert!(message.contains("unifi_stage_change"), "{message}");
+        assert!(message.contains("unifi_approve_change_set"), "{message}");
+    }
+
+    /// The same refusal must apply when widening an existing token's scope
+    /// with `set-scope --tools`, not just at initial `add` time.
+    #[test]
+    fn token_set_scope_cli_with_both_changeset_control_scopes_is_refused() {
+        let cli = TokenCli::parse_from([
+            "rustunifimcp",
+            "set-scope",
+            "--tokens-file",
+            "/tmp/tokens.json",
+            "--name",
+            "test",
+            "--tools",
+            "unifi_stage_change,unifi_approve_change_set",
+            "--yes",
+        ]);
+        validate_token_command(&cli.command)
+            .expect_err("widening a token to both scopes must be refused");
+    }
+
+    /// `set-scope` with `--tools` omitted (leaving the existing scope
+    /// unchanged) must not be refused -- there is nothing to check.
+    #[test]
+    fn token_set_scope_cli_without_tools_is_allowed() {
+        let cli = TokenCli::parse_from([
+            "rustunifimcp",
+            "set-scope",
+            "--tokens-file",
+            "/tmp/tokens.json",
+            "--name",
+            "test",
+            "--devices",
+            "*",
+            "--yes",
+        ]);
+        validate_token_command(&cli.command).expect("no --tools means nothing to validate");
     }
 
     #[test]
@@ -1028,6 +1180,7 @@ mod tests {
             devices: Some(vec!["*".to_string()]),
             tools: Some(vec!["*".to_string()]),
             yes: false,
+            allow_self_approval: false,
             server_pid: None,
         };
 
