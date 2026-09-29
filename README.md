@@ -103,6 +103,14 @@ documented in `rustunifimcp-core::redact` before it reaches the model — see
 read-only for now; no write route exists for them through
 `unifi_stage_change`. `subject=event` reaches the controller's event log.
 
+`unifi_backup_action` (MEC-516) wires `list` and `trigger`: `list` returns
+the controller's retained backups, capped at 100 entries with a `truncated`
+marker like every other list-shaped tool; `trigger` starts a new backup.
+`download` and `validate` remain refused — both would need to move a raw
+`.unf` file rather than JSON, which this server does not yet support.
+`restore` is refused permanently; restoring a backup overwrites the entire
+configuration, so it goes through the change-set lifecycle instead.
+
 ## Design highlights
 
 **Three API surfaces, each labelled.** UniFi's supported Integration API is far

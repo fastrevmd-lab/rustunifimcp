@@ -1207,7 +1207,7 @@ impl UnifiServer {
 
     #[tool(
         name = "unifi_backup_action",
-        description = "Execute a backup action (trigger, list, download, validate). `restore` is not an operational action — it is governed by the change-set lifecycle (Phase 6): `unifi_create_change_set` -> `unifi_stage_change` -> `unifi_approve_change_set` -> `unifi_apply_change_set`."
+        description = "Execute a backup action (trigger, list). `download` and `validate` are not wired yet. `trigger` starts an asynchronous, non-idempotent job on the controller: if the request times out, do not retry it, since the controller may still complete the job and a retry can leave duplicate backup files behind. `restore` is not an operational action — it is governed by the change-set lifecycle (Phase 6): `unifi_create_change_set` -> `unifi_stage_change` -> `unifi_approve_change_set` -> `unifi_apply_change_set`."
     )]
     async fn unifi_backup_action(
         &self,

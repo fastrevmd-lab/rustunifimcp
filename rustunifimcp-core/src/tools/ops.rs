@@ -453,8 +453,10 @@ impl BackupActionArgs {
     /// # Errors
     ///
     /// Returns [`crate::error::UnifiError::Malformed`] if `download` or
-    /// `validate` was requested without a `backup_file`.
+    /// `validate` was requested without a `backup_file`, or if `site` is not
+    /// a valid site identifier.
     pub fn validate(&self) -> Result<(), crate::error::UnifiError> {
+        validate_site(&self.site)?;
         if matches!(self.action, BackupAction::Download | BackupAction::Validate)
             && self.backup_file.is_none()
         {
@@ -464,6 +466,65 @@ impl BackupActionArgs {
             )));
         }
         Ok(())
+    }
+}
+
+/// Largest number of backup entries returned by `unifi_backup_action
+/// action=list` before truncation.
+///
+/// A real controller's retained backup count is small (typically a handful,
+/// bounded by its own retention setting), so this is generous headroom
+/// rather than a tight limit.
+const MAX_BACKUP_ITEMS: usize = 100;
+
+/// A capped list, reporting how many were shown of how many there were.
+///
+/// Local equivalent of `mecmcp_server::truncate_items` (MEC-513, mecmcp#443).
+/// `rustunifimcp` does not yet depend on the commit that introduced it:
+/// pinning to it would also pull in roughly thirty unrelated upstream
+/// commits since the last tagged `mecmcp-server` release (OpenTelemetry
+/// audit export, SBOM/cosign release workflows, credential lifetime
+/// tracking, changeset file locking, redact denylist changes), which is a
+/// larger dependency-surface change than this backups feature should carry.
+/// Shaped identically to the upstream type so adopting it later, once it is
+/// tagged, is a mechanical swap rather than a rewrite.
+struct TruncatedBackups<T> {
+    /// At most `MAX_BACKUP_ITEMS` elements, in original order.
+    items: Vec<T>,
+    /// Whether any elements were omitted.
+    truncated: bool,
+    /// `items.len()` — how many are in this result.
+    shown: usize,
+    /// How many elements were in the input before truncation.
+    total: usize,
+}
+
+impl<T> TruncatedBackups<T> {
+    /// A caller-facing marker, e.g. `"truncated: 10 of 42 shown"`.
+    fn marker(&self) -> Option<String> {
+        self.truncated
+            .then(|| format!("truncated: {} of {} shown", self.shown, self.total))
+    }
+}
+
+/// Cap `items` at [`MAX_BACKUP_ITEMS`] elements.
+fn truncate_backups<T>(mut items: Vec<T>) -> TruncatedBackups<T> {
+    let total = items.len();
+    if total <= MAX_BACKUP_ITEMS {
+        return TruncatedBackups {
+            items,
+            truncated: false,
+            shown: total,
+            total,
+        };
+    }
+    items.truncate(MAX_BACKUP_ITEMS);
+    let shown = items.len();
+    TruncatedBackups {
+        items,
+        truncated: true,
+        shown,
+        total,
     }
 }
 
@@ -903,23 +964,80 @@ pub async fn client_action(
 
 /// Execute a backup action on the controller.
 ///
-/// This implements trigger, list, download, and validate. `restore` is not
-/// available here — restoring a controller backup overwrites the entire
-/// configuration, so it goes through change control in Phase 6.
+/// Wired actions: `list` (`cmd/backup` `list-backups`, capped at
+/// [`MAX_BACKUP_ITEMS`] and reporting a truncation marker like every other
+/// list-shaped tool) and `trigger` (`cmd/backup` `backup`, requesting `days:
+/// 0` so the controller builds a config-only backup rather than the largest,
+/// slowest full-history one). `trigger` is not idempotent: it starts an
+/// asynchronous job on the controller, and a request that times out on the
+/// client side does not mean the job stopped. Retrying after a timeout can
+/// leave multiple backup files behind; callers must not retry `trigger`
+/// automatically. `download` and `validate` remain unwired: both would need
+/// to move a raw `.unf` file rather than JSON, which `UnifiClient` does not
+/// support today, and there is no independent evidence for a `validate`
+/// command on the controller at all. `restore` is not available here —
+/// restoring a controller backup overwrites the entire configuration, so it
+/// goes through change control in Phase 6.
 ///
 /// # Errors
 ///
-/// Returns [`crate::error::Malformed`] if `download` or `validate` is requested
-/// without a `backup_file`, or because backup operations are not yet wired.
+/// Returns [`crate::error::UnifiError::Malformed`] if `download` or
+/// `validate` is requested without a `backup_file`, or because `download`
+/// and `validate` are not yet wired.
 pub async fn backup_action(
     args: BackupActionArgs,
-    _client: &crate::client::UnifiClient,
+    client: &crate::client::UnifiClient,
 ) -> Result<serde_json::Value, crate::error::UnifiError> {
     args.validate()?;
 
-    Err(crate::error::UnifiError::Malformed(
-        "backup actions not yet wired; no endpoint spellings verified from controller".to_owned(),
-    ))
+    let site = args
+        .site
+        .as_deref()
+        .unwrap_or_else(|| client.default_site());
+
+    match args.action {
+        BackupAction::List => {
+            let raw = client
+                .post(
+                    crate::ApiSurface::PrivateV1,
+                    "/proxy/network/api/s/{site}/cmd/backup",
+                    &[("site", site)],
+                    &[],
+                    &serde_json::json!({"cmd": "list-backups"}),
+                )
+                .await?;
+
+            let backups = crate::model::backup::parse_backups(&raw)?;
+            let page = truncate_backups(backups);
+
+            Ok(serde_json::json!({
+                "backups": page.items,
+                "shown": page.shown,
+                "total": page.total,
+                "truncated": page.truncated,
+                "marker": page.marker(),
+            }))
+        }
+        BackupAction::Trigger => {
+            client
+                .post(
+                    crate::ApiSurface::PrivateV1,
+                    "/proxy/network/api/s/{site}/cmd/backup",
+                    &[("site", site)],
+                    &[],
+                    &serde_json::json!({"cmd": "backup", "days": 0}),
+                )
+                .await
+        }
+        BackupAction::Download | BackupAction::Validate => {
+            Err(crate::error::UnifiError::Malformed(format!(
+                "action `{:?}` not yet wired: it would transfer a raw backup file, which \
+                 UnifiClient does not support, and no endpoint spelling for it is verified \
+                 from a controller",
+                args.action
+            )))
+        }
+    }
 }
 
 /// Run a speed test from the controller.
@@ -1258,6 +1376,74 @@ mod tests {
                 action
             );
         }
+    }
+
+    /// `backup_action` now dispatches `list`/`trigger` with `args.site` in the
+    /// request path, so `BackupActionArgs::validate` needs the same
+    /// traversal defence `DeviceActionArgs`/`ClientActionArgs` already carry
+    /// (see `a_traversing_site_is_rejected_by_device_and_client_action_validation`
+    /// above).
+    #[test]
+    fn a_traversing_site_is_rejected_by_backup_action_validation() {
+        use super::{BackupAction, BackupActionArgs};
+
+        let args = BackupActionArgs {
+            controller: "home".to_owned(),
+            action: BackupAction::List,
+            site: Some("../../v2/api/site/default".to_owned()),
+            backup_file: None,
+        };
+        assert!(
+            args.validate().is_err(),
+            "a traversing site must be rejected by BackupActionArgs::validate"
+        );
+    }
+
+    /// A well-formed site must still be accepted for backup actions.
+    #[test]
+    fn an_ordinary_site_is_accepted_by_backup_action_validation() {
+        use super::{BackupAction, BackupActionArgs};
+
+        let args = BackupActionArgs {
+            controller: "home".to_owned(),
+            action: BackupAction::List,
+            site: Some("default".to_owned()),
+            backup_file: None,
+        };
+        assert!(args.validate().is_ok());
+    }
+
+    #[test]
+    fn truncate_backups_reports_everything_shown_under_the_cap() {
+        use super::truncate_backups;
+
+        let page = truncate_backups(vec![1, 2, 3]);
+        assert_eq!(page.items, vec![1, 2, 3]);
+        assert!(!page.truncated);
+        assert_eq!(page.shown, 3);
+        assert_eq!(page.total, 3);
+        assert_eq!(page.marker(), None);
+    }
+
+    #[test]
+    fn truncate_backups_caps_and_reports_a_marker_over_the_cap() {
+        use super::{MAX_BACKUP_ITEMS, truncate_backups};
+
+        let items: Vec<usize> = (0..MAX_BACKUP_ITEMS + 5).collect();
+        let page = truncate_backups(items);
+        assert!(page.truncated);
+        assert_eq!(page.shown, MAX_BACKUP_ITEMS);
+        assert_eq!(page.total, MAX_BACKUP_ITEMS + 5);
+        assert_eq!(
+            page.marker().as_deref(),
+            Some(
+                format!(
+                    "truncated: {MAX_BACKUP_ITEMS} of {} shown",
+                    MAX_BACKUP_ITEMS + 5
+                )
+                .as_str()
+            )
+        );
     }
 
     #[test]
