@@ -450,9 +450,14 @@ async fn no_read_only_tool_leaks_a_fixture_secret() {
         }
 
         for secret in FIXTURE_SECRETS {
+            // Message intentionally omits `secret` and `rendered`: both can
+            // hold the fixture's fake credential, and CodeQL's
+            // rust/cleartext-logging query flags any format argument shaped
+            // like a secret landing in a panic message (which the test
+            // harness writes to its output log on failure).
             assert!(
                 !rendered.contains(secret),
-                "{tool}({args}) leaked {secret}: {rendered}"
+                "{tool}({args}) leaked a fixture secret"
             );
         }
         checked += 1;

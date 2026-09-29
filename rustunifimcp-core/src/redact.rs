@@ -273,9 +273,14 @@ mod tests {
 
             let projected = project_resource_list(kind, &data);
             let rendered = projected.to_string();
+            // Message intentionally omits `secret` and `rendered`: both can
+            // hold the fixture's fake credential, and CodeQL's
+            // rust/cleartext-logging query flags any format argument shaped
+            // like a secret landing in a panic message (which the test
+            // harness writes to its output log on failure).
             assert!(
                 !rendered.contains(secret),
-                "{kind:?} allowlist let {secret} through: {rendered}"
+                "{kind:?} allowlist let the fixture secret through"
             );
         }
     }
@@ -294,7 +299,12 @@ mod tests {
             "EXAMPLE-wireguard-private-key-fake1",
             "EXAMPLE-ipsec-preshared-key-fake1",
         ] {
-            assert!(!rendered.contains(secret), "leaked: {secret}");
+            // See the comment on `every_resource_kind_drops_its_fixtures_secret`
+            // above: the panic message deliberately does not echo `secret`.
+            assert!(
+                !rendered.contains(secret),
+                "a network fixture secret leaked"
+            );
         }
 
         // And it must not have thrown the baby out with the bathwater: the
