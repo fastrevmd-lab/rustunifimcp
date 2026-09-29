@@ -1067,15 +1067,27 @@ impl UnifiServer {
             return tool_error(error);
         }
 
-        // `restart` mutates the device in one call with no change-set
-        // approval. `locate` is exempt: it is self-reverting and carries no
-        // lasting effect. `adopt`, `upgrade`, and `port_action` are not yet
-        // wired and refuse in `ops::device_action` before reaching a device.
-        let mut gate_scope = if args.action == ops::DeviceAction::Restart {
+        // `restart`, `adopt`, `upgrade`, and `port_action` each mutate the
+        // device in one call with no change-set approval. `locate` is exempt:
+        // it is self-reverting and carries no lasting effect. Whether a
+        // variant is gated is decided by `DeviceAction::requires_direct_commit`
+        // below -- an exhaustive match in `rustunifimcp-core` that is a
+        // compile error there until a future variant says explicitly whether
+        // it belongs in the gate. `#[non_exhaustive]` still forces a wildcard
+        // here for the display name only, which carries no gating decision.
+        let action_name = match args.action {
+            ops::DeviceAction::Restart => "restart",
+            ops::DeviceAction::Adopt => "adopt",
+            ops::DeviceAction::Upgrade => "upgrade",
+            ops::DeviceAction::PortAction => "port_action",
+            ops::DeviceAction::Locate => "locate",
+            _ => "unknown",
+        };
+        let mut gate_scope = if args.action.requires_direct_commit() {
             match self.gate_direct_commit(
                 caller.as_ref(),
                 "unifi_device_action",
-                "restart",
+                action_name,
                 &args.device,
             ) {
                 Ok(scope) => Some(scope),
@@ -1084,6 +1096,14 @@ impl UnifiServer {
         } else {
             None
         };
+        if let Some(scope) = gate_scope.as_mut() {
+            if let Some(firmware_version) = args.firmware_version.as_deref() {
+                scope.meta("firmware_version", firmware_version.to_owned());
+            }
+            if let Some(port_index) = args.port_index {
+                scope.meta("port_idx", u64::from(port_index));
+            }
+        }
 
         let result = ops::device_action(args, &client).await;
         if let Some(scope) = gate_scope.as_mut() {
@@ -1143,30 +1163,32 @@ impl UnifiServer {
         // `block`, `unblock`, and `reconnect` mutate the client in one call
         // with no change-set approval. `authorize` and `limit_bandwidth` are
         // not yet wired and refuse in `ops::client_action` before reaching a
-        // client.
-        let gated_action = match args.action {
-            ops::ClientAction::Block => Some("block"),
-            ops::ClientAction::Unblock => Some("unblock"),
-            ops::ClientAction::Reconnect => Some("reconnect"),
-            ops::ClientAction::Authorize | ops::ClientAction::LimitBandwidth => None,
-            // `ClientAction` is `#[non_exhaustive]`: a future variant is
-            // ungated only until it is wired in `ops::client_action` and
-            // reviewed for whether it belongs in the gate above.
-            _ => None,
+        // client. Whether a variant is gated is decided by
+        // `ClientAction::requires_direct_commit` below -- an exhaustive match
+        // in `rustunifimcp-core` that is a compile error there until a future
+        // variant says explicitly whether it belongs in the gate.
+        // `#[non_exhaustive]` still forces a wildcard here for the display
+        // name only, which carries no gating decision.
+        let action_name = match args.action {
+            ops::ClientAction::Block => "block",
+            ops::ClientAction::Unblock => "unblock",
+            ops::ClientAction::Reconnect => "reconnect",
+            ops::ClientAction::Authorize => "authorize",
+            ops::ClientAction::LimitBandwidth => "limit_bandwidth",
+            _ => "unknown",
         };
-        let mut gate_scope = match gated_action {
-            Some(action) => {
-                match self.gate_direct_commit(
-                    caller.as_ref(),
-                    "unifi_client_action",
-                    action,
-                    &args.client,
-                ) {
-                    Ok(scope) => Some(scope),
-                    Err(result) => return *result,
-                }
+        let mut gate_scope = if args.action.requires_direct_commit() {
+            match self.gate_direct_commit(
+                caller.as_ref(),
+                "unifi_client_action",
+                action_name,
+                &args.client,
+            ) {
+                Ok(scope) => Some(scope),
+                Err(result) => return *result,
             }
-            None => None,
+        } else {
+            None
         };
 
         let result = ops::client_action(args, &client).await;
