@@ -219,6 +219,12 @@ pub enum TokenCommand {
         /// `--lab-mode`; without it the server refuses such a token at call time.
         #[arg(long)]
         allow_self_approval: bool,
+        /// Comma-separated site identifiers this token may write to, or '*'
+        /// for every site. Omit for the pre-MEC-508 default: unrestricted by
+        /// site (the token may write to any site named in a call, exactly as
+        /// it could before per-site scoping existed).
+        #[arg(long, value_delimiter = ',')]
+        sites: Option<Vec<String>>,
         /// Send SIGHUP to this pid after writing.
         #[arg(long)]
         server_pid: Option<i32>,
@@ -274,6 +280,11 @@ pub enum TokenCommand {
         /// change-set control tools (lab-mode single operator only).
         #[arg(long)]
         allow_self_approval: bool,
+        /// Replacement site scope: comma-separated site identifiers, or '*'
+        /// for every site. Omit to leave the token's existing site grant
+        /// unchanged.
+        #[arg(long, value_delimiter = ',')]
+        sites: Option<Vec<String>>,
         /// Send SIGHUP to this pid after writing.
         #[arg(long)]
         server_pid: Option<i32>,
