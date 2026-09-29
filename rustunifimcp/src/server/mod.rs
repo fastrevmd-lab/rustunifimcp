@@ -429,8 +429,8 @@ impl UnifiServer {
     }
 
     /// Enforce the direct-commit gate for an operational action that mutates
-    /// a device or client in one call with no change-set approval, returning
-    /// the live [`mecmcp_audit::AuditScope`] for the caller to settle.
+    /// a device or client in one call with no change-set approval, and audit
+    /// the outcome.
     ///
     /// Refuses unless the server was started with `--allow-direct-commit`.
     /// Unlike [`authorize_write_site`](Self::authorize_write_site), which
@@ -440,15 +440,14 @@ impl UnifiServer {
     /// one `rustjunosmcp` uses for the identical gate, so the two servers'
     /// direct-commit records share one shape.
     ///
-    /// On refusal the returned `Box<CallToolResult>` already dropped (and so
-    /// emitted) the denied scope; a handler just returns it. On success the
-    /// scope is `Ok(())`-tagged but held open and returned rather than
-    /// dropped here: this gate only proves the call was *permitted*, not that
-    /// the device mutation that follows *succeeded*, and a scope dropped
-    /// before that mutation runs would audit a refusal or a controller error
-    /// as `result=ok`. The caller must call `succeed()` or `fail()` on the
-    /// returned scope once the mutation has actually run, before it goes out
-    /// of scope.
+    /// On refusal the returned `CallToolResult` is final and the `AuditScope`
+    /// has already been dropped (and so emitted) recording the denial. On
+    /// success the caller gets back the *live* `AuditScope` instead of a
+    /// dropped one: it must call [`AuditScope::succeed`] or
+    /// [`AuditScope::fail`] once the gated device/client mutation has
+    /// actually run, then let it drop. Finalizing here -- before the caller
+    /// has performed the mutation -- would record `result=ok` for a call that
+    /// had not executed yet, and still `result=ok` if it went on to fail.
     ///
     /// # Errors
     /// Returns the boxed `CallToolResult` [`tool_error`] renders for
@@ -1061,6 +1060,13 @@ impl UnifiServer {
             return *result;
         }
 
+        // Validated before the gate below reads `args.device` into the audit
+        // record: an unvalidated MAC would otherwise let a caller write an
+        // arbitrary string into that record before it was ever checked.
+        if let Err(error) = args.validate() {
+            return tool_error(error);
+        }
+
         // `restart`, `adopt`, `upgrade`, and `port_action` each mutate the
         // device in one call with no change-set approval. `locate` is exempt:
         // it is self-reverting and carries no lasting effect. Whether a
@@ -1145,6 +1151,13 @@ impl UnifiServer {
             args.site.as_deref(),
         ) {
             return *result;
+        }
+
+        // Validated before the gate below reads `args.client` into the audit
+        // record: an unvalidated MAC would otherwise let a caller write an
+        // arbitrary string into that record before it was ever checked.
+        if let Err(error) = args.validate() {
+            return tool_error(error);
         }
 
         // `block`, `unblock`, and `reconnect` mutate the client in one call
