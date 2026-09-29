@@ -136,6 +136,13 @@ impl Preimage {
                         }
                     };
 
+                    // Kept raw: drift detection (`preimage_matches`) compares
+                    // this against the live object and rollback writes it
+                    // back, so a projected copy would read every edit as stale
+                    // and roll back a stripped object (MEC-737 F1). It never
+                    // reaches the model raw -- `diff.rs` projects `before`
+                    // through the per-kind allowlist at output.
+                    let _ = resource_kind;
                     data.push(resource);
                 }
             }

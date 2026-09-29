@@ -11,6 +11,7 @@
     },
     "destination": {
       "zone_id": "000000000000000000000101"
-    }
+    },
+    "x_shared_secret": "EXAMPLE-policy-shared-secret-fake1"
   }
 ]
