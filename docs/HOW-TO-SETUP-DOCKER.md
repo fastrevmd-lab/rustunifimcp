@@ -75,6 +75,13 @@ If this token will call `unifi_approve_change_set`, add `--actor-type
 human`: the server refuses approvals from any token whose actor type is
 `agent` or unset.
 
+Two-person control is enforced on tokens: a token combining
+`unifi_stage_change` and `unifi_approve_change_set` is refused at issuance and
+at call time, so issue separate staging and approving tokens. Only a lab-mode
+single operator may combine them: mint it with `--allow-self-approval` and run
+the server with `--lab-mode` (section 5); the self-approval is recorded as
+`approval_waiver=lab-mode`.
+
 Then lock the modes down:
 
 ```bash

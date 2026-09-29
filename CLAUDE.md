@@ -93,6 +93,11 @@ recorded on a change set, and the `write_tool_count` in `unifimcp_status` is a s
 `WRITE_TOOLS.len()`, not a count of what is exposed. Both flags are needed on a
 single-operator deployment, for different reasons — the token scope decides what is
 *advertised*, lab mode decides whether an approval can proceed without a second person.
+Two-person control is also enforced on the token itself (MEC-503): a token combining
+`unifi_stage_change` and `unifi_approve_change_set` is refused at issuance unless minted
+with `--allow-self-approval`, and refused at call time unless the server runs with
+`--lab-mode`. A single-operator lab deployment needs both: the flag at issuance and
+`--lab-mode` on the server.
 
 Diagnosing it: probe `tools/list` directly rather than trusting the client. A client
 caches its tool list at connect time, so a `/mcp` reconnect that still shows 12 tools is

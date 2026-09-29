@@ -45,6 +45,134 @@ const RESULT_LIMITS: ResultLimits = ResultLimits {
     max_json_bytes: 512 * 1024,
 };
 
+/// Headroom subtracted from `RESULT_LIMITS.max_json_bytes` before shrinking a
+/// response, so the pretty-printed rendering `mecmcp_server` measures --
+/// which adds the MCP envelope around the value truncated here -- still lands
+/// inside the real limit rather than a value this module computed in
+/// isolation.
+const TRUNCATION_MARGIN_BYTES: usize = 8 * 1024;
+
+/// Render a tool result, shrinking an oversized list rather than refusing it.
+///
+/// `mecmcp_server::tool_result` refuses an oversized response outright by
+/// design: "a caller cannot tell a truncated result from a complete one." That
+/// is the right default for a single resource, which has no smaller true
+/// answer. It is the wrong one for a list tool pointed at a large site, which
+/// has an obvious smaller answer -- fewer items, explicitly marked as fewer --
+/// and refusing outright just means the operator learns nothing about a site
+/// too big to describe in 512 KiB. So the largest array in the response is
+/// shortened here, before the transport ever measures it, with a nested
+/// `truncation` marker naming how many of how many are shown. `tool_result`
+/// still has the final word: if even the shrunk response cannot fit, it
+/// refuses exactly as before, so this can only make an oversized answer
+/// smaller, never turn a correct refusal into a silent lie.
+fn json_tool_result<T: serde::Serialize>(value: T) -> CallToolResult {
+    let budget = RESULT_LIMITS
+        .max_json_bytes
+        .saturating_sub(TRUNCATION_MARGIN_BYTES);
+
+    match serde_json::to_value(&value) {
+        Ok(json) => tool_result(
+            Ok::<_, String>(shrink_largest_array(json, budget)),
+            ResultFormat::PrettyJson,
+            RESULT_LIMITS,
+        ),
+        Err(_) => tool_result(
+            Ok::<_, String>(value),
+            ResultFormat::PrettyJson,
+            RESULT_LIMITS,
+        ),
+    }
+}
+
+/// The rendered size `mecmcp_server::tool_result` would measure for `value`.
+fn rendered_len(value: &serde_json::Value) -> usize {
+    serde_json::to_string_pretty(value).map_or(usize::MAX, |s| s.len())
+}
+
+/// Shrink the largest top-level array in `value` until it fits `budget` bytes.
+///
+/// A bare array (`unifi_list_resources`'s shape) is wrapped under `data`; an
+/// object keeps its own keys and only the largest array-valued field is cut.
+/// Binary searches the largest prefix of that array whose rendering fits,
+/// rather than trimming one item at a time, so a response with thousands of
+/// items still costs a handful of serializations. Returns `value` unchanged
+/// if it already fits or has no array to shrink -- a scalar or single-object
+/// response has no smaller true answer, and is left for `tool_result`'s own
+/// refusal.
+///
+/// The marker lives under its own `truncation` key rather than top-level
+/// `truncated`/`shown`/`total` fields, because `unifi_query_stats` and the
+/// workflow reports already fill an object with `offset`/`limit`/`total` from
+/// [`crate::tools::pagination`] before this ever runs -- top-level fields
+/// here used to overwrite that site-wide `total` with the shrunk array's own
+/// length, so a caller advancing `offset` by the (now wrong) `limit` skipped
+/// items it never saw. Existing keys are never overwritten. `partial` is
+/// forced `true` when it is already present, since a shrunk response is
+/// partial by definition. When the object carries a numeric `offset`,
+/// `next_offset` names the correct cursor for the next call: `offset` plus
+/// however many of this field's items are actually shown, not `limit`, since
+/// the shrunk count is very likely a strict fraction of it.
+fn shrink_largest_array(value: serde_json::Value, budget: usize) -> serde_json::Value {
+    if rendered_len(&value) <= budget {
+        return value;
+    }
+
+    let (key, items, rest) = match value {
+        serde_json::Value::Array(items) => (None, items, serde_json::Map::new()),
+        serde_json::Value::Object(mut map) => {
+            let Some(key) = map
+                .iter()
+                .filter_map(|(k, v)| v.as_array().map(|a| (k.clone(), a.len())))
+                .max_by_key(|(_, len)| *len)
+                .map(|(k, _)| k)
+            else {
+                return serde_json::Value::Object(map);
+            };
+            let Some(serde_json::Value::Array(items)) = map.remove(&key) else {
+                unreachable!("key was chosen because its value is an array")
+            };
+            (Some(key), items, map)
+        }
+        other => return other,
+    };
+
+    let total = items.len();
+    let field = key.unwrap_or_else(|| "data".to_owned());
+    let offset = rest.get("offset").and_then(serde_json::Value::as_u64);
+    let build = |n: usize| -> serde_json::Value {
+        let mut map = rest.clone();
+        map.insert(field.clone(), serde_json::Value::Array(items[..n].to_vec()));
+        if map.contains_key("partial") {
+            map.insert("partial".to_owned(), serde_json::Value::Bool(true));
+        }
+        if let Some(offset) = offset {
+            map.insert(
+                "next_offset".to_owned(),
+                serde_json::json!(offset.saturating_add(n as u64)),
+            );
+        }
+        map.insert(
+            "truncation".to_owned(),
+            serde_json::json!({ "field": field, "shown": n, "of": total }),
+        );
+        serde_json::Value::Object(map)
+    };
+
+    let mut lo = 0usize;
+    let mut hi = total;
+    while lo < hi {
+        let mid = lo + (hi - lo).div_ceil(2);
+        if rendered_len(&build(mid)) <= budget {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+
+    build(lo)
+}
+
 /// Seconds since the Unix epoch.
 ///
 /// A clock before the epoch is not a case worth branching on; it reports 0,
@@ -230,6 +358,33 @@ impl UnifiServer {
             },
             None => mecmcp_audit::ActorType::Unknown,
         }
+    }
+
+    /// Whether `caller`'s tool scope would let it both stage and approve a
+    /// change set.
+    ///
+    /// Two-person control used to rest entirely on an operational convention
+    /// (CLAUDE.md: issue tokens that don't combine stage+approve rights) that
+    /// nothing enforced. `unifi_approve_change_set` refuses an approver who
+    /// *is* a set's owner, but that check says nothing about a second token
+    /// minted for a different principal name that nonetheless carries both
+    /// scopes -- such a token satisfies the owner check on every call and
+    /// still lets one credential complete the whole lifecycle alone.
+    ///
+    /// Checked here, at call time, rather than only at token issuance:
+    /// issuance can refuse minting such a token, but a token store loaded
+    /// from a hand-edited file never went through issuance at all. This is
+    /// the check a hand-edited store cannot bypass.
+    fn holds_combined_two_person_control_scope(
+        caller: Option<&mecmcp_auth::CallerCtx<NoGrant>>,
+    ) -> bool {
+        let Some(caller) = caller else {
+            return false;
+        };
+        caller.tools.allows_tool("unifi_stage_change", WRITE_TOOLS)
+            && caller
+                .tools
+                .allows_tool("unifi_approve_change_set", WRITE_TOOLS)
     }
 
     /// Fetch a change set, refusing a controller that does not own it.
@@ -539,11 +694,7 @@ impl UnifiServer {
         };
 
         match read::list_resources(&client, &args).await {
-            Ok(json) => tool_result(
-                Ok::<_, String>(json),
-                ResultFormat::PrettyJson,
-                RESULT_LIMITS,
-            ),
+            Ok(json) => json_tool_result(json),
             Err(error) => tool_error(error),
         }
     }
@@ -573,11 +724,7 @@ impl UnifiServer {
         };
 
         match read::get_resource(&client, &args).await {
-            Ok(json) => tool_result(
-                Ok::<_, String>(json),
-                ResultFormat::PrettyJson,
-                RESULT_LIMITS,
-            ),
+            Ok(json) => json_tool_result(json),
             Err(error) => tool_error(error),
         }
     }
@@ -607,11 +754,7 @@ impl UnifiServer {
         };
 
         match read::query_stats(&client, &args).await {
-            Ok(json) => tool_result(
-                Ok::<_, String>(json),
-                ResultFormat::PrettyJson,
-                RESULT_LIMITS,
-            ),
+            Ok(json) => json_tool_result(json),
             Err(error) => tool_error(error),
         }
     }
@@ -641,11 +784,7 @@ impl UnifiServer {
         };
 
         match read::search(&client, &args).await {
-            Ok(json) => tool_result(
-                Ok::<_, String>(json),
-                ResultFormat::PrettyJson,
-                RESULT_LIMITS,
-            ),
+            Ok(json) => json_tool_result(json),
             Err(error) => tool_error(error),
         }
     }
@@ -675,11 +814,7 @@ impl UnifiServer {
         };
 
         match read::list_sites(&client, &args).await {
-            Ok(json) => tool_result(
-                Ok::<_, String>(json),
-                ResultFormat::PrettyJson,
-                RESULT_LIMITS,
-            ),
+            Ok(json) => json_tool_result(json),
             Err(error) => tool_error(error),
         }
     }
@@ -701,11 +836,7 @@ impl UnifiServer {
         }
 
         match admin::unifi_list_controllers(&self.registry).await {
-            Ok(json) => tool_result(
-                Ok::<_, String>(json),
-                ResultFormat::PrettyJson,
-                RESULT_LIMITS,
-            ),
+            Ok(json) => json_tool_result(json),
             Err(error) => tool_error(error),
         }
     }
@@ -724,12 +855,19 @@ impl UnifiServer {
             return tool_error(error);
         }
 
-        match admin::unifimcp_status(&self.registry, self.lab_mode).await {
-            Ok(json) => tool_result(
-                Ok::<_, String>(json),
-                ResultFormat::PrettyJson,
-                RESULT_LIMITS,
-            ),
+        // Reuses the clients this server already built rather than
+        // constructing a fresh one per controller per call: `UnifiClient::new`
+        // reads the credential from disk and stands up a whole connection
+        // pool, so status calls -- the tool an operator polls most often --
+        // were paying that cost on every controller on every call instead of
+        // reusing the pool the server already holds.
+        let clients = match self.clients.read() {
+            Ok(guard) => guard.clone(),
+            Err(_) => return tool_error("clients lock poisoned".to_owned()),
+        };
+
+        match admin::unifimcp_status(&clients, self.lab_mode).await {
+            Ok(json) => json_tool_result(json),
             Err(error) => tool_error(error),
         }
     }
@@ -751,11 +889,7 @@ impl UnifiServer {
         }
 
         match admin::unifi_add_controller("", "", "", None, None).await {
-            Ok(json) => tool_result(
-                Ok::<_, String>(json),
-                ResultFormat::PrettyJson,
-                RESULT_LIMITS,
-            ),
+            Ok(json) => json_tool_result(json),
             Err(error) => tool_error(error),
         }
     }
@@ -785,11 +919,7 @@ impl UnifiServer {
         };
 
         match ops::device_action(args, &client).await {
-            Ok(json) => tool_result(
-                Ok::<_, String>(json),
-                ResultFormat::PrettyJson,
-                RESULT_LIMITS,
-            ),
+            Ok(json) => json_tool_result(json),
             Err(error) => tool_error(error),
         }
     }
@@ -819,11 +949,7 @@ impl UnifiServer {
         };
 
         match ops::client_action(args, &client).await {
-            Ok(json) => tool_result(
-                Ok::<_, String>(json),
-                ResultFormat::PrettyJson,
-                RESULT_LIMITS,
-            ),
+            Ok(json) => json_tool_result(json),
             Err(error) => tool_error(error),
         }
     }
@@ -853,11 +979,7 @@ impl UnifiServer {
         };
 
         match ops::backup_action(args, &client).await {
-            Ok(json) => tool_result(
-                Ok::<_, String>(json),
-                ResultFormat::PrettyJson,
-                RESULT_LIMITS,
-            ),
+            Ok(json) => json_tool_result(json),
             Err(error) => tool_error(error),
         }
     }
@@ -887,11 +1009,7 @@ impl UnifiServer {
         };
 
         match ops::run_speed_test(args, &client).await {
-            Ok(json) => tool_result(
-                Ok::<_, String>(json),
-                ResultFormat::PrettyJson,
-                RESULT_LIMITS,
-            ),
+            Ok(json) => json_tool_result(json),
             Err(error) => tool_error(error),
         }
     }
@@ -921,11 +1039,7 @@ impl UnifiServer {
         };
 
         match workflow::site_health_report(&client, &args).await {
-            Ok(report) => tool_result(
-                Ok::<_, String>(report),
-                ResultFormat::PrettyJson,
-                RESULT_LIMITS,
-            ),
+            Ok(report) => json_tool_result(report),
             Err(error) => tool_error(error),
         }
     }
@@ -955,11 +1069,7 @@ impl UnifiServer {
         };
 
         match workflow::topology_report(&client, &args).await {
-            Ok(report) => tool_result(
-                Ok::<_, String>(report),
-                ResultFormat::PrettyJson,
-                RESULT_LIMITS,
-            ),
+            Ok(report) => json_tool_result(report),
             Err(error) => tool_error(error),
         }
     }
@@ -989,11 +1099,7 @@ impl UnifiServer {
         };
 
         match workflow::traffic_flow_report(&client, &args).await {
-            Ok(report) => tool_result(
-                Ok::<_, String>(report),
-                ResultFormat::PrettyJson,
-                RESULT_LIMITS,
-            ),
+            Ok(report) => json_tool_result(report),
             Err(error) => tool_error(error),
         }
     }
@@ -1023,11 +1129,7 @@ impl UnifiServer {
         };
 
         match workflow::firewall_audit(&client, &args).await {
-            Ok(report) => tool_result(
-                Ok::<_, String>(report),
-                ResultFormat::PrettyJson,
-                RESULT_LIMITS,
-            ),
+            Ok(report) => json_tool_result(report),
             Err(error) => tool_error(error),
         }
     }
@@ -1057,11 +1159,7 @@ impl UnifiServer {
         };
 
         match workflow::client_troubleshoot(&client, &args).await {
-            Ok(report) => tool_result(
-                Ok::<_, String>(report),
-                ResultFormat::PrettyJson,
-                RESULT_LIMITS,
-            ),
+            Ok(report) => json_tool_result(report),
             Err(error) => tool_error(error),
         }
     }
@@ -1175,6 +1273,15 @@ impl UnifiServer {
             WRITE_TOOLS,
         ) {
             return tool_error(error);
+        }
+        // Under --lab-mode a single operator may hold both scopes on purpose
+        // (issued with `token add --allow-self-approval`); the change-set
+        // lab-mode waiver then records the self-approval as a distinct fact.
+        if !self.lab_mode && Self::holds_combined_two_person_control_scope(caller.as_ref()) {
+            return tool_error(
+                "two-person control: this token's scope combines unifi_stage_change and \
+                 unifi_approve_change_set; issue separate tokens for staging and approving",
+            );
         }
 
         // A draft on its first stage, or a change set already in the store.
@@ -1532,6 +1639,15 @@ impl UnifiServer {
             WRITE_TOOLS,
         ) {
             return tool_error(error);
+        }
+        // Under --lab-mode a single operator may hold both scopes on purpose
+        // (issued with `token add --allow-self-approval`); the change-set
+        // lab-mode waiver then records the self-approval as a distinct fact.
+        if !self.lab_mode && Self::holds_combined_two_person_control_scope(caller.as_ref()) {
+            return tool_error(
+                "two-person control: this token's scope combines unifi_stage_change and \
+                 unifi_approve_change_set; issue separate tokens for staging and approving",
+            );
         }
 
         let approver = Self::principal(caller.as_ref());
@@ -2081,11 +2197,201 @@ mod tests {
     use rmcp::ServiceExt;
     use std::time::Duration;
 
+    /// Build a `CallerCtx` with the given tool scope, mirroring the pattern
+    /// `mecmcp-server::authorize`'s own tests use.
+    fn caller_with_tools(tools: mecmcp_auth::ScopeSet) -> mecmcp_auth::CallerCtx<NoGrant> {
+        mecmcp_auth::CallerCtx {
+            token_name: "caller".to_owned(),
+            devices: mecmcp_auth::ScopeSet::Wildcard,
+            tools,
+            grant: None,
+            provider: None,
+            provider_tier: None,
+            on_behalf_of: None,
+            actor_type: mecmcp_auth::ActorType::Human,
+            client_name: None,
+            model_id: None,
+            session_id: None,
+            request_id: uuid::Uuid::new_v4(),
+        }
+    }
+
+    /// The check this test guards: `unifi_stage_change` and
+    /// `unifi_approve_change_set` are both in `WRITE_TOOLS`, and this crate's
+    /// only means of reaching a write tool is an explicit allowlist naming
+    /// it (`ScopeSet::Wildcard` excludes every write tool). A token whose
+    /// allowlist names both must be refused at call time -- this is the
+    /// check a hand-edited token store cannot bypass, unlike the
+    /// issuance-time refusal in `main.rs`.
+    #[test]
+    fn a_token_scoped_to_both_stage_and_approve_is_refused_at_call_time() {
+        let caller = caller_with_tools(mecmcp_auth::ScopeSet::Allowlist(vec![
+            "unifi_stage_change".to_owned(),
+            "unifi_approve_change_set".to_owned(),
+        ]));
+        assert!(UnifiServer::holds_combined_two_person_control_scope(Some(
+            &caller
+        )));
+    }
+
+    /// Holding only one of the two scopes -- the normal shape for a staging
+    /// or an approving token -- must not be refused.
+    #[test]
+    fn a_token_scoped_to_only_one_changeset_control_tool_is_not_refused() {
+        let stager = caller_with_tools(mecmcp_auth::ScopeSet::Allowlist(vec![
+            "unifi_stage_change".to_owned(),
+        ]));
+        assert!(!UnifiServer::holds_combined_two_person_control_scope(Some(
+            &stager
+        )));
+
+        let approver = caller_with_tools(mecmcp_auth::ScopeSet::Allowlist(vec![
+            "unifi_approve_change_set".to_owned(),
+        ]));
+        assert!(!UnifiServer::holds_combined_two_person_control_scope(Some(
+            &approver
+        )));
+    }
+
+    /// A wildcard tool scope excludes every `WRITE_TOOLS` entry, so it can
+    /// never combine the two change-set control tools -- it cannot reach
+    /// either of them at all.
+    #[test]
+    fn a_wildcard_tool_scope_never_combines_the_two_control_tools() {
+        let caller = caller_with_tools(mecmcp_auth::ScopeSet::Wildcard);
+        assert!(!UnifiServer::holds_combined_two_person_control_scope(Some(
+            &caller
+        )));
+    }
+
+    /// The stdio path (`caller: None`) is documented elsewhere as authorized
+    /// for everything; this check must not contradict that by refusing a
+    /// `None` caller.
+    #[test]
+    fn a_none_caller_is_not_refused() {
+        assert!(!UnifiServer::holds_combined_two_person_control_scope(None));
+    }
+
     #[test]
     fn write_tools_is_not_empty() {
         assert!(
             !WRITE_TOOLS.is_empty(),
             "WRITE_TOOLS must never be empty — an empty registry lets wildcards reach writes"
+        );
+    }
+
+    /// A response already under budget must pass through untouched -- no
+    /// `truncated` marker on an answer that was never shortened.
+    #[test]
+    fn a_response_within_budget_is_returned_whole() {
+        let value = serde_json::json!({ "data": [1, 2, 3] });
+        let out = shrink_largest_array(value.clone(), 10_000);
+        assert_eq!(out, value);
+    }
+
+    /// The reported defect: a response too large for the transport's budget
+    /// must come back shortened with a marker, not be handed to `tool_result`
+    /// unmodified where it would be refused outright.
+    #[test]
+    fn an_oversized_array_is_shortened_with_a_truncation_marker() {
+        let items: Vec<serde_json::Value> = (0..2000)
+            .map(|i| serde_json::json!({ "id": i, "note": "x".repeat(200) }))
+            .collect();
+        let value = serde_json::json!({ "devices": items, "partial": false });
+
+        let budget = 20_000;
+        let out = shrink_largest_array(value, budget);
+
+        assert!(
+            rendered_len(&out) <= budget,
+            "shrunk response still over budget"
+        );
+        assert_eq!(out["truncation"]["field"], serde_json::json!("devices"));
+        assert_eq!(out["truncation"]["of"], serde_json::json!(2000));
+
+        let shown = out["truncation"]["shown"]
+            .as_u64()
+            .expect("shown is a number") as usize;
+        assert!(shown < 2000, "nothing was actually dropped");
+        assert_eq!(
+            out["devices"]
+                .as_array()
+                .expect("devices is an array")
+                .len(),
+            shown,
+            "shown must match the array actually returned"
+        );
+
+        // `partial` was already present, so a shrunk response must say so.
+        assert_eq!(out["partial"], serde_json::json!(true));
+    }
+
+    /// A bare top-level array (`unifi_list_resources`'s shape) is wrapped
+    /// under `data` rather than dropped, so the truncation marker has
+    /// somewhere to live.
+    #[test]
+    fn a_bare_array_is_wrapped_under_data_when_shrunk() {
+        let items: Vec<serde_json::Value> = (0..2000)
+            .map(|i| serde_json::json!({ "id": i, "note": "x".repeat(200) }))
+            .collect();
+        let value = serde_json::Value::Array(items);
+
+        let out = shrink_largest_array(value, 20_000);
+
+        assert!(out["data"].is_array());
+        assert_eq!(out["truncation"]["field"], serde_json::json!("data"));
+        assert_eq!(out["truncation"]["of"], serde_json::json!(2000));
+    }
+
+    /// A single object with no array has no smaller true answer; it must be
+    /// left for `tool_result`'s own refusal rather than silently mangled.
+    #[test]
+    fn an_oversized_scalar_object_is_left_for_tool_result_to_refuse() {
+        let value = serde_json::json!({ "note": "x".repeat(1000) });
+        let out = shrink_largest_array(value.clone(), 10);
+        assert_eq!(out, value, "no array to shrink means no change");
+    }
+
+    /// Percy review F1 (MEC-549): the marker used to be written as top-level
+    /// `truncated`/`shown`/`total` fields, which collided with the
+    /// site-wide `total` that `unifi_query_stats` and the workflow reports
+    /// already fill in from `tools::pagination::paginate`. A caller advancing
+    /// `offset` by `limit` on the corrupted `total` would then skip whatever
+    /// sat between the shrunk count and the real page size. The site-wide
+    /// `total` must survive shrinking untouched, and the object must carry a
+    /// correct cursor for the next call.
+    #[test]
+    fn shrinking_a_paged_object_preserves_its_site_wide_total_and_cursor() {
+        let items: Vec<serde_json::Value> = (0..2000)
+            .map(|i| serde_json::json!({ "id": i, "note": "x".repeat(200) }))
+            .collect();
+        let value = serde_json::json!({
+            "data": items,
+            "offset": 100u64,
+            "limit": 2000,
+            "total": 50_000,
+        });
+
+        let budget = 20_000;
+        let out = shrink_largest_array(value, budget);
+
+        assert!(
+            rendered_len(&out) <= budget,
+            "shrunk response still over budget"
+        );
+        // The pagination cursor's site-wide total must not be clobbered by
+        // the shrunk array's own length.
+        assert_eq!(out["total"], serde_json::json!(50_000));
+        assert_eq!(out["offset"], serde_json::json!(100));
+
+        let shown = out["truncation"]["shown"]
+            .as_u64()
+            .expect("shown is a number");
+        assert!(shown < 2000, "nothing was actually dropped");
+        assert_eq!(
+            out["next_offset"],
+            serde_json::json!(100 + shown),
+            "next_offset must reflect what was actually shown, not the requested limit"
         );
     }
 

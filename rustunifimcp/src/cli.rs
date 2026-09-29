@@ -214,6 +214,11 @@ pub enum TokenCommand {
         /// Actor type: "human", "agent", or "unknown". Optional.
         #[arg(long)]
         actor_type: Option<String>,
+        /// Allow one token to hold both `unifi_stage_change` and
+        /// `unifi_approve_change_set`. Only meaningful for a server run with
+        /// `--lab-mode`; without it the server refuses such a token at call time.
+        #[arg(long)]
+        allow_self_approval: bool,
         /// Send SIGHUP to this pid after writing.
         #[arg(long)]
         server_pid: Option<i32>,
@@ -265,6 +270,10 @@ pub enum TokenCommand {
         /// Apply a widening without the interactive confirmation.
         #[arg(long)]
         yes: bool,
+        /// As for `token add`: allow the new tool scope to combine both
+        /// change-set control tools (lab-mode single operator only).
+        #[arg(long)]
+        allow_self_approval: bool,
         /// Send SIGHUP to this pid after writing.
         #[arg(long)]
         server_pid: Option<i32>,
