@@ -5,5 +5,6 @@
 
 pub mod changeset_state;
 pub mod cli;
+pub mod grant;
 pub mod http_transport;
 pub mod server;

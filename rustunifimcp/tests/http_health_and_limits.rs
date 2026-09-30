@@ -50,7 +50,14 @@ async fn start_server() -> (String, tokio_util::sync::CancellationToken) {
         None,
     )
     .expect("build coordinator");
-    let handler = UnifiServer::new(registry, false, coordinator, None).expect("build server");
+    let handler = UnifiServer::new(
+        registry,
+        false,
+        coordinator,
+        None,
+        mecmcp_audit::DirectCommitPolicy::new(false),
+    )
+    .expect("build server");
 
     let shutdown = CancellationToken::new();
     let plan = build_http_router(

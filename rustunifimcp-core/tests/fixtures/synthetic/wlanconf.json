@@ -4,7 +4,9 @@
       "_id": "000000000000000000000501",
       "name": "Test WLAN",
       "enabled": true,
-      "security": "wpapsk"
+      "security": "wpapsk",
+      "x_passphrase": "EXAMPLE-wifi-passphrase-fake1",
+      "x_iapp_key": "EXAMPLE-iapp-key-fake1"
     }
   ]
 }

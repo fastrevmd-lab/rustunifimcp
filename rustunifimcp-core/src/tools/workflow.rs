@@ -20,6 +20,17 @@ pub struct SiteHealthReportArgs {
     /// Site identifier; defaults to the controller's configured site.
     #[serde(default)]
     pub site: Option<String>,
+    /// Offset into `devices`. Defaults to 0.
+    ///
+    /// The report joins several surfaces before it has a device list to page,
+    /// so this is applied to the joined result, not to any one upstream
+    /// call. A response holding exactly `limit` devices may not be the whole
+    /// site -- advance `offset` by `limit` to read the next page.
+    #[serde(default)]
+    pub offset: Option<u64>,
+    /// Maximum devices to return. Defaults to 200.
+    #[serde(default)]
+    pub limit: Option<u32>,
 }
 
 /// Site health report response.
@@ -33,6 +44,12 @@ pub struct SiteHealthReport {
     pub partial: bool,
     /// What was omitted and why, one entry per omission.
     pub omitted: Vec<String>,
+    /// Offset `devices` was windowed from.
+    pub offset: u64,
+    /// The page size actually applied to `devices`.
+    pub limit: u32,
+    /// The number of devices in the site, before paging.
+    pub total: usize,
 }
 
 /// Arguments to `unifi_topology_report`.
@@ -44,6 +61,17 @@ pub struct TopologyReportArgs {
     /// Site identifier; defaults to the controller's configured site.
     #[serde(default)]
     pub site: Option<String>,
+    /// Offset into `devices`. Defaults to 0.
+    ///
+    /// Applied to the joined result: a response holding exactly `limit`
+    /// devices may not be the whole site -- advance `offset` by `limit` to
+    /// read the next page. `edges` and `networks` are not paged; on a large
+    /// site, expect them to dominate the response size.
+    #[serde(default)]
+    pub offset: Option<u64>,
+    /// Maximum devices to return. Defaults to 200.
+    #[serde(default)]
+    pub limit: Option<u32>,
 }
 
 /// Topology report response.
@@ -59,6 +87,12 @@ pub struct TopologyReport {
     pub partial: bool,
     /// What was omitted and why, one entry per omission.
     pub omitted: Vec<String>,
+    /// Offset `devices` was windowed from.
+    pub offset: u64,
+    /// The page size actually applied to `devices`.
+    pub limit: u32,
+    /// The number of devices in the site, before paging.
+    pub total: usize,
 }
 
 /// Arguments to `unifi_traffic_flow_report`.
@@ -76,6 +110,17 @@ pub struct TrafficFlowReportArgs {
     /// End of the time window (Unix timestamp in seconds).
     #[serde(default)]
     pub end: Option<i64>,
+    /// Offset into `clients`. Defaults to 0.
+    ///
+    /// Applied to the joined result: a response holding exactly `limit`
+    /// clients may not be the whole site -- advance `offset` by `limit` to
+    /// read the next page. `top_applications` is not paged; it is already
+    /// bounded to the top 10.
+    #[serde(default)]
+    pub offset: Option<u64>,
+    /// Maximum clients to return. Defaults to 200.
+    #[serde(default)]
+    pub limit: Option<u32>,
 }
 
 /// Traffic flow report response.
@@ -89,32 +134,12 @@ pub struct TrafficFlowReport {
     pub partial: bool,
     /// What was omitted and why, one entry per omission.
     pub omitted: Vec<String>,
-}
-
-/// Arguments to `unifi_firewall_audit`.
-#[derive(Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct FirewallAuditArgs {
-    /// Which controller, by its name in `controllers.json`.
-    pub controller: String,
-    /// Site identifier; defaults to the controller's configured site.
-    #[serde(default)]
-    pub site: Option<String>,
-}
-
-/// Firewall audit report response.
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct FirewallAuditReport {
-    /// Whether the audit ran (false means no data was examined).
-    pub ran: bool,
-    /// Number of firewall policies examined.
-    pub policies_examined: usize,
-    /// Audit findings.
-    pub findings: Vec<serde_json::Value>,
-    /// Whether this report is missing data it would normally include.
-    pub partial: bool,
-    /// What was omitted and why, one entry per omission.
-    pub omitted: Vec<String>,
+    /// Offset `clients` was windowed from.
+    pub offset: u64,
+    /// The page size actually applied to `clients`.
+    pub limit: u32,
+    /// The number of clients in the site, before paging.
+    pub total: usize,
 }
 
 /// Arguments to `unifi_client_troubleshoot`.
@@ -186,7 +211,14 @@ pub async fn site_health_report(
     {
         Ok(devices) => {
             let devices_data = crate::model::unwrap_enveloped_data(&devices)?;
-            devices_result = devices_data.to_vec();
+            // Raw Integration API devices, not the typed model this crate's
+            // read path parses through -- projected here through the same
+            // per-kind allowlist so this workflow join carries the same
+            // guarantee `unifi_list_resources` does.
+            devices_result = devices_data
+                .iter()
+                .map(|d| crate::redact::project_resource(ResourceKind::Device, d))
+                .collect();
         }
         Err(UnifiError::SurfaceRequiresConfig { .. }) => {
             omitted.push("devices: controller has Integration API disabled".to_owned());
@@ -210,7 +242,11 @@ pub async fn site_health_report(
     {
         Ok(health) => {
             let health_data = crate::model::unwrap_enveloped_data(&health)?;
-            health_result = serde_json::Value::Array(health_data.to_vec());
+            // `stat/health` has no `ResourceKind` and so no allowlist; run it
+            // through the shared crate's denylist-and-shape scan as the
+            // defensive net instead.
+            health_result =
+                crate::redact::redact_owned(&serde_json::Value::Array(health_data.to_vec()));
         }
         Err(UnifiError::SurfaceRequiresConfig { .. }) => {
             omitted.push("health: controller has allow_private_api disabled".to_owned());
@@ -259,12 +295,17 @@ pub async fn site_health_report(
         devices_result
     };
 
+    let page = crate::tools::pagination::paginate(devices, args.offset, args.limit)?;
+
     let partial = !omitted.is_empty();
     Ok(SiteHealthReport {
-        devices,
+        devices: page.items,
         health: health_result,
         partial,
         omitted,
+        offset: page.offset,
+        limit: page.limit,
+        total: page.total,
     })
 }
 
@@ -330,7 +371,10 @@ pub async fn topology_report(
     {
         Ok(devices) => {
             let devices_data = crate::model::unwrap_enveloped_data(&devices)?;
-            devices_result = devices_data.to_vec();
+            devices_result = devices_data
+                .iter()
+                .map(|d| crate::redact::project_resource(ResourceKind::Device, d))
+                .collect();
         }
         Err(UnifiError::SurfaceRequiresConfig { .. }) => {
             omitted.push("devices: controller has Integration API disabled".to_owned());
@@ -353,7 +397,13 @@ pub async fn topology_report(
     {
         Ok(networks) => {
             let networks_data = crate::model::unwrap_enveloped_data(&networks)?;
-            networks_result = networks_data.to_vec();
+            // Networks carry `x_secret`, WireGuard private keys, and PPPoE
+            // passwords in this exact raw shape -- projected through the
+            // network allowlist before it becomes part of the report.
+            networks_result = networks_data
+                .iter()
+                .map(|n| crate::redact::project_resource(ResourceKind::Network, n))
+                .collect();
         }
         Err(UnifiError::SurfaceRequiresConfig { .. }) => {
             omitted.push("networks: controller has allow_private_api disabled".to_owned());
@@ -371,13 +421,18 @@ pub async fn topology_report(
         ));
     }
 
+    let page = crate::tools::pagination::paginate(devices_result, args.offset, args.limit)?;
+
     let partial = !omitted.is_empty();
     Ok(TopologyReport {
         edges: edges_result,
-        devices: devices_result,
+        devices: page.items,
         networks: networks_result,
         partial,
         omitted,
+        offset: page.offset,
+        limit: page.limit,
+        total: page.total,
     })
 }
 
@@ -417,7 +472,13 @@ pub async fn traffic_flow_report(
     {
         Ok(clients) => {
             let clients_data = crate::model::unwrap_enveloped_data(&clients)?;
-            clients_result = clients_data.to_vec();
+            // Projected here (not only in `join_clients_with_stats`, which is
+            // never reached when the stats leg below is refused) so a
+            // partial report carries the same guarantee a complete one does.
+            clients_result = clients_data
+                .iter()
+                .map(|c| crate::redact::project_resource(ResourceKind::Station, c))
+                .collect();
         }
         Err(UnifiError::SurfaceRequiresConfig { .. }) => {
             omitted.push("clients: controller has Integration API disabled".to_owned());
@@ -473,95 +534,17 @@ pub async fn traffic_flow_report(
         ));
     }
 
+    let page = crate::tools::pagination::paginate(clients_result, args.offset, args.limit)?;
+
     let partial = !omitted.is_empty();
     Ok(TrafficFlowReport {
-        clients: clients_result,
+        clients: page.items,
         top_applications: top_apps_result,
         partial,
         omitted,
-    })
-}
-
-/// Generate a firewall audit report.
-///
-/// Audits firewall policies and zones for common misconfigurations. Distinguishes
-/// between "ran and found nothing" (clean audit) and "did not run" (no data).
-///
-/// # Errors
-///
-/// Returns [`UnifiError`] when:
-/// - All legs are refused for surface permission reasons (nothing was gathered)
-/// - Any leg fails with a real transport/protocol error (not a permission refusal)
-pub async fn firewall_audit(
-    client: &UnifiClient,
-    args: &FirewallAuditArgs,
-) -> Result<FirewallAuditReport, UnifiError> {
-    let _site_uuid = client.default_site_for(ApiSurface::Supported).await?;
-    let site_name = if let Some(ref s) = args.site {
-        s.as_str()
-    } else {
-        client.default_site()
-    };
-
-    let mut omitted = Vec::new();
-    let mut policies_result = serde_json::Value::Null;
-    let mut zones_result = serde_json::Value::Null;
-
-    // Fetch firewall policies via Private v2 API
-    match client
-        .get(
-            ApiSurface::PrivateV2,
-            ResourceKind::FirewallPolicy.path_template(),
-            &[("site", site_name)],
-            &[],
-        )
-        .await
-    {
-        Ok(policies) => {
-            policies_result = policies;
-        }
-        Err(UnifiError::SurfaceRequiresConfig { .. }) => {
-            omitted.push("policies: controller has allow_private_api disabled".to_owned());
-        }
-        Err(UnifiError::SurfaceRequiresScope { .. }) => {
-            omitted.push("policies: token lacks required scope".to_owned());
-        }
-        Err(e) => return Err(e),
-    }
-
-    // Fetch firewall zones via Private v2 API
-    match client
-        .get(
-            ApiSurface::PrivateV2,
-            ResourceKind::FirewallZone.path_template(),
-            &[("site", site_name)],
-            &[],
-        )
-        .await
-    {
-        Ok(zones) => {
-            zones_result = zones;
-        }
-        Err(UnifiError::SurfaceRequiresConfig { .. }) => {
-            omitted.push("zones: controller has allow_private_api disabled".to_owned());
-        }
-        Err(UnifiError::SurfaceRequiresScope { .. }) => {
-            omitted.push("zones: token lacks required scope".to_owned());
-        }
-        Err(e) => return Err(e),
-    }
-
-    // If all legs were refused, that's an error
-    if omitted.len() == 2 {
-        return Err(UnifiError::Malformed(
-            "all data sources refused: nothing was gathered".to_owned(),
-        ));
-    }
-
-    build_firewall_audit(&policies_result, &zones_result).map(|mut report| {
-        report.partial = !omitted.is_empty();
-        report.omitted = omitted;
-        report
+        offset: page.offset,
+        limit: page.limit,
+        total: page.total,
     })
 }
 
@@ -703,38 +686,6 @@ pub async fn client_troubleshoot(
     })
 }
 
-/// Build a firewall audit report from policies and zones.
-///
-/// # Errors
-///
-/// Returns an error if the data cannot be parsed.
-pub fn build_firewall_audit(
-    policies: &serde_json::Value,
-    zones: &serde_json::Value,
-) -> Result<FirewallAuditReport, UnifiError> {
-    // Policies and zones can be either bare arrays (PrivateV2) or enveloped (tests)
-    let policies_array = policies
-        .as_array()
-        .or_else(|| policies.get("data").and_then(|d| d.as_array()));
-    let zones_array = zones
-        .as_array()
-        .or_else(|| zones.get("data").and_then(|d| d.as_array()));
-
-    let ran = policies_array.is_some() || zones_array.is_some();
-    let policies_examined = policies_array.map_or(0, Vec::len);
-
-    // Placeholder audit logic - for now just report what we examined
-    let findings = Vec::new();
-
-    Ok(FirewallAuditReport {
-        ran,
-        policies_examined,
-        findings,
-        partial: false,
-        omitted: Vec::new(),
-    })
-}
-
 /// Build a client troubleshoot report from stations, devices, policies, and zones.
 ///
 /// # Errors
@@ -767,7 +718,10 @@ pub fn build_client_troubleshoot(
         .find(|s| s.get("mac").and_then(|v| v.as_str()) == Some(mac))
         .ok_or_else(|| UnifiError::Malformed(format!("station {mac} not found on site {site}")))?;
 
-    let association = Some(station.clone());
+    let association = Some(crate::redact::project_resource(
+        ResourceKind::Station,
+        station,
+    ));
 
     // Find the uplink device by matching the station's last_uplink_mac
     let uplink_device =
@@ -775,7 +729,7 @@ pub fn build_client_troubleshoot(
             devices_data
                 .iter()
                 .find(|d| d.get("macAddress").and_then(|v| v.as_str()) == Some(uplink_mac))
-                .cloned()
+                .map(|d| crate::redact::project_resource(ResourceKind::Device, d))
         } else {
             None
         };
@@ -831,7 +785,11 @@ pub fn build_client_troubleshoot(
                         .iter()
                         .any(|&zone_id| Some(zone_id) == source_zone || Some(zone_id) == dest_zone)
                 })
-                .cloned()
+                // A firewall policy's open field set is redacted, not
+                // allowlisted (see `crate::redact`'s module doc): a policy
+                // this server does not control the shape of can still carry
+                // a secret-named field in an operator's custom rule.
+                .map(|p| crate::redact::project_resource(ResourceKind::FirewallPolicy, p))
                 .collect();
 
             matching_policies
@@ -871,6 +829,12 @@ pub fn first_station_mac(stations: &serde_json::Value) -> Option<String> {
 }
 
 /// Join devices with their statistics by MAC address.
+///
+/// `devices` is projected through the [`ResourceKind::Device`] allowlist
+/// before the join, and the joined `stats` blob -- which has no allowlist of
+/// its own -- goes through the shared crate's denylist-and-shape scan, so
+/// neither side of the join can reintroduce a field the read path would have
+/// dropped.
 fn join_devices_with_stats(
     devices: &[serde_json::Value],
     stats: &[serde_json::Value],
@@ -878,14 +842,14 @@ fn join_devices_with_stats(
     devices
         .iter()
         .map(|device| {
-            let mut enriched = device.clone();
+            let mut enriched = crate::redact::project_resource(ResourceKind::Device, device);
             if let Some(mac) = device.get("macAddress").and_then(|v| v.as_str())
                 && let Some(stat) = stats
                     .iter()
                     .find(|s| s.get("mac").and_then(|v| v.as_str()) == Some(mac))
                 && let Some(obj) = enriched.as_object_mut()
             {
-                obj.insert("stats".to_owned(), stat.clone());
+                obj.insert("stats".to_owned(), crate::redact::redact_owned(stat));
             }
             enriched
         })
@@ -893,6 +857,10 @@ fn join_devices_with_stats(
 }
 
 /// Join clients with their statistics by MAC address.
+///
+/// Same treatment as [`join_devices_with_stats`]: `clients` is projected
+/// through the [`ResourceKind::Station`] allowlist before the join, and the
+/// joined `flowStats` blob goes through the denylist-and-shape scan.
 fn join_clients_with_stats(
     clients: &[serde_json::Value],
     stats: &[serde_json::Value],
@@ -900,14 +868,14 @@ fn join_clients_with_stats(
     clients
         .iter()
         .map(|client| {
-            let mut enriched = client.clone();
+            let mut enriched = crate::redact::project_resource(ResourceKind::Station, client);
             if let Some(mac) = client.get("macAddress").and_then(|v| v.as_str())
                 && let Some(stat) = stats
                     .iter()
                     .find(|s| s.get("mac").and_then(|v| v.as_str()) == Some(mac))
                 && let Some(obj) = enriched.as_object_mut()
             {
-                obj.insert("flowStats".to_owned(), stat.clone());
+                obj.insert("flowStats".to_owned(), crate::redact::redact_owned(stat));
             }
             enriched
         })
@@ -973,12 +941,16 @@ mod tests {
             .map_err(|e| format!("unwrapping stats: {e}"))?;
 
         let devices = super::join_devices_with_stats(devices_data, stats_data);
+        let total = devices.len();
 
         Ok(super::SiteHealthReport {
             devices,
             health: serde_json::Value::Array(health_data.to_vec()),
             partial: false,
             omitted: Vec::new(),
+            offset: 0,
+            limit: crate::tools::pagination::DEFAULT_PAGE_SIZE,
+            total,
         })
     }
 
@@ -990,6 +962,7 @@ mod tests {
     ) -> Result<super::SiteHealthReport, String> {
         let devices_data = crate::model::unwrap_enveloped_data(devices)
             .map_err(|e| format!("unwrapping devices: {e}"))?;
+        let total = devices_data.len();
 
         Ok(super::SiteHealthReport {
             devices: devices_data.to_vec(),
@@ -999,6 +972,9 @@ mod tests {
                 "health: controller has allow_private_api disabled".to_owned(),
                 "device_stats: controller has allow_private_api disabled".to_owned(),
             ],
+            offset: 0,
+            limit: crate::tools::pagination::DEFAULT_PAGE_SIZE,
+            total,
         })
     }
 
@@ -1018,6 +994,43 @@ mod tests {
             report.devices.len(),
             device_count,
             "the join dropped devices"
+        );
+    }
+
+    /// The report's device list must actually page: a caller asking for
+    /// fewer devices than the site has must get exactly that many, plus the
+    /// true site-wide total, not the whole joined list truncated for display
+    /// only.
+    ///
+    /// Uses a synthetic device list rather than the committed fixture, which
+    /// holds only one device -- too few to page over.
+    #[test]
+    fn the_health_report_pages_its_device_list() {
+        let full_count = 5;
+        let joined: Vec<serde_json::Value> = (0..full_count)
+            .map(|i| serde_json::json!({ "id": format!("device-{i}") }))
+            .collect();
+
+        let page =
+            crate::tools::pagination::paginate(joined, Some(0), Some(1)).expect("valid page");
+        let report = super::SiteHealthReport {
+            devices: page.items,
+            health: serde_json::Value::Null,
+            partial: false,
+            omitted: Vec::new(),
+            offset: page.offset,
+            limit: page.limit,
+            total: page.total,
+        };
+
+        assert_eq!(
+            report.devices.len(),
+            1,
+            "limit=1 must yield exactly one device"
+        );
+        assert_eq!(
+            report.total, full_count,
+            "total must report the whole site, not the page"
         );
     }
 
@@ -1052,6 +1065,9 @@ mod tests {
             networks: Vec::new(),
             partial: false,
             omitted: Vec::new(),
+            offset: 0,
+            limit: crate::tools::pagination::DEFAULT_PAGE_SIZE,
+            total: devices_data.len(),
         };
 
         let device_count = devices["data"].as_array().map_or(0, Vec::len);
@@ -1079,6 +1095,9 @@ mod tests {
             top_applications: top_apps,
             partial: false,
             omitted: Vec::new(),
+            offset: 0,
+            limit: crate::tools::pagination::DEFAULT_PAGE_SIZE,
+            total: joined.len(),
         };
 
         let client_count = clients["data"].as_array().map_or(0, Vec::len);
@@ -1187,18 +1206,5 @@ mod troubleshoot_tests {
             err_msg.contains("not found"),
             "error doesn't say 'not found'"
         );
-    }
-
-    /// An audit that finds nothing must be distinguishable from an audit that
-    /// did not run.
-    #[test]
-    fn a_clean_firewall_audit_is_not_an_empty_one() {
-        let policies = serde_json::json!({ "data": [] });
-        let zones = serde_json::json!({ "data": [] });
-        let result =
-            crate::tools::workflow::build_firewall_audit(&policies, &zones).expect("builds");
-        assert_eq!(result.policies_examined, 0);
-        assert!(result.findings.is_empty());
-        assert!(result.ran, "a clean audit still ran");
     }
 }

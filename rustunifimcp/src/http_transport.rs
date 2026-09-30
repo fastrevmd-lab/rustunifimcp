@@ -4,8 +4,9 @@
 //! `build_streamable_http_router` as of mecmcp-transport 0.8.8, so the consumer
 //! builds the configuration and passes it in.
 
+use crate::grant::UnifiGrant;
 use crate::server::UnifiServer;
-use mecmcp_auth::{BearerSyntax, CallerCtx, NoGrant, TokenStoreFile};
+use mecmcp_auth::{BearerSyntax, CallerCtx, TokenStoreFile};
 use mecmcp_transport::{
     BearerAuthenticator, BearerBoundary, BearerResponseProfile, HostOriginPolicy,
     HttpTransportBuildError, HttpTransportConfig, InsecureBindAcknowledgement, LimitsConfig,
@@ -36,7 +37,7 @@ pub fn build_preflight() -> ToolScopePreflight {
 #[allow(clippy::too_many_arguments)]
 pub fn build_http_router(
     handler: UnifiServer,
-    token_store: Option<Arc<TokenStoreFile<NoGrant>>>,
+    token_store: Option<Arc<TokenStoreFile<UnifiGrant>>>,
     allowed_hosts: Vec<String>,
     allowed_origins: Vec<String>,
     limits: LimitsConfig,

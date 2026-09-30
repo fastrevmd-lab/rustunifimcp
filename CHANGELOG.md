@@ -6,6 +6,58 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+- **Test: a missing `tokens.json` fails startup loudly, naming the path**
+  (MEC-988, mecmcp#356). `rustunifimcp` shipped `/var/lib/unifimcp/tokens.json`
+  from its first release and never had an `/etc` token store to migrate away
+  from, so it doesn't need the canonical/legacy resolver its five sibling
+  mecmcp servers carry. What it does need, and lacked a regression test for,
+  is confirmation that `mecmcp_auth::TokenStoreFile::load` refuses a missing
+  file outright — no silent empty store, no unauthenticated fallback — and
+  names the exact path in its error, so a bad drop-in restore is diagnosable
+  at startup rather than mid-incident. See `docs/FILESYSTEM-LAYOUT.md` in
+  `mecmcp` for the full six-server standard this closes out.
+- **Removed unwired stub tools and sub-actions** (MEC-505): `unifi_run_speed_test`
+  and `unifi_firewall_audit` are gone from the tool catalog, `unifi_client_action`
+  no longer admits `authorize` or `limit_bandwidth`, and `unifi_backup_action` no
+  longer admits `download` or `validate` — each was advertised but only ever
+  returned an error or an empty result. The catalog is now 22 tools (11 write).
+  `adopt`, `upgrade`, `port_action`, and backup `list`/`trigger`, wired for real
+  in #80/#81, are kept. README/CLAUDE.md contradictions on `--lab-mode` and
+  stale tool counts across the docs are corrected.
+- **Wired `unifi_backup_action list` and `trigger`** (MEC-516): `list` calls
+  the controller's `cmd/backup` `list-backups` command and returns the
+  result capped at 100 entries with a `truncated`/`shown`/`total` marker,
+  the same shape `mecmcp-server::truncate_items` (MEC-513, mecmcp#443) will
+  give once `rustunifimcp` adopts a tagged `mecmcp-server` release that
+  carries it — the local helper is a deliberate placeholder, not a
+  reimplementation to keep. `trigger` calls `cmd/backup` `backup`. `download`
+  and `validate` still refuse: both would move a raw `.unf` file rather than
+  JSON, which `UnifiClient` does not support today.
+- **Added read coverage for legacy firewall rules, port forwards, static
+  routes, and the controller event log** (MEC-509). `unifi_list_resources`
+  and `unifi_get_resource` gain three new `kind`s: `firewall_rule` (the
+  pre-zone-based ruleset, `rest/firewallrule`), `port_forward`
+  (`rest/portforward`), and `static_route` (`rest/routing`) — all read-only
+  for now, projected through their own field allowlists like every other
+  kind. `unifi_query_stats` gains `subject=event` for the controller's event
+  log (`stat/event`), projected through a typed model rather than the
+  shared crate's denylist-and-shape scan: an event's type discriminator is
+  carried in a field literally named `key`, which that scan treats as an
+  exact-match secret-shaped name, so it is renamed to `event_type` on the
+  way out instead.
+- **Release supply chain hardening** (MEC-507): the `Release image` workflow now
+  publishes a CycloneDX SBOM per workspace crate as a release artifact,
+  cosign-signs the pushed image keylessly (GitHub OIDC, no key material),
+  attaches a SLSA build provenance attestation, and builds/publishes
+  `linux/arm64` alongside `linux/amd64` in one multi-arch manifest.
+  `cargo deny check` in CI now covers `advisories` and `licenses` as well as
+  `bans` and `sources`; that surfaced a yanked `chacha20 0.10.1` (bumped to
+  0.10.2) and an unallowed `CDLA-Permissive-2.0` license on
+  `webpki-root-certs`/`webpki-roots` (added to `deny.toml`'s allow list —
+  covers embedded Mozilla root cert data, not code, same allowance as
+  mecmcp/rustjunosmcp/rustproxmoxmcp). See
+  [docs/HOW-TO-SETUP-DOCKER.md](docs/HOW-TO-SETUP-DOCKER.md) for the
+  `cosign verify` / `gh attestation verify` recipes.
 - **Re-pinned the `mecmcp-*` crates from `v0.23.1` to `v0.24.1`** (MEC-504).
   Brings in mecmcp#390 (the human-approver gate: `ChangesetCoordinator::approve_change_set`
   now takes an `approver_actor_type: mecmcp_audit::ActorType` and refuses
@@ -47,6 +99,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `traffic_route` is the most restrictive: this server's read model for that kind
   carries only `name`, so a `traffic_route` write is now name-only — any other
   field in the body is refused.
+- **Container images now publish to `ghcr.io/mechubsec/rustunifimcp`** —
+  the repo moved to the mechubsec organization, and images are renamed to
+  match. Older tags were copied from the previous name.
 
 ## [0.4.0] - 2026-09-16
 
@@ -380,8 +435,8 @@ by fifteen hours. v0.2.0 closes that gap.
   must not be silently accepted — and was the only test for it. Enabled because
   `CanonicalEnvelope` in mecmcp 0.23.0 now carries `#[serde(deny_unknown_fields)]`.
 
-[unreleased]: https://github.com/fastrevmd-lab/rustunifimcp/compare/v0.3.2...HEAD
-[0.3.2]: https://github.com/fastrevmd-lab/rustunifimcp/compare/v0.3.1...v0.3.2
-[0.3.1]: https://github.com/fastrevmd-lab/rustunifimcp/compare/v0.3.0...v0.3.1
-[0.3.0]: https://github.com/fastrevmd-lab/rustunifimcp/compare/v0.2.0...v0.3.0
-[0.2.0]: https://github.com/fastrevmd-lab/rustunifimcp/releases/tag/v0.2.0
+[unreleased]: https://github.com/mechubsec/rustunifimcp/compare/v0.3.2...HEAD
+[0.3.2]: https://github.com/mechubsec/rustunifimcp/compare/v0.3.1...v0.3.2
+[0.3.1]: https://github.com/mechubsec/rustunifimcp/compare/v0.3.0...v0.3.1
+[0.3.0]: https://github.com/mechubsec/rustunifimcp/compare/v0.2.0...v0.3.0
+[0.2.0]: https://github.com/mechubsec/rustunifimcp/releases/tag/v0.2.0

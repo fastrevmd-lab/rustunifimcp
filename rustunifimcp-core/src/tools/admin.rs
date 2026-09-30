@@ -63,41 +63,23 @@ pub async fn unifi_list_controllers(registry: &ControllerRegistry) -> Result<Val
 /// A controller that is unreachable shows as unreachable with the reason, not
 /// silently omitted.
 ///
+/// Takes the server's own client map rather than building one per controller.
+/// `UnifiClient::new` reads the credential from disk and stands up a whole
+/// connection pool, so status -- the tool an operator polls most often --
+/// was paying that cost, for every controller, on every call, instead of
+/// reusing the pool the server already holds.
+///
 /// # Errors
 ///
-/// Returns [`UnifiError::Inventory`] if the registry cannot be accessed.
+/// Never returns an error: an individual controller's failure is reported as
+/// `reachable: false`, not propagated.
 pub async fn unifimcp_status(
-    registry: &ControllerRegistry,
+    clients: &std::collections::BTreeMap<String, UnifiClient>,
     lab_mode: bool,
 ) -> Result<Value, UnifiError> {
-    let names = registry.names();
     let mut controller_status = Vec::new();
 
-    for name in &names {
-        let controller = match registry.get(name) {
-            Ok(c) => c,
-            Err(e) => {
-                controller_status.push(json!({
-                    "name": name,
-                    "reachable": false,
-                    "error": e.to_string()
-                }));
-                continue;
-            }
-        };
-
-        let client = match UnifiClient::new(controller) {
-            Ok(c) => c,
-            Err(e) => {
-                controller_status.push(json!({
-                    "name": name,
-                    "reachable": false,
-                    "error": e.to_string()
-                }));
-                continue;
-            }
-        };
-
+    for (name, client) in clients {
         match client.controller_version().await {
             Ok(version) => {
                 controller_status.push(json!({
@@ -123,7 +105,7 @@ pub async fn unifimcp_status(
         "tool_count": TOOL_NAMES.len(),
         "write_tool_count": WRITE_TOOLS.len(),
         "controllers": controller_status,
-        "controller_count": names.len()
+        "controller_count": clients.len()
     }))
 }
 
@@ -158,6 +140,7 @@ pub async fn unifi_add_controller(
 mod tests {
     use super::{MECMCP_VERSION, redacted_controller_view};
     use crate::inventory::Controller;
+    use serde_json::json;
 
     /// list_controllers must not disclose credential locations. Naming the file
     /// path tells a caller exactly which file to attack.
@@ -178,6 +161,23 @@ mod tests {
         assert!(!rendered.contains("/etc/unifimcp/api.key"), "{rendered}");
         assert!(!rendered.contains("api_key_file"), "{rendered}");
         assert!(rendered.contains("unifi.example.org"), "{rendered}");
+    }
+
+    /// `unifimcp_status` must read whatever client map it is handed rather
+    /// than needing a registry to build one -- the whole point of the fix is
+    /// that it can no longer construct a client of its own. Taking a
+    /// `&ControllerRegistry` here again would fail to compile against the
+    /// server's call site, which now builds and holds the map once.
+    #[tokio::test]
+    async fn unifimcp_status_reports_from_the_map_it_is_given_not_a_registry() {
+        let clients = std::collections::BTreeMap::new();
+        let status = super::unifimcp_status(&clients, true)
+            .await
+            .expect("status never errors, even with nothing to report on");
+
+        assert_eq!(status["controller_count"], json!(0));
+        assert_eq!(status["controllers"].as_array().expect("array").len(), 0);
+        assert_eq!(status["lab_mode"], json!(true));
     }
 
     /// The view must say whether private surfaces are reachable, because that
@@ -227,18 +227,31 @@ mod tests {
                 .expect("a non-empty line has a first token")
                 .to_owned();
 
-            // A mecmcp dependency without a tag is the failure this guard exists to catch:
-            // the pin comment above these lines says the tag is what holds the version.
-            let tag_start = trimmed.find("tag = \"v").unwrap_or_else(|| {
+            // `mecmcp-redact` has not shipped in a tagged mecmcp release (see the
+            // comment above its line in the workspace manifest), so it is pinned by
+            // `rev` and carries no `tag = "vX.Y.Z"`. It still declares `version =
+            // "X.Y.Z"` alongside the `rev`, which is what is checked against
+            // `MECMCP_VERSION` here instead.
+            let (needle, needle_len) = if name == "mecmcp-redact" {
+                ("version = \"", "version = \"".len())
+            } else {
+                ("tag = \"v", "tag = \"v".len())
+            };
+
+            // A mecmcp dependency without the expected pin marker is the failure this
+            // guard exists to catch: the pin comment above these lines says the tag
+            // (or, for mecmcp-redact, the version) is what holds the version.
+            let marker_start = trimmed.find(needle).unwrap_or_else(|| {
                 panic!(
-                    "workspace Cargo.toml dependency `{name}` has no tag = \"vX.Y.Z\"; \
-                     every mecmcp-* dependency must be pinned by tag"
+                    "workspace Cargo.toml dependency `{name}` has no {needle}X.Y.Z\"; \
+                     every mecmcp-* dependency must be pinned by tag (or, for \
+                     mecmcp-redact, by version alongside its rev)"
                 )
             });
-            let value_start = tag_start + "tag = \"v".len();
+            let value_start = marker_start + needle_len;
             let value_len = trimmed[value_start..]
                 .find('"')
-                .expect("tag value must be closed with a quote");
+                .expect("pin value must be closed with a quote");
             pins.push((
                 name,
                 trimmed[value_start..value_start + value_len].to_owned(),

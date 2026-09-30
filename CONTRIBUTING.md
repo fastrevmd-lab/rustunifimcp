@@ -1,6 +1,6 @@
 # Contributing to rustunifimcp
 
-Thanks for considering a contribution. `rustunifimcp` is the UniFi Network member of the [mechub](https://github.com/fastrevmd-lab) family of open-source, self-hosted network-security automation tooling. It is built **mecmcp-native**: authentication, transport, audit, policy, inventory, and change control all come from [`mecmcp`](https://github.com/fastrevmd-lab/mecmcp); this repo contributes the UniFi resource model, tool surface, and workflows. See [README.md](README.md) for what the server does and [CLAUDE.md](CLAUDE.md) for operational detail on the reference deployment.
+Thanks for considering a contribution. `rustunifimcp` is the UniFi Network member of the [mechub](https://github.com/mechubsec) family of open-source, self-hosted network-security automation tooling. It is built **mecmcp-native**: authentication, transport, audit, policy, inventory, and change control all come from [`mecmcp`](https://github.com/mechubsec/mecmcp); this repo contributes the UniFi resource model, tool surface, and workflows. See [README.md](README.md) for what the server does and [CLAUDE.md](CLAUDE.md) for operational detail on the reference deployment.
 
 ## Before you start
 
@@ -15,7 +15,7 @@ This is a Cargo workspace with two members:
 - `rustunifimcp` — the binary: CLI, MCP server wiring, and the `mecmcp-*` integration
 - `rustunifimcp-core` — the UniFi client, resource model, and MCP tool surface
 
-The `mecmcp-*` crates (`mecmcp-audit`, `mecmcp-auth`, `mecmcp-changeset`, `mecmcp-http`, `mecmcp-inventory`, `mecmcp-openapi`, `mecmcp-runtime`, `mecmcp-secret`, `mecmcp-server`, `mecmcp-transport`) are consumed read-only, pinned to an exact git tag, from [`fastrevmd-lab/mecmcp`](https://github.com/fastrevmd-lab/mecmcp) (see `deny.toml`'s `allow-git` exception and the comment in `Cargo.toml` — don't relax the pin from this repo). If a change belongs in shared behavior rather than the UniFi-specific parts of this repo, it likely belongs in that repo instead.
+The `mecmcp-*` crates (`mecmcp-audit`, `mecmcp-auth`, `mecmcp-changeset`, `mecmcp-http`, `mecmcp-inventory`, `mecmcp-openapi`, `mecmcp-runtime`, `mecmcp-secret`, `mecmcp-server`, `mecmcp-transport`) are consumed read-only, pinned to an exact git tag, from [`mechubsec/mecmcp`](https://github.com/mechubsec/mecmcp) (see `deny.toml`'s `allow-git` exception and the comment in `Cargo.toml` — don't relax the pin from this repo). If a change belongs in shared behavior rather than the UniFi-specific parts of this repo, it likely belongs in that repo instead.
 
 ## Build and test
 

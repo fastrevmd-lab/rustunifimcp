@@ -3,20 +3,110 @@
 use anyhow::{Context as _, Result, bail};
 use clap::Parser;
 use mecmcp_audit::AuditFileSink;
-use mecmcp_auth::NoGrant;
+use mecmcp_auth::ScopeSet;
 use mecmcp_runtime::cli::{Command, TokenAction};
 use mecmcp_transport::serve_router;
 use rmcp::ServiceExt;
 use rustunifimcp::cli::{TokenCli, TokenCommand, UnifiCli};
+use rustunifimcp::grant::UnifiGrant;
 use rustunifimcp::http_transport::build_http_router;
 use rustunifimcp::server::UnifiServer;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
-/// Convert `TokenCommand` to `TokenAction`.
+/// The two tools whose combination on one token defeats two-person control:
+/// a token holding both could stage and approve the same change set.
 ///
-/// UniFi uses `NoGrant`, so no vendor grant is built.
-fn token_command_to_action(command: TokenCommand) -> (TokenAction, Option<NoGrant>) {
+/// Refused here at issuance. `UnifiServer::holds_combined_two_person_control_scope`
+/// re-checks the same combination at call time, because a token store loaded
+/// from a hand-edited file never went through this check at all.
+const TWO_PERSON_CONTROL_TOOLS: (&str, &str) = ("unifi_stage_change", "unifi_approve_change_set");
+
+/// Refuse minting or widening a token whose tool scope would combine both
+/// change-set control tools.
+///
+/// # Errors
+/// Returns an error naming both tools if `tools` contains both.
+fn reject_combined_two_person_control_scope(tools: &[String]) -> Result<()> {
+    let (stage, approve) = TWO_PERSON_CONTROL_TOOLS;
+    let has = |name: &str| tools.iter().any(|t| t == name);
+    if has(stage) && has(approve) {
+        bail!(
+            "refusing to grant a token both `{stage}` and `{approve}`: two-person control \
+             requires the staging and approving tokens to differ. Issue separate tokens."
+        );
+    }
+    Ok(())
+}
+
+/// Refuse a token command that would mint or widen a token combining both
+/// change-set control scopes.
+///
+/// This is the single point `run_inner` calls before dispatching a `token`
+/// subcommand, so a test driving it through [`TokenCli::parse_from`] exercises
+/// exactly the check that stands between argv and the token store -- including
+/// clap's comma-splitting of `--tools` -- rather than the helper function in
+/// isolation.
+///
+/// # Errors
+/// As [`reject_combined_two_person_control_scope`].
+fn validate_token_command(command: &TokenCommand) -> Result<()> {
+    match command {
+        TokenCommand::Add {
+            allow_self_approval: true,
+            ..
+        }
+        | TokenCommand::SetScope {
+            allow_self_approval: true,
+            ..
+        } => Ok(()),
+        TokenCommand::Add { tools, .. } => reject_combined_two_person_control_scope(tools),
+        TokenCommand::SetScope {
+            tools: Some(tools), ..
+        } => reject_combined_two_person_control_scope(tools),
+        _ => Ok(()),
+    }
+}
+
+/// Parse `--sites` into a [`UnifiGrant`].
+///
+/// A single `*` means every site (`ScopeSet::Wildcard`); anything else is an
+/// exact allowlist. Mirrors `mecmcp_runtime::token_cmd`'s private
+/// `parse_scope`, which this crate cannot call directly because it is not
+/// exported -- the two must be kept in agreement by hand.
+///
+/// # Errors
+/// Returns an error if `values` is empty, or mixes `*` with exact names.
+fn parse_sites(values: Vec<String>) -> Result<UnifiGrant> {
+    if values.is_empty() {
+        bail!("--sites requires at least one site identifier or '*'");
+    }
+    if values.iter().any(|v| v == "*") {
+        if values.len() != 1 {
+            bail!("--sites '*' cannot be mixed with exact site identifiers");
+        }
+        return Ok(UnifiGrant {
+            sites: ScopeSet::Wildcard,
+        });
+    }
+    Ok(UnifiGrant {
+        sites: ScopeSet::Allowlist(values),
+    })
+}
+
+/// Convert `TokenCommand` to `TokenAction`, building a [`UnifiGrant`] from
+/// `--sites` when the command carries one.
+///
+/// `--sites` is omitted on `revoke`, `list`, and `rotate` -- those never mint
+/// or widen a grant, so there is nothing to parse. Omitting it on `add` or
+/// `set-scope` yields `None`: a grantless new token (unrestricted by site,
+/// the pre-MEC-508 default) or, on `set-scope`, no change to the token's
+/// existing grant (`TokenStoreFile::set_scopes` keeps a `None` grant as "no
+/// change", never as "clear").
+///
+/// # Errors
+/// Returns an error if `--sites` fails to parse (see [`parse_sites`]).
+fn token_command_to_action(command: TokenCommand) -> Result<(TokenAction, Option<UnifiGrant>)> {
     match command {
         TokenCommand::Add {
             tokens_file,
@@ -27,64 +117,74 @@ fn token_command_to_action(command: TokenCommand) -> (TokenAction, Option<NoGran
             provider_tier,
             on_behalf_of,
             actor_type,
+            allow_self_approval: _,
+            sites,
             server_pid,
-        } => (
-            TokenAction::Add {
-                tokens_file,
-                name,
-                devices,
-                tools,
-                provider,
-                provider_tier,
-                on_behalf_of,
-                actor_type,
-                server_pid,
-            },
-            None,
-        ),
+        } => {
+            let grant = sites.map(parse_sites).transpose()?;
+            Ok((
+                TokenAction::Add {
+                    tokens_file,
+                    name,
+                    devices,
+                    tools,
+                    provider,
+                    provider_tier,
+                    on_behalf_of,
+                    actor_type,
+                    server_pid,
+                },
+                grant,
+            ))
+        }
         TokenCommand::Revoke {
             tokens_file,
             name,
             server_pid,
-        } => (
+        } => Ok((
             TokenAction::Revoke {
                 tokens_file,
                 name,
                 server_pid,
             },
             None,
-        ),
-        TokenCommand::List { tokens_file } => (TokenAction::List { tokens_file }, None),
+        )),
+        TokenCommand::List { tokens_file } => Ok((TokenAction::List { tokens_file }, None)),
         TokenCommand::Rotate {
             tokens_file,
             name,
             server_pid,
-        } => (
+        } => Ok((
             TokenAction::Rotate {
                 tokens_file,
                 name,
                 server_pid,
             },
             None,
-        ),
+        )),
         TokenCommand::SetScope {
             tokens_file,
             name,
             devices,
             tools,
             yes,
+            allow_self_approval: _,
+            sites,
             server_pid,
-        } => (
-            TokenAction::SetScopes {
-                tokens_file,
-                name,
-                devices,
-                tools,
-                yes,
-                server_pid,
-            },
-            None,
-        ),
+        } => {
+            let grant = sites.map(parse_sites).transpose()?;
+            Ok((
+                TokenAction::SetScopes {
+                    tokens_file,
+                    name,
+                    devices,
+                    tools,
+                    yes,
+                    server_pid,
+                },
+                grant,
+            ))
+        }
     }
 }
 
@@ -373,6 +473,8 @@ async fn run_inner() -> Result<()> {
             .collect::<Vec<_>>();
         let token_cli = TokenCli::parse_from(token_args);
 
+        validate_token_command(&token_cli.command)?;
+
         // Install a subscriber before dispatching. `run_with_grant` emits the
         // scope change as a `target: "audit"` event, and this path returns
         // long before the server's normal tracing init, so without one every token
@@ -385,7 +487,7 @@ async fn run_inner() -> Result<()> {
         // they are looking.
         init_token_audit();
 
-        let (action, grant) = token_command_to_action(token_cli.command);
+        let (action, grant) = token_command_to_action(token_cli.command)?;
 
         // Describe the mutation now, emit the record after it runs.
         //
@@ -398,7 +500,7 @@ async fn run_inner() -> Result<()> {
         // afterwards.
         let pending = PendingTokenAudit::describe(&action);
 
-        let outcome = mecmcp_runtime::token_cmd::run_with_grant::<NoGrant>(
+        let outcome = mecmcp_runtime::token_cmd::run_with_grant::<UnifiGrant>(
             action,
             &[],
             rustunifimcp_core::tools::TOOL_NAMES,
@@ -460,6 +562,20 @@ async fn run_inner() -> Result<()> {
         );
     }
 
+    // Direct-commit tools (unifi_device_action's `restart`, unifi_client_action's
+    // `block`/`unblock`/`reconnect`) mutate a device or client in one call with no
+    // change-set approval. Refused by default; logging here mirrors the lab-mode
+    // banner above.
+    let direct_commit = mecmcp_audit::DirectCommitPolicy::new(cli.allow_direct_commit);
+    direct_commit.log_startup("rustunifimcp");
+    if !cli.allow_direct_commit {
+        tracing::info!(
+            "direct-commit tools disabled: unifi_device_action's restart and \
+             unifi_client_action's block/unblock/reconnect are refused on stdio and HTTP \
+             alike. Use --allow-direct-commit to enable them."
+        );
+    }
+
     // Warn if --state-file is not provided.
     if cli.state_file.is_none() {
         tracing::warn!(
@@ -518,7 +634,13 @@ async fn run_inner() -> Result<()> {
     .map_err(|e| anyhow::anyhow!("failed to initialize the change-set coordinator: {e}"))?;
 
     // Build server.
-    let server = UnifiServer::new(Arc::clone(&registry), cli.lab_mode(), coordinator, recorder)?;
+    let server = UnifiServer::new(
+        Arc::clone(&registry),
+        cli.lab_mode(),
+        coordinator,
+        recorder,
+        direct_commit,
+    )?;
 
     // Determine transport.
     let served = match cli.common.transport {
@@ -597,7 +719,7 @@ fn load_listener_tls(args: &mecmcp_runtime::cli::Cli) -> Result<Option<Arc<rustl
 fn perform_sighup_reload(
     registry: &rustunifimcp_core::inventory::ControllerRegistry,
     server: Option<&UnifiServer>,
-    token_store: Option<&mecmcp_auth::TokenStoreFile<mecmcp_auth::NoGrant>>,
+    token_store: Option<&mecmcp_auth::TokenStoreFile<UnifiGrant>>,
     audit_sink: Option<&AuditFileSink>,
 ) {
     // Reload controller inventory.
@@ -686,7 +808,7 @@ fn perform_sighup_reload(
 fn install_sighup_reload(
     registry: Arc<rustunifimcp_core::inventory::ControllerRegistry>,
     server: Option<UnifiServer>,
-    token_store: Option<Arc<mecmcp_auth::TokenStoreFile<mecmcp_auth::NoGrant>>>,
+    token_store: Option<Arc<mecmcp_auth::TokenStoreFile<UnifiGrant>>>,
     audit_sink: Option<Arc<AuditFileSink>>,
 ) -> std::io::Result<()> {
     mecmcp_runtime::signals::install_hup_handler(move || {
@@ -962,15 +1084,187 @@ mod tests {
             provider_tier: None,
             on_behalf_of: None,
             actor_type: None,
+            allow_self_approval: false,
+            sites: None,
             server_pid: None,
         };
 
-        let (action, grant) = token_command_to_action(command);
+        let (action, grant) = token_command_to_action(command).expect("converts");
         assert!(grant.is_none());
         match action {
             TokenAction::Add { name, .. } => assert_eq!(name, "test"),
             _ => panic!("expected TokenAction::Add"),
         }
+    }
+
+    /// `--sites` on `token add` must produce a grant restricting the new
+    /// token to exactly the named sites -- the regression this issue exists
+    /// for: a token scoped to one site must not be indistinguishable from an
+    /// unrestricted one.
+    #[test]
+    fn token_command_to_action_add_with_sites_builds_a_grant() {
+        use std::path::PathBuf;
+        let command = TokenCommand::Add {
+            tokens_file: PathBuf::from("/tmp/tokens.json"),
+            name: "test".to_string(),
+            devices: vec!["*".to_string()],
+            tools: vec!["*".to_string()],
+            provider: None,
+            provider_tier: None,
+            on_behalf_of: None,
+            actor_type: None,
+            allow_self_approval: false,
+            sites: Some(vec!["site-a".to_string(), "site-b".to_string()]),
+            server_pid: None,
+        };
+
+        let (_, grant) = token_command_to_action(command).expect("converts");
+        let grant = grant.expect("--sites must produce a grant");
+        assert_eq!(
+            grant.sites,
+            mecmcp_auth::ScopeSet::Allowlist(vec!["site-a".to_string(), "site-b".to_string()])
+        );
+    }
+
+    /// `--sites '*'` mints a grant that permits every site -- distinct from
+    /// omitting the flag (which mints a grantless token), but authorizing
+    /// identically.
+    #[test]
+    fn token_command_to_action_add_with_wildcard_sites_builds_a_wildcard_grant() {
+        use std::path::PathBuf;
+        let command = TokenCommand::Add {
+            tokens_file: PathBuf::from("/tmp/tokens.json"),
+            name: "test".to_string(),
+            devices: vec!["*".to_string()],
+            tools: vec!["*".to_string()],
+            provider: None,
+            provider_tier: None,
+            on_behalf_of: None,
+            actor_type: None,
+            allow_self_approval: false,
+            sites: Some(vec!["*".to_string()]),
+            server_pid: None,
+        };
+
+        let (_, grant) = token_command_to_action(command).expect("converts");
+        let grant = grant.expect("--sites must produce a grant");
+        assert_eq!(grant.sites, mecmcp_auth::ScopeSet::Wildcard);
+    }
+
+    /// `*` mixed with exact site names is refused -- the same rule
+    /// `mecmcp_runtime::token_cmd`'s `parse_scope` enforces for devices/tools,
+    /// kept consistent here by hand since that function is not exported.
+    #[test]
+    fn token_command_to_action_add_rejects_wildcard_mixed_with_exact_sites() {
+        use std::path::PathBuf;
+        let command = TokenCommand::Add {
+            tokens_file: PathBuf::from("/tmp/tokens.json"),
+            name: "test".to_string(),
+            devices: vec!["*".to_string()],
+            tools: vec!["*".to_string()],
+            provider: None,
+            provider_tier: None,
+            on_behalf_of: None,
+            actor_type: None,
+            allow_self_approval: false,
+            sites: Some(vec!["*".to_string(), "site-a".to_string()]),
+            server_pid: None,
+        };
+
+        assert!(token_command_to_action(command).is_err());
+    }
+
+    /// A token minted with both `unifi_stage_change` and
+    /// `unifi_approve_change_set` in its tool scope could stage and approve
+    /// the same change set alone, defeating two-person control. Issuance
+    /// must refuse it rather than depend on the operational convention in
+    /// CLAUDE.md that nothing enforced.
+    #[test]
+    fn minting_a_token_with_both_changeset_control_scopes_is_refused() {
+        let error = reject_combined_two_person_control_scope(&[
+            "unifi_stage_change".to_string(),
+            "unifi_approve_change_set".to_string(),
+        ])
+        .expect_err("both scopes on one token must be refused");
+        let message = error.to_string();
+        assert!(message.contains("unifi_stage_change"), "{message}");
+        assert!(message.contains("unifi_approve_change_set"), "{message}");
+    }
+
+    /// Holding only one of the two scopes -- the normal case -- must not be
+    /// refused, and neither must an unrelated tool list.
+    #[test]
+    fn minting_a_token_with_only_one_changeset_control_scope_is_allowed() {
+        reject_combined_two_person_control_scope(&["unifi_stage_change".to_string()])
+            .expect("staging alone must be permitted");
+        reject_combined_two_person_control_scope(&["unifi_approve_change_set".to_string()])
+            .expect("approving alone must be permitted");
+        reject_combined_two_person_control_scope(&["unifi_get_change_set".to_string()])
+            .expect("an unrelated tool must be permitted");
+    }
+
+    /// Drives the refusal through the same entry point `run_inner` calls --
+    /// `TokenCli::parse_from` followed by `validate_token_command` -- rather
+    /// than calling `reject_combined_two_person_control_scope` directly. That
+    /// distinction matters: this is the only test that would notice if
+    /// `run_inner` ever stopped calling `validate_token_command`, or if clap's
+    /// `--tools` comma-splitting ever changed shape.
+    #[test]
+    fn token_add_cli_with_both_changeset_control_scopes_in_one_tools_flag_is_refused() {
+        let cli = TokenCli::parse_from([
+            "rustunifimcp",
+            "add",
+            "--tokens-file",
+            "/tmp/tokens.json",
+            "--name",
+            "test",
+            "--devices",
+            "*",
+            "--tools",
+            "unifi_stage_change,unifi_approve_change_set",
+        ]);
+        let error = validate_token_command(&cli.command)
+            .expect_err("both scopes on one token must be refused");
+        let message = error.to_string();
+        assert!(message.contains("unifi_stage_change"), "{message}");
+        assert!(message.contains("unifi_approve_change_set"), "{message}");
+    }
+
+    /// The same refusal must apply when widening an existing token's scope
+    /// with `set-scope --tools`, not just at initial `add` time.
+    #[test]
+    fn token_set_scope_cli_with_both_changeset_control_scopes_is_refused() {
+        let cli = TokenCli::parse_from([
+            "rustunifimcp",
+            "set-scope",
+            "--tokens-file",
+            "/tmp/tokens.json",
+            "--name",
+            "test",
+            "--tools",
+            "unifi_stage_change,unifi_approve_change_set",
+            "--yes",
+        ]);
+        validate_token_command(&cli.command)
+            .expect_err("widening a token to both scopes must be refused");
+    }
+
+    /// `set-scope` with `--tools` omitted (leaving the existing scope
+    /// unchanged) must not be refused -- there is nothing to check.
+    #[test]
+    fn token_set_scope_cli_without_tools_is_allowed() {
+        let cli = TokenCli::parse_from([
+            "rustunifimcp",
+            "set-scope",
+            "--tokens-file",
+            "/tmp/tokens.json",
+            "--name",
+            "test",
+            "--devices",
+            "*",
+            "--yes",
+        ]);
+        validate_token_command(&cli.command).expect("no --tools means nothing to validate");
     }
 
     #[test]
@@ -982,7 +1276,7 @@ mod tests {
             server_pid: None,
         };
 
-        let (action, grant) = token_command_to_action(command);
+        let (action, grant) = token_command_to_action(command).expect("converts");
         assert!(grant.is_none());
         match action {
             TokenAction::Revoke { name, .. } => assert_eq!(name, "test"),
@@ -997,7 +1291,7 @@ mod tests {
             tokens_file: PathBuf::from("/tmp/tokens.json"),
         };
 
-        let (action, grant) = token_command_to_action(command);
+        let (action, grant) = token_command_to_action(command).expect("converts");
         assert!(grant.is_none());
         assert!(matches!(action, TokenAction::List { .. }));
     }
@@ -1011,7 +1305,7 @@ mod tests {
             server_pid: None,
         };
 
-        let (action, grant) = token_command_to_action(command);
+        let (action, grant) = token_command_to_action(command).expect("converts");
         assert!(grant.is_none());
         match action {
             TokenAction::Rotate { name, .. } => assert_eq!(name, "test"),
@@ -1028,15 +1322,42 @@ mod tests {
             devices: Some(vec!["*".to_string()]),
             tools: Some(vec!["*".to_string()]),
             yes: false,
+            allow_self_approval: false,
+            sites: None,
             server_pid: None,
         };
 
-        let (action, grant) = token_command_to_action(command);
+        let (action, grant) = token_command_to_action(command).expect("converts");
         assert!(grant.is_none());
         match action {
             TokenAction::SetScopes { name, .. } => assert_eq!(name, "test"),
             _ => panic!("expected TokenAction::SetScopes"),
         }
+    }
+
+    /// `--sites` on `set-scope` must build a replacement grant, the same as
+    /// `add` -- this is how an existing token gets narrowed (or widened) to a
+    /// site scope after issuance.
+    #[test]
+    fn token_command_to_action_set_scope_with_sites_builds_a_grant() {
+        use std::path::PathBuf;
+        let command = TokenCommand::SetScope {
+            tokens_file: PathBuf::from("/tmp/tokens.json"),
+            name: "test".to_string(),
+            devices: None,
+            tools: None,
+            yes: true,
+            allow_self_approval: false,
+            sites: Some(vec!["site-a".to_string()]),
+            server_pid: None,
+        };
+
+        let (_, grant) = token_command_to_action(command).expect("converts");
+        let grant = grant.expect("--sites must produce a grant");
+        assert_eq!(
+            grant.sites,
+            mecmcp_auth::ScopeSet::Allowlist(vec!["site-a".to_string()])
+        );
     }
 
     #[tokio::test]
@@ -1073,7 +1394,14 @@ mod tests {
         .unwrap();
 
         // Build a server for the reload handler.
-        let server = UnifiServer::new(Arc::clone(&registry), false, coordinator, None).unwrap();
+        let server = UnifiServer::new(
+            Arc::clone(&registry),
+            false,
+            coordinator,
+            None,
+            mecmcp_audit::DirectCommitPolicy::new(false),
+        )
+        .unwrap();
 
         // Should install successfully without a token store.
         let result = install_sighup_reload(registry, Some(server), None, None);
@@ -1125,7 +1453,14 @@ mod tests {
             None,
         )
         .unwrap();
-        let server = UnifiServer::new(Arc::clone(&registry), false, coordinator, None).unwrap();
+        let server = UnifiServer::new(
+            Arc::clone(&registry),
+            false,
+            coordinator,
+            None,
+            mecmcp_audit::DirectCommitPolicy::new(false),
+        )
+        .unwrap();
 
         let token_store = Arc::new(mecmcp_auth::TokenStoreFile::load(tokens_file.path()).unwrap());
 
@@ -1173,6 +1508,30 @@ mod tests {
         assert_eq!(registry.names().len(), 0);
     }
 
+    /// `serve_http` loads `cli.common.tokens_file` via
+    /// `mecmcp_auth::TokenStoreFile::load` with no fallback: unlike its five
+    /// sibling servers, `rustunifimcp` shipped `/var/lib`-only from its first
+    /// release and never had an `/etc` token store to migrate away from, so
+    /// there is no canonical/legacy resolver to test here. What must hold
+    /// instead is that a missing token file fails startup outright, naming
+    /// the exact path, rather than silently proceeding unauthenticated or
+    /// with an empty store — the fail-loud half of MEC-988 (mecmcp#356).
+    #[test]
+    fn a_missing_tokens_file_fails_loudly_and_names_the_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("tokens.json");
+
+        let error = mecmcp_auth::TokenStoreFile::<UnifiGrant>::load(&missing)
+            .expect_err("a missing token file must not load as an empty store");
+
+        let message = error.to_string();
+        assert!(
+            message.contains(&missing.display().to_string()),
+            "error must name the missing path so a bad drop-in restore is \
+             diagnosable at startup, got: {message}"
+        );
+    }
+
     #[tokio::test]
     async fn client_rebuild_after_reload() {
         use std::io::Write;
@@ -1205,7 +1564,14 @@ mod tests {
             None,
         )
         .unwrap();
-        let server = UnifiServer::new(Arc::clone(&registry), false, coordinator, None).unwrap();
+        let server = UnifiServer::new(
+            Arc::clone(&registry),
+            false,
+            coordinator,
+            None,
+            mecmcp_audit::DirectCommitPolicy::new(false),
+        )
+        .unwrap();
 
         // Initial state: no controllers, no clients
         assert_eq!(registry.names().len(), 0);

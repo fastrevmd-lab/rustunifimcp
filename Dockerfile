@@ -9,8 +9,10 @@
 # against a newer glibc that the Debian 13 runtime does not carry.
 
 # Builder stage: Debian 13 slim with Rust 1.98
-# Pinned to the amd64 digest resolved on 2026-08-25.
-FROM rust:1.98-slim-trixie@sha256:f47a8de237dcbb0b0ce1099901e60a89728e3d51f24e664b40e947171538ade7 AS builder
+# Pinned to the multi-arch image index digest resolved on 2026-09-29 (covers
+# both linux/amd64 and linux/arm64; buildx picks the matching manifest for
+# whichever platform it is building under --platform).
+FROM rust:1.98-slim-trixie@sha256:4cd829461bd5c4d511c32e269da9cb8929223b666519d8004e35fc8d1d771ab7 AS builder
 
 WORKDIR /build
 
@@ -40,7 +42,9 @@ RUN touch rustunifimcp/src/main.rs rustunifimcp-core/src/lib.rs && \
     cargo build --release --locked
 
 # Runtime stage: Distroless Debian 13 with nonroot user
-# Pinned to the amd64 digest resolved on 2026-08-24.
+# Already a multi-arch image index digest (covers linux/amd64 and
+# linux/arm64), resolved on 2026-08-24 -- confirmed again on 2026-09-29 while
+# adding the arm64 build (MEC-507); unchanged.
 FROM gcr.io/distroless/cc-debian13:nonroot@sha256:54df941ed0d06a1bd95ef5e0ce391fd8d9f94b64782dc9a60062727849ee3f97
 
 # Run as nonroot user (UID 65532)
@@ -57,7 +61,7 @@ COPY --from=builder /build/target/release/rustunifimcp /usr/local/bin/rustunifim
 # Metadata
 LABEL org.opencontainers.image.title="rustunifimcp"
 LABEL org.opencontainers.image.description="UniFi Network MCP server"
-LABEL org.opencontainers.image.source="https://github.com/fastrevmd-lab/rustunifimcp"
+LABEL org.opencontainers.image.source="https://github.com/mechubsec/rustunifimcp"
 LABEL org.opencontainers.image.licenses="MIT"
 
 # ENTRYPOINT carries what must always hold: config paths and anything security-

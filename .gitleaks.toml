@@ -21,3 +21,19 @@ regexes = [
   '''cGFzc3dvcmQxMjM0NTY3ODkwYWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXo=''',
   '''aGVsbG93b3JsZGhlbGxvd29ybGRoZWxsb3dvcmxkaGVsbG93b3JsZA==''',
 ]
+
+[[allowlists]]
+description = '''
+Synthetic secret-shaped values added to the synthetic fixtures for the
+mecmcp-redact regression sweep (tests/redaction_sweep.rs / MEC-700, plus the
+event-log leg added in MEC-509). Each is an `EXAMPLE-*-fake1` literal, not a
+real credential -- the whole point of the fixture is to prove the redaction
+path strips exactly this field (or, for the event log's free-text `msg`,
+this substring) before it reaches the model.
+'''
+regexes = [
+  '''EXAMPLE-radius-auth-secret-fake1''',
+  '''EXAMPLE-radius-acct-secret-fake1''',
+  '''EXAMPLE-wifi-passphrase-fake1''',
+  '''EXAMPLE-event-secret-fake1-AQ==''',
+]
