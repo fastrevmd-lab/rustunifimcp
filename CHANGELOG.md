@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+- **Test: a missing `tokens.json` fails startup loudly, naming the path**
+  (MEC-988, mecmcp#356). `rustunifimcp` shipped `/var/lib/unifimcp/tokens.json`
+  from its first release and never had an `/etc` token store to migrate away
+  from, so it doesn't need the canonical/legacy resolver its five sibling
+  mecmcp servers carry. What it does need, and lacked a regression test for,
+  is confirmation that `mecmcp_auth::TokenStoreFile::load` refuses a missing
+  file outright — no silent empty store, no unauthenticated fallback — and
+  names the exact path in its error, so a bad drop-in restore is diagnosable
+  at startup rather than mid-incident. See `docs/FILESYSTEM-LAYOUT.md` in
+  `mecmcp` for the full six-server standard this closes out.
 - **Removed unwired stub tools and sub-actions** (MEC-505): `unifi_run_speed_test`
   and `unifi_firewall_audit` are gone from the tool catalog, `unifi_client_action`
   no longer admits `authorize` or `limit_bandwidth`, and `unifi_backup_action` no

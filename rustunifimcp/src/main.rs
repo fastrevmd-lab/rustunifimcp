@@ -1508,6 +1508,30 @@ mod tests {
         assert_eq!(registry.names().len(), 0);
     }
 
+    /// `serve_http` loads `cli.common.tokens_file` via
+    /// `mecmcp_auth::TokenStoreFile::load` with no fallback: unlike its five
+    /// sibling servers, `rustunifimcp` shipped `/var/lib`-only from its first
+    /// release and never had an `/etc` token store to migrate away from, so
+    /// there is no canonical/legacy resolver to test here. What must hold
+    /// instead is that a missing token file fails startup outright, naming
+    /// the exact path, rather than silently proceeding unauthenticated or
+    /// with an empty store — the fail-loud half of MEC-988 (mecmcp#356).
+    #[test]
+    fn a_missing_tokens_file_fails_loudly_and_names_the_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("tokens.json");
+
+        let error = mecmcp_auth::TokenStoreFile::<UnifiGrant>::load(&missing)
+            .expect_err("a missing token file must not load as an empty store");
+
+        let message = error.to_string();
+        assert!(
+            message.contains(&missing.display().to_string()),
+            "error must name the missing path so a bad drop-in restore is \
+             diagnosable at startup, got: {message}"
+        );
+    }
+
     #[tokio::test]
     async fn client_rebuild_after_reload() {
         use std::io::Write;
