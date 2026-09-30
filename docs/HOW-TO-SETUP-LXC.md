@@ -26,6 +26,12 @@ You need:
   regenerate. If you are rebuilding an existing rig, back them up first — see
   [Rebuilding](#rebuilding-an-existing-rig).
 
+**Minimum controller version:** `rustunifimcp` requires UniFi Network Application
+10.5.67 or UniFi OS Server 5.1.37 (or later). These versions include the 2026
+CVSS 10 security fixes (SAB-062, SAB-064, SAB-066/067) that this project depends
+on for secure API access. The test rigs and fixture sets are verified against
+10.5.67.
+
 Check the template is present:
 
 ```bash

@@ -69,6 +69,14 @@ switch port in use), and one is an accepted gap (`set_device_port_overrides`
 | [`docs/superpowers/specs/2026-08-26-rustunifimcp-cutover-design.md`](docs/superpowers/specs/2026-08-26-rustunifimcp-cutover-design.md) | Build and cutover design: deployment topology, controller trust, phase detail, risks |
 | [`docs/superpowers/specs/2026-07-24-rustunifimcp-design.md`](docs/superpowers/specs/2026-07-24-rustunifimcp-design.md) | The original design — still authoritative for tool surface, API tagging, and the change-control adaptation |
 
+## Minimum supported controller version
+
+**Minimum supported version: UniFi Network Application 10.5.67 / UniFi OS Server 5.1.37**
+
+This server requires a UniFi Network controller running at least version 10.5.67 (Network Application) or 5.1.37 (UniFi OS Server). These versions include the 2026 CVSS 10 security fixes (SAB-062, SAB-064, SAB-066/067) that this project depends on for secure API access.
+
+The minimum version is verified against the `rustunifimcp` test rigs and fixture sets. Running against an older controller version may result in missing endpoints or unhandled API drift.
+
 ## What it replaces
 
 The homelab runs `enuno/unifi-mcp-server` (Python / FastMCP). It is a capable
