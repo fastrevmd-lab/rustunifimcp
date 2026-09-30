@@ -19,6 +19,12 @@ Records carry approval_waiver=lab-mode. Do not run this against production contr
 
 If you see that line and did not intend it, stop and fix the flag.
 
+## Minimum controller version
+
+`rustunifimcp` requires UniFi Network Application 10.5.67 or UniFi OS Server 5.1.37
+(or later). These versions include the 2026 CVSS 10 security fixes (SAB-062, SAB-064,
+SAB-066/067) that this project depends on for secure API access.
+
 ## What the image supplies (and what it does not)
 
 The image runs as numeric UID/GID `65532:65532` and has `ENTRYPOINT
