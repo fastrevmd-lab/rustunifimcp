@@ -6,6 +6,40 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+- **Bumped the pinned `mecmcp` to v0.25.0** and adapted to its API changes:
+  - `mecmcp-server::tool_result` now takes an `OutputRedaction` argument;
+    every call site here passes `OutputRedaction::Apply` (this server's
+    output already touches device data, so nothing changes in practice —
+    see `crate::redact`, which already ran the same redaction directly).
+  - `mecmcp-audit::AuditConfig` gained an `otel` field. Set to `None`: this
+    server does not wire OTel through to mecmcp, so the pin bump does not
+    turn telemetry on as a side effect.
+  - `mecmcp-transport::LimitsConfig` gained `trusted_proxies`. Set to an
+    empty `Vec`, matching the prior behavior of trusting no proxy for
+    `X-Forwarded-For` (no flag exposes this yet).
+  - `mecmcp_http::HttpError` gained `RetryRequiresGet`; `UnifiError`'s error
+    classifier now matches it exhaustively (unreachable today — this crate
+    never calls the retry-with-backoff path that produces it).
+  - `UnifiClient` now builds requests with `HttpRequest::from_absolute_url`
+    (the new `absolute-url` feature) instead of the removed
+    `HttpRequest::new`, since this client appends a percent-encoded query
+    string after the path for offset/limit pagination, which
+    `with_base_and_path`'s path-only `ExpandedPath` has no way to carry.
+  - `mecmcp-changeset`'s coordinator now freezes a change set's owner,
+    device, and plan digest at creation (MEC-525): restaging under an
+    existing `change_set_id` with a changed plan is refused up front
+    instead of being caught later at approval time. The one test that
+    exercised the old, two-step "restage then approve a stale digest"
+    sequence (`approving_a_digest_the_plan_has_moved_past_is_refused`) is
+    replaced with `restaging_an_existing_change_set_with_a_different_plan_is_refused`,
+    which pins the new, earlier refusal directly.
+  - `tool_error` now redacts unconditionally, and mecmcp-redact's key
+    denylist matches `token` as a substring; a denylisted-key match blanks
+    the rest of the line, not just the value. `SiteNotInScope`'s message
+    and the two-person-control refusal both said "token" next to
+    non-secret identifiers (a token name, the scope list), which would have
+    silently lost everything after it. Both are reworded to say "caller"
+    instead, so the identifiers survive redaction intact.
 - **Test: a missing `tokens.json` fails startup loudly, naming the path**
   (MEC-988, mecmcp#356). `rustunifimcp` shipped `/var/lib/unifimcp/tokens.json`
   from its first release and never had an `/etc` token store to migrate away

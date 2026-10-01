@@ -7,8 +7,8 @@ use mecmcp_changeset::{
     change_set_digest, preview_digest,
 };
 use mecmcp_server::{
-    ResultFormat, ResultLimits, authorize_call, caller_from_extensions, filter_tools_for_scope,
-    tool_error, tool_result,
+    OutputRedaction, ResultFormat, ResultLimits, authorize_call, caller_from_extensions,
+    filter_tools_for_scope, tool_error, tool_result,
 };
 use rmcp::{
     RoleServer, ServerHandler,
@@ -77,11 +77,13 @@ fn json_tool_result<T: serde::Serialize>(value: T) -> CallToolResult {
             Ok::<_, String>(shrink_largest_array(json, budget)),
             ResultFormat::PrettyJson,
             RESULT_LIMITS,
+            OutputRedaction::Apply,
         ),
         Err(_) => tool_result(
             Ok::<_, String>(value),
             ResultFormat::PrettyJson,
             RESULT_LIMITS,
+            OutputRedaction::Apply,
         ),
     }
 }
@@ -1450,6 +1452,7 @@ impl UnifiServer {
             Ok::<_, String>(result),
             ResultFormat::PrettyJson,
             RESULT_LIMITS,
+            OutputRedaction::Apply,
         )
     }
 
@@ -1476,8 +1479,8 @@ impl UnifiServer {
         // lab-mode waiver then records the self-approval as a distinct fact.
         if !self.lab_mode && Self::holds_combined_two_person_control_scope(caller.as_ref()) {
             return tool_error(
-                "two-person control: this token's scope combines unifi_stage_change and \
-                 unifi_approve_change_set; issue separate tokens for staging and approving",
+                "two-person control: this caller holds both unifi_stage_change and \
+                 unifi_approve_change_set; use separate callers for staging and approving",
             );
         }
 
@@ -1657,6 +1660,7 @@ impl UnifiServer {
             Ok::<_, String>(result),
             ResultFormat::PrettyJson,
             RESULT_LIMITS,
+            OutputRedaction::Apply,
         )
     }
 
@@ -1704,6 +1708,7 @@ impl UnifiServer {
             Ok::<_, String>(result),
             ResultFormat::PrettyJson,
             RESULT_LIMITS,
+            OutputRedaction::Apply,
         )
     }
 
@@ -1813,6 +1818,7 @@ impl UnifiServer {
             Ok::<_, String>(result),
             ResultFormat::PrettyJson,
             RESULT_LIMITS,
+            OutputRedaction::Apply,
         )
     }
 
@@ -1842,8 +1848,8 @@ impl UnifiServer {
         // lab-mode waiver then records the self-approval as a distinct fact.
         if !self.lab_mode && Self::holds_combined_two_person_control_scope(caller.as_ref()) {
             return tool_error(
-                "two-person control: this token's scope combines unifi_stage_change and \
-                 unifi_approve_change_set; issue separate tokens for staging and approving",
+                "two-person control: this caller holds both unifi_stage_change and \
+                 unifi_approve_change_set; use separate callers for staging and approving",
             );
         }
 
@@ -1972,6 +1978,7 @@ impl UnifiServer {
             Ok::<_, String>(result),
             ResultFormat::PrettyJson,
             RESULT_LIMITS,
+            OutputRedaction::Apply,
         )
     }
 
@@ -2241,6 +2248,7 @@ impl UnifiServer {
             Ok::<_, String>(result),
             ResultFormat::PrettyJson,
             RESULT_LIMITS,
+            OutputRedaction::Apply,
         )
     }
 
@@ -2279,6 +2287,7 @@ impl UnifiServer {
                 })),
                 ResultFormat::PrettyJson,
                 RESULT_LIMITS,
+                OutputRedaction::Apply,
             );
         }
 
@@ -2333,6 +2342,7 @@ impl UnifiServer {
             Ok::<_, String>(result),
             ResultFormat::PrettyJson,
             RESULT_LIMITS,
+            OutputRedaction::Apply,
         )
     }
 }
@@ -2964,21 +2974,27 @@ mod tests {
         );
     }
 
-    /// The lock closes the window; this pins what makes entering it survivable
-    /// anyway. An approver whose plan moved under them approves a digest the
-    /// store no longer holds, and the coordinator refuses it -- so a stale read
-    /// cannot become an approval of a plan nobody reviewed.
+    /// mecmcp-changeset v0.25.0 (MEC-525) freezes owner, device and digest at
+    /// creation: `check_change_set_write` now refuses any write that changes
+    /// them, so a plan can no longer move out from under an in-flight approval
+    /// via `update_change_set_from` on the same id. That used to be caught one
+    /// step later, at `approve_change_set`, by comparing the approval's digest
+    /// against the (by-then-moved) stored one; this test pins the earlier,
+    /// stronger refusal that replaced it -- restaging under an existing id
+    /// with different actions is rejected before it ever reaches a digest an
+    /// approver could race against. A caller that wants to change the plan
+    /// must stage it under a new change_set_id instead.
     #[tokio::test]
-    async fn approving_a_digest_the_plan_has_moved_past_is_refused() {
+    async fn restaging_an_existing_change_set_with_a_different_plan_is_refused() {
         let coordinator = coordinator_at(None);
         let record = planned_record("alice", "home", 300);
-        let (id, stale) = (record.id.clone(), record.digest.clone());
+        let (id, original_digest) = (record.id.clone(), record.digest.clone());
         coordinator.insert_change_set(record).await.expect("insert");
 
         // Stage again: same change set, different plan, different digest.
-        let mut restaged = coordinator.change_set(&id, "home").await.expect("stored");
-        restaged = UnifiServer::with_plan(
-            restaged,
+        let stored = coordinator.change_set(&id, "home").await.expect("stored");
+        let restaged = UnifiServer::with_plan(
+            stored,
             &[
                 StagedMutation::create("firewall_policy", serde_json::json!({ "name": "a" })),
                 StagedMutation::create("firewall_policy", serde_json::json!({ "name": "b" })),
@@ -2988,24 +3004,15 @@ mod tests {
         )
         .map_err(|_| "with_plan")
         .expect("replan");
-        assert_ne!(restaged.digest, stale, "the plan moved");
-        coordinator
-            .update_change_set_from(ChangeSetState::Planned, restaged)
-            .await
-            .expect("update");
+        assert_ne!(restaged.digest, original_digest, "the plan moved");
 
         assert!(
             coordinator
-                .approve_change_set(
-                    id,
-                    "home".to_owned(),
-                    "bob".to_owned(),
-                    stale,
-                    mecmcp_audit::ActorType::Human
-                )
+                .update_change_set_from(ChangeSetState::Planned, restaged)
                 .await
                 .is_err(),
-            "an approval naming the old digest must not bind to the new plan"
+            "a change set's digest is fixed at creation; a moved plan must be staged \
+             under a new change_set_id, not written over the old one"
         );
     }
 
