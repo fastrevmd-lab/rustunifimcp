@@ -176,8 +176,19 @@ async fn a_cert_the_configured_private_ca_did_not_issue_is_refused() {
     let client = UnifiClient::new(controller).expect("client builds");
 
     let result = client.controller_version().await;
+    // Reported as a plain string, not `{result:?}`: CodeQL's rust
+    // cleartext-logging query over-approximates the `Connect`/`RequestFailed`
+    // variants built from `self.http.send(request)` as carrying the
+    // `secret_header`-tainted request (they don't -- see `HttpError` in
+    // mecmcp-http, which stores only a redacted `SafeUrl` and a `String`
+    // detail). Describing the outcome without a `Debug` dump of the error
+    // sidesteps that false positive without weakening the assertion.
+    let outcome = match &result {
+        Ok(version) => format!("accepted (version {version})"),
+        Err(_) => "refused".to_owned(),
+    };
     assert!(
         result.is_err(),
-        "a cert not signed by the configured private CA must be refused, got {result:?}"
+        "a cert not signed by the configured private CA must be refused, got {outcome}"
     );
 }
