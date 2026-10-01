@@ -175,9 +175,20 @@ async fn a_cert_the_configured_private_ca_did_not_issue_is_refused() {
     let controller = controller_for(port, ca_file.path(), api_key_file.path());
     let client = UnifiClient::new(controller).expect("client builds");
 
-    let result = client.controller_version().await;
+    // Collapsed straight to a bool, with no named `Result`/`Ok`/`Err` binding
+    // and no interpolated detail: CodeQL's rust cleartext-logging query
+    // over-approximates the `Connect`/`RequestFailed` variants built from
+    // `self.http.send(request)` as carrying the `secret_header`-tainted
+    // request (they don't -- see `HttpError` in mecmcp-http, which stores
+    // only a redacted `SafeUrl` and a `String` detail), and flags any
+    // `assert!`/format call that still references the `Result` -- even one
+    // that never dumps its `Debug` form, as the prior fix here tried. A
+    // static assertion message carries no risk of leaking anything, so it
+    // sidesteps the false positive outright rather than trying to craft a
+    // message CodeQL's dataflow happens not to follow.
+    let refused = client.controller_version().await.is_err();
     assert!(
-        result.is_err(),
-        "a cert not signed by the configured private CA must be refused, got {result:?}"
+        refused,
+        "a cert not signed by the configured private CA must be refused"
     );
 }

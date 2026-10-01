@@ -9,6 +9,16 @@
 //! sanitised: a rewritten value is a value the caller did not send. UniFi puts
 //! the site id and the resource id directly in the path on all three local
 //! surfaces, so this applies to essentially every request.
+//!
+//! Requests are built with [`HttpRequest::from_absolute_url`] (the
+//! `absolute-url` feature), not `with_base_and_path`: the latter only accepts
+//! a path, with no way to attach the percent-encoded query string this client
+//! appends for pagination (`offset`/`limit`). The path portion is still
+//! validated through `expand_path` before the URL string is assembled, and
+//! every query key/value goes through [`percent_encode`], which escapes
+//! everything outside RFC 3986 `unreserved` -- so this keeps the same
+//! injection resistance `with_base_and_path` provides for the path, just
+//! without its compile-time type for the part it does not cover.
 
 use crate::ApiSurface;
 use crate::error::UnifiError;
@@ -248,7 +258,7 @@ impl UnifiClient {
             url.push_str(&query_string);
         }
 
-        let request = HttpRequest::new(Method::Get, &url)?
+        let request = HttpRequest::from_absolute_url(Method::Get, &url)?
             .header("Accept", "application/json")?
             .secret_header("X-API-KEY", &self.api_key)?;
 
@@ -302,7 +312,7 @@ impl UnifiClient {
         let body_bytes = serde_json::to_vec(body)
             .map_err(|error| UnifiError::Malformed(format!("failed to serialize body: {error}")))?;
 
-        let request = HttpRequest::new(Method::Post, &url)?
+        let request = HttpRequest::from_absolute_url(Method::Post, &url)?
             .header("Accept", "application/json")?
             .header("Content-Type", "application/json")?
             .secret_header("X-API-KEY", &self.api_key)?
@@ -358,7 +368,7 @@ impl UnifiClient {
         let body_bytes = serde_json::to_vec(body)
             .map_err(|error| UnifiError::Malformed(format!("failed to serialize body: {error}")))?;
 
-        let request = HttpRequest::new(Method::Put, &url)?
+        let request = HttpRequest::from_absolute_url(Method::Put, &url)?
             .header("Accept", "application/json")?
             .header("Content-Type", "application/json")?
             .secret_header("X-API-KEY", &self.api_key)?
@@ -408,7 +418,7 @@ impl UnifiClient {
             url.push_str(&query_string);
         }
 
-        let request = HttpRequest::new(Method::Delete, &url)?
+        let request = HttpRequest::from_absolute_url(Method::Delete, &url)?
             .header("Accept", "application/json")?
             .secret_header("X-API-KEY", &self.api_key)?;
 
@@ -485,7 +495,7 @@ impl UnifiClient {
             self.controller.endpoint.trim_end_matches('/')
         );
 
-        let request = HttpRequest::new(Method::Get, &url)?
+        let request = HttpRequest::from_absolute_url(Method::Get, &url)?
             .header("Accept", "application/json")?
             .secret_header("X-API-KEY", &self.api_key)?;
 

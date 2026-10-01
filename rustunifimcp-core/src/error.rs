@@ -121,7 +121,15 @@ pub enum UnifiError {
     /// Distinct from an unknown controller or an unknown resource: the token
     /// authenticated and holds the tool and controller scope for this call,
     /// but its site grant does not name the specific site the call targeted.
-    #[error("token '{token}' is not authorized to write to site '{site}'")]
+    ///
+    /// The rendered message says "caller", not "token": mecmcp-server's
+    /// tool_error redacts every error unconditionally (mecmcp v0.25.0,
+    /// MEC-1020), and mecmcp-redact's key denylist matches "token" as a
+    /// substring. A denylisted key match blanks the rest of the line, not
+    /// just the value, which would have silently dropped the out-of-scope
+    /// site name along with this non-secret caller name. "caller" is not
+    /// denylisted, so the message survives redaction intact.
+    #[error("caller '{token}' is not authorized to write to site '{site}'")]
     SiteNotInScope {
         /// Non-secret token name.
         token: String,
@@ -173,6 +181,10 @@ fn http_error_class(error: &mecmcp_http::HttpError) -> String {
         }
         HttpError::BodyRead { .. } => "failed to read response body".to_owned(),
         HttpError::RequestFailed { .. } => "request failed".to_owned(),
+        // Only reachable via `HttpClient::send_get_with_backoff`, which this
+        // crate does not call; kept exhaustive so a future caller of it still
+        // gets a classified message instead of a build break.
+        HttpError::RetryRequiresGet => "retry requires a GET request".to_owned(),
     }
 }
 

@@ -7,8 +7,8 @@ use mecmcp_changeset::{
     change_set_digest, preview_digest,
 };
 use mecmcp_server::{
-    ResultFormat, ResultLimits, authorize_call, caller_from_extensions, filter_tools_for_scope,
-    tool_error, tool_result,
+    OutputRedaction, ResultFormat, ResultLimits, authorize_call, caller_from_extensions,
+    filter_tools_for_scope, tool_error, tool_result,
 };
 use rmcp::{
     RoleServer, ServerHandler,
@@ -77,11 +77,13 @@ fn json_tool_result<T: serde::Serialize>(value: T) -> CallToolResult {
             Ok::<_, String>(shrink_largest_array(json, budget)),
             ResultFormat::PrettyJson,
             RESULT_LIMITS,
+            OutputRedaction::Apply,
         ),
         Err(_) => tool_result(
             Ok::<_, String>(value),
             ResultFormat::PrettyJson,
             RESULT_LIMITS,
+            OutputRedaction::Apply,
         ),
     }
 }
@@ -1450,12 +1452,17 @@ impl UnifiServer {
             Ok::<_, String>(result),
             ResultFormat::PrettyJson,
             RESULT_LIMITS,
+            OutputRedaction::Apply,
         )
     }
 
     #[tool(
         name = "unifi_stage_change",
-        description = "Stages one or more changes into an existing change set"
+        description = "Stages one or more changes into a draft change set. mecmcp v0.25.0 \
+                        fixes a change set's plan digest at creation, so this can only be \
+                        called once per change_set_id (on the draft from \
+                        unifi_create_change_set); a change set that already has a staged \
+                        plan must be cancelled and recreated with the combined mutations."
     )]
     async fn unifi_stage_change(
         &self,
@@ -1476,55 +1483,43 @@ impl UnifiServer {
         // lab-mode waiver then records the self-approval as a distinct fact.
         if !self.lab_mode && Self::holds_combined_two_person_control_scope(caller.as_ref()) {
             return tool_error(
-                "two-person control: this token's scope combines unifi_stage_change and \
-                 unifi_approve_change_set; issue separate tokens for staging and approving",
+                "two-person control: this caller holds both unifi_stage_change and \
+                 unifi_approve_change_set; use separate callers for staging and approving",
             );
         }
 
-        // A draft on its first stage, or a change set already in the store.
-        let draft = self.draft(&args.change_set_id, &args.controller);
-        let existing = match draft {
-            Some(_) => None,
-            None => match self.record_for(&args.change_set_id, &args.controller).await {
-                Ok(record) => Some(record),
-                Err(result) => return *result,
-            },
+        // Only a draft can be staged into. mecmcp-changeset v0.25.0 (MEC-525)
+        // fixes a change set's owner, device and plan digest at creation:
+        // `update_change_set_from` now refuses any write that would change
+        // the digest, which a second stage always would. Refusing a second
+        // stage here, before touching the controller, gives a caller a clear
+        // instruction instead of a coordinator error about a digest they
+        // never named.
+        let Some(draft) = self.draft(&args.change_set_id, &args.controller) else {
+            return match self.record_for(&args.change_set_id, &args.controller).await {
+                Ok(record) if record.state == ChangeSetState::Planned => tool_error(
+                    "this change set already has a staged plan; a change set's plan digest \
+                     is fixed at creation (mecmcp v0.25.0), so it cannot be staged into a \
+                     second time. Cancel it and create a new change set with all the \
+                     mutations you want, or let it expire.",
+                ),
+                Ok(record) => tool_error(format!(
+                    "change set is {} and can no longer be staged into; create a new one",
+                    record.state.as_str()
+                )),
+                Err(result) => *result,
+            };
         };
 
-        // Staging rewrites the plan, and with it the digest an approval binds
-        // to. Allowing it after approval would let a reviewed plan be swapped
-        // for an unreviewed one while the approval stayed attached, which is
-        // the whole reason the digest exists.
-        if let Some(ref record) = existing
-            && record.state != ChangeSetState::Planned
-        {
-            return tool_error(format!(
-                "change set is {} and can no longer be staged into; create a new one",
-                record.state.as_str()
-            ));
-        }
-
-        let (description, owner) = match (&draft, &existing) {
-            (Some(draft), _) => (draft.description.clone(), draft.owner.clone()),
-            (None, Some(record)) => match Self::description_of(record) {
-                Ok(description) => (description, record.owner.clone()),
-                Err(result) => return *result,
-            },
-            (None, None) => unreachable!("one of the two is always present"),
-        };
+        let description = draft.description.clone();
+        let owner = draft.owner.clone();
 
         let client = match self.client_for(&args.controller) {
             Ok(client) => client,
             Err(result) => return *result,
         };
 
-        let mut mutations = match &existing {
-            Some(record) => match Self::plan_of(record) {
-                Ok(plan) => plan.0,
-                Err(result) => return *result,
-            },
-            None => Vec::new(),
-        };
+        let mut mutations = Vec::new();
 
         for spec in args.mutations {
             mutations.push(match spec {
@@ -1559,7 +1554,7 @@ impl UnifiServer {
         };
 
         let staged_count = mutations.len();
-        let base = existing.unwrap_or_else(|| ChangeSetRecord {
+        let base = ChangeSetRecord {
             id: args.change_set_id.clone(),
             owner,
             device: args.controller.clone(),
@@ -1577,7 +1572,7 @@ impl UnifiServer {
             preview: None,
             task_id: None,
             apply_without_handle: false,
-        });
+        };
 
         let staged = match Self::with_plan(base, &mutations, &preimage, &description) {
             Ok(record) => record,
@@ -1599,43 +1594,27 @@ impl UnifiServer {
         // neither ordering of the two is safe on its own.
         let _publishing = self.plan_lock.lock().await;
 
-        if draft.is_some() {
-            // The plan exists now, so the change set does too.
-            // `insert_change_set` is what enforces one pending set per
-            // principal per controller.
-            if let Err(error) = self.coordinator.insert_change_set(staged).await {
-                return tool_error(format!(
-                    "failed to store change set ({}): {}",
-                    error.field(),
-                    error.message()
-                ));
-            }
-            self.release_draft(&args.change_set_id);
-        } else if let Err(error) = self
-            // Conditional on the state still being `Planned`. An unconditional
-            // write would let a concurrent approval be overwritten by a staging
-            // call that read the record before it.
-            .coordinator
-            .update_change_set_from(ChangeSetState::Planned, staged)
-            .await
-        {
+        // The plan exists now, so the change set does too. `insert_change_set`
+        // is what enforces one pending set per principal per controller.
+        // `unifi_stage_change` never updates an existing record -- the guard
+        // above already refused that, since mecmcp v0.25.0 would reject the
+        // digest change anyway.
+        if let Err(error) = self.coordinator.insert_change_set(staged).await {
             return tool_error(format!(
-                "failed to update change set ({}): {}",
+                "failed to store change set ({}): {}",
                 error.field(),
                 error.message()
             ));
         }
+        self.release_draft(&args.change_set_id);
 
         // After the write, so a write that failed leaves no proposal for a
         // plan that never landed. Safe to be second only because the lock is
         // still held.
         //
-        // On every stage, not only the first: the coordinator emits this from
-        // `create_change_set`, which this server cannot use because that call
-        // wants the actions up front and a change set here exists before
-        // anything is staged into it. Without a fresh proposal the recorder
-        // keeps the first stage's digest, and the approval and apply records
-        // copy it -- attesting to a plan other than the one approved.
+        // The coordinator emits this from `create_change_set`, which this
+        // server cannot use because that call wants the actions up front and
+        // a change set here exists before anything is staged into it.
         if let Some(recorder) = self.evidence.as_ref() {
             recorder.proposal(
                 &args.change_set_id,
@@ -1657,6 +1636,7 @@ impl UnifiServer {
             Ok::<_, String>(result),
             ResultFormat::PrettyJson,
             RESULT_LIMITS,
+            OutputRedaction::Apply,
         )
     }
 
@@ -1704,6 +1684,7 @@ impl UnifiServer {
             Ok::<_, String>(result),
             ResultFormat::PrettyJson,
             RESULT_LIMITS,
+            OutputRedaction::Apply,
         )
     }
 
@@ -1813,6 +1794,7 @@ impl UnifiServer {
             Ok::<_, String>(result),
             ResultFormat::PrettyJson,
             RESULT_LIMITS,
+            OutputRedaction::Apply,
         )
     }
 
@@ -1842,8 +1824,8 @@ impl UnifiServer {
         // lab-mode waiver then records the self-approval as a distinct fact.
         if !self.lab_mode && Self::holds_combined_two_person_control_scope(caller.as_ref()) {
             return tool_error(
-                "two-person control: this token's scope combines unifi_stage_change and \
-                 unifi_approve_change_set; issue separate tokens for staging and approving",
+                "two-person control: this caller holds both unifi_stage_change and \
+                 unifi_approve_change_set; use separate callers for staging and approving",
             );
         }
 
@@ -1972,6 +1954,7 @@ impl UnifiServer {
             Ok::<_, String>(result),
             ResultFormat::PrettyJson,
             RESULT_LIMITS,
+            OutputRedaction::Apply,
         )
     }
 
@@ -2241,6 +2224,7 @@ impl UnifiServer {
             Ok::<_, String>(result),
             ResultFormat::PrettyJson,
             RESULT_LIMITS,
+            OutputRedaction::Apply,
         )
     }
 
@@ -2279,6 +2263,7 @@ impl UnifiServer {
                 })),
                 ResultFormat::PrettyJson,
                 RESULT_LIMITS,
+                OutputRedaction::Apply,
             );
         }
 
@@ -2333,6 +2318,7 @@ impl UnifiServer {
             Ok::<_, String>(result),
             ResultFormat::PrettyJson,
             RESULT_LIMITS,
+            OutputRedaction::Apply,
         )
     }
 }
@@ -2964,21 +2950,27 @@ mod tests {
         );
     }
 
-    /// The lock closes the window; this pins what makes entering it survivable
-    /// anyway. An approver whose plan moved under them approves a digest the
-    /// store no longer holds, and the coordinator refuses it -- so a stale read
-    /// cannot become an approval of a plan nobody reviewed.
+    /// mecmcp-changeset v0.25.0 (MEC-525) freezes owner, device and digest at
+    /// creation: `check_change_set_write` now refuses any write that changes
+    /// them, so a plan can no longer move out from under an in-flight approval
+    /// via `update_change_set_from` on the same id. That used to be caught one
+    /// step later, at `approve_change_set`, by comparing the approval's digest
+    /// against the (by-then-moved) stored one; this test pins the earlier,
+    /// stronger refusal that replaced it -- restaging under an existing id
+    /// with different actions is rejected before it ever reaches a digest an
+    /// approver could race against. A caller that wants to change the plan
+    /// must stage it under a new change_set_id instead.
     #[tokio::test]
-    async fn approving_a_digest_the_plan_has_moved_past_is_refused() {
+    async fn restaging_an_existing_change_set_with_a_different_plan_is_refused() {
         let coordinator = coordinator_at(None);
         let record = planned_record("alice", "home", 300);
-        let (id, stale) = (record.id.clone(), record.digest.clone());
+        let (id, original_digest) = (record.id.clone(), record.digest.clone());
         coordinator.insert_change_set(record).await.expect("insert");
 
         // Stage again: same change set, different plan, different digest.
-        let mut restaged = coordinator.change_set(&id, "home").await.expect("stored");
-        restaged = UnifiServer::with_plan(
-            restaged,
+        let stored = coordinator.change_set(&id, "home").await.expect("stored");
+        let restaged = UnifiServer::with_plan(
+            stored,
             &[
                 StagedMutation::create("firewall_policy", serde_json::json!({ "name": "a" })),
                 StagedMutation::create("firewall_policy", serde_json::json!({ "name": "b" })),
@@ -2988,24 +2980,15 @@ mod tests {
         )
         .map_err(|_| "with_plan")
         .expect("replan");
-        assert_ne!(restaged.digest, stale, "the plan moved");
-        coordinator
-            .update_change_set_from(ChangeSetState::Planned, restaged)
-            .await
-            .expect("update");
+        assert_ne!(restaged.digest, original_digest, "the plan moved");
 
         assert!(
             coordinator
-                .approve_change_set(
-                    id,
-                    "home".to_owned(),
-                    "bob".to_owned(),
-                    stale,
-                    mecmcp_audit::ActorType::Human
-                )
+                .update_change_set_from(ChangeSetState::Planned, restaged)
                 .await
                 .is_err(),
-            "an approval naming the old digest must not bind to the new plan"
+            "a change set's digest is fixed at creation; a moved plan must be staged \
+             under a new change_set_id, not written over the old one"
         );
     }
 

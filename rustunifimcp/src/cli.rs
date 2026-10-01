@@ -187,6 +187,10 @@ impl LimitsArgs {
             max_requests_per_second_per_token: self.max_requests_per_second_per_token,
             max_request_burst_per_token: self.max_request_burst_per_token,
             max_inflight_requests_per_device: self.max_inflight_requests_per_controller,
+            // No flag exposes this yet, so `X-Forwarded-For` stays untrusted
+            // from every peer -- the same behavior as before this field
+            // existed, not an opt-in to trusting a reverse proxy.
+            trusted_proxies: Vec::new(),
             max_sessions: self.max_sessions,
             max_sessions_per_token: self.max_sessions_per_token,
             session_idle_timeout_secs: self.session_idle_timeout_secs,

@@ -207,6 +207,11 @@ async fn a_token_scoped_to_one_site_is_refused_for_another_site() {
         text.contains("not authorized to write to site") && text.contains("site-b"),
         "the refusal must name the out-of-scope site, got: {text}"
     );
+    // mecmcp-server redacts every tool_error unconditionally (mecmcp v0.25.0,
+    // MEC-1020), and mecmcp-redact's key denylist matches "token" as a
+    // substring; a denylisted-key match blanks the rest of the line, not
+    // just the value. `SiteNotInScope`'s message says "caller", not "token",
+    // specifically so this non-secret identifier survives that pass.
     assert!(
         text.contains("site-a-writer"),
         "the refusal must name the token, got: {text}"

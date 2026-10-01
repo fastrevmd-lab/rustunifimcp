@@ -265,6 +265,10 @@ fn init_audit(
         audit_log_file: args.audit_log_file.clone(),
         redaction,
         journald: args.audit_journald,
+        // This server does not wire OTel through to mecmcp; keep it off
+        // rather than turn on telemetry as a side effect of the mecmcp
+        // v0.25.0 pin bump that added this field.
+        otel: None,
     };
 
     match mecmcp_audit::init_tracing(&audit_config) {

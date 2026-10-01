@@ -10,7 +10,16 @@ authors.workspace = true
 
 [dependencies]
 mecmcp-changeset.workspace = true
-mecmcp-http.workspace      = true
+# "absolute-url": this crate builds request URLs with a hand-assembled,
+# percent-encoded query string (offset/limit pagination) appended after the
+# path, which `HttpRequest::with_base_and_path` has no way to carry — it only
+# accepts a path-only `ExpandedPath`. The path segment is still validated
+# through `mecmcp_openapi::expand_path` before the string is assembled, and
+# every query key/value is percent-encoded to the unreserved set in
+# `client::percent_encode`, so this does not reopen the path-injection risk
+# `with_base_and_path` exists to close; it only trades the compile-time
+# guarantee for the query portion, which was never covered by it.
+mecmcp-http                = { workspace = true, features = ["absolute-url"] }
 mecmcp-inventory.workspace = true
 mecmcp-openapi.workspace   = true
 mecmcp-redact.workspace    = true
