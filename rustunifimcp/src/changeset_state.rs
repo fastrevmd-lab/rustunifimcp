@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use mecmcp_changeset::{ChangesetCoordinator, OperationLimits};
+use mecmcp_changeset::{ApprovalDigestKey, ChangesetCoordinator, OperationLimits};
 
 /// A state file no larger than this is worth reading to see if it is blank.
 ///
@@ -99,6 +99,7 @@ pub fn build_coordinator(
     approval_ttl: Duration,
     lab_mode: bool,
     evidence: Option<Arc<mecmcp_audit::recorder::EvidenceRecorder>>,
+    approval_digest_key: Option<ApprovalDigestKey>,
 ) -> Result<Arc<ChangesetCoordinator>, String> {
     let absolute = match state_file {
         Some(path) => Some(absolute_path(path)?),
@@ -111,10 +112,18 @@ pub fn build_coordinator(
         refuse_legacy_state_file(path, contents.as_deref())?;
     }
 
-    let mut coordinator =
-        ChangesetCoordinator::load(absolute.as_deref(), limits(), approval_ttl, lab_mode).map_err(
-            |error| format!("change-set state ({}): {}", error.field(), error.message()),
-        )?;
+    // `load_with_key` verifies any on-disk v6 approval digest against the key
+    // and stores it on the returned coordinator for future signs; it must not
+    // also be passed to `with_approval_digest_key` afterwards, or the two
+    // copies could drift.
+    let mut coordinator = ChangesetCoordinator::load_with_key(
+        absolute.as_deref(),
+        limits(),
+        approval_ttl,
+        lab_mode,
+        approval_digest_key,
+    )
+    .map_err(|error| format!("change-set state ({}): {}", error.field(), error.message()))?;
 
     if let Some(recorder) = evidence {
         coordinator = coordinator.with_evidence(recorder);
@@ -253,7 +262,7 @@ fn refuse_legacy_state_file(path: &Path, contents: Option<&[u8]>) -> Result<(), 
 
 #[cfg(test)]
 mod tests {
-    use super::{build_coordinator, limits, new_change_set_id};
+    use super::{ApprovalDigestKey, build_coordinator, limits, new_change_set_id};
     use std::time::Duration;
 
     /// The coordinator reads the state file through the workspace's hardened
@@ -270,7 +279,7 @@ mod tests {
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
                 .expect("harden the state file");
         }
-        build_coordinator(Some(&path), Duration::from_secs(300), true, None).map(|_| ())
+        build_coordinator(Some(&path), Duration::from_secs(300), true, None, None).map(|_| ())
     }
 
     /// The id has to satisfy the shared lifecycle's validator. The old store
@@ -307,8 +316,9 @@ mod tests {
         let path = temp.path().to_path_buf();
 
         {
-            let coordinator = build_coordinator(Some(&path), Duration::from_secs(300), true, None)
-                .expect("coordinator");
+            let coordinator =
+                build_coordinator(Some(&path), Duration::from_secs(300), true, None, None)
+                    .expect("coordinator");
             let record = ChangeSetRecord {
                 id: new_change_set_id(),
                 owner: "alice".to_owned(),
@@ -333,7 +343,7 @@ mod tests {
                 .expect("an empty plan is accepted on the way in, which is the trap");
         }
 
-        let error = build_coordinator(Some(&path), Duration::from_secs(300), true, None)
+        let error = build_coordinator(Some(&path), Duration::from_secs(300), true, None, None)
             .expect_err("and rejected on the way back, taking the whole store with it");
         assert!(error.contains("action"), "{error}");
     }
@@ -421,7 +431,7 @@ mod tests {
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
             .expect("loosen the mode");
 
-        let error = build_coordinator(Some(&path), Duration::from_secs(300), true, None)
+        let error = build_coordinator(Some(&path), Duration::from_secs(300), true, None, None)
             .expect_err("a 0644 state file must not load");
         assert!(error.contains("chmod"), "{error}");
     }
@@ -430,7 +440,75 @@ mod tests {
     /// the coordinator refuses a relative path outright.
     #[test]
     fn no_state_file_means_an_in_memory_store() {
-        build_coordinator(None, Duration::from_secs(300), false, None)
+        build_coordinator(None, Duration::from_secs(300), false, None, None)
             .expect("no state file is a valid configuration");
+    }
+
+    /// `--approval-digest-key-file` must not be silently ignored: a
+    /// coordinator built with a key via `build_coordinator` has to actually
+    /// produce the keyed v6 approval digest, not the unkeyed v5 one a caller
+    /// who thinks the flag protects them would otherwise get.
+    #[tokio::test]
+    async fn an_approval_digest_key_passed_to_build_coordinator_produces_a_v6_digest() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state_path = dir.path().join("changeset-state.json");
+        let key = b"a-sufficiently-long-test-key".as_slice();
+
+        let coordinator = build_coordinator(
+            Some(&state_path),
+            Duration::from_secs(300),
+            false,
+            None,
+            Some(ApprovalDigestKey::new(key)),
+        )
+        .expect("coordinator with a configured key");
+
+        let created = coordinator
+            .create_change_set(
+                "home".to_string(),
+                vec![serde_json::json!({"action": "set", "target": "/test"})],
+                "alice".to_string(),
+                format!("sha256:{}", "0".repeat(64)),
+                "policy-sig".to_string(),
+            )
+            .await
+            .expect("create");
+        coordinator
+            .approve_change_set(
+                created.change_set_id.clone(),
+                "home".to_string(),
+                "bob".to_string(),
+                created.digest.clone(),
+                mecmcp_audit::ActorType::Human,
+            )
+            .await
+            .expect("approve");
+
+        let state = mecmcp_changeset::persistence::read_state_with_key(
+            &state_path,
+            limits().max_state_bytes,
+            Some(key),
+        )
+        .expect("read back with the same key");
+        let approval = state.change_sets[&created.change_set_id]
+            .approval
+            .as_ref()
+            .expect("approval");
+        assert_eq!(
+            approval.digest_version, 6,
+            "a key passed through build_coordinator must produce a v6 (keyed) digest, not the \
+             unkeyed v5 one -- otherwise --approval-digest-key-file does nothing"
+        );
+
+        drop(coordinator);
+        let unkeyed_read = mecmcp_changeset::persistence::read_state_with_key(
+            &state_path,
+            limits().max_state_bytes,
+            None,
+        );
+        assert!(
+            unkeyed_read.is_err(),
+            "a v6 digest produced through build_coordinator must not verify without the key"
+        );
     }
 }

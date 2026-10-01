@@ -328,7 +328,7 @@ fn build_server(endpoint: &str, ca_pem_path: &std::path::Path) -> UnifiServer {
 
     let registry = Arc::new(ControllerRegistry::load(&controllers_path).expect("load inventory"));
     let coordinator =
-        build_coordinator(None, Duration::from_secs(300), true, None).expect("coordinator");
+        build_coordinator(None, Duration::from_secs(300), true, None, None).expect("coordinator");
     UnifiServer::new(
         registry,
         true,

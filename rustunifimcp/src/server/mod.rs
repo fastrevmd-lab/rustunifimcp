@@ -2776,7 +2776,7 @@ mod tests {
     }
 
     fn coordinator_at(path: Option<&std::path::Path>) -> Arc<ChangesetCoordinator> {
-        crate::changeset_state::build_coordinator(path, Duration::from_secs(300), true, None)
+        crate::changeset_state::build_coordinator(path, Duration::from_secs(300), true, None, None)
             .expect("coordinator")
     }
 
@@ -2850,9 +2850,14 @@ mod tests {
     /// by the lifecycle, not only by this server's own check.
     #[tokio::test]
     async fn a_waiver_is_refused_when_lab_mode_is_off() {
-        let coordinator =
-            crate::changeset_state::build_coordinator(None, Duration::from_secs(300), false, None)
-                .expect("coordinator");
+        let coordinator = crate::changeset_state::build_coordinator(
+            None,
+            Duration::from_secs(300),
+            false,
+            None,
+            None,
+        )
+        .expect("coordinator");
         let record = planned_record("alice", "home", 300);
         let (id, digest) = (record.id.clone(), record.digest.clone());
         coordinator.insert_change_set(record).await.expect("insert");
