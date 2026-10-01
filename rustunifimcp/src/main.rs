@@ -1082,9 +1082,9 @@ mod tests {
         );
     }
 
-    /// A valid key file is loaded, not silently dropped: a key passed through
-    /// to the coordinator must produce the keyed v6 approval digest, not the
-    /// unkeyed v5 one, or `--approval-digest-key-file` does nothing.
+    /// A valid key file is loaded and passed through to the coordinator,
+    /// producing the keyed v6 approval digest rather than the unkeyed v5
+    /// one.
     #[test]
     fn a_valid_approval_digest_key_file_is_loaded() {
         let dir = tempfile::tempdir().unwrap();
@@ -1139,9 +1139,8 @@ mod tests {
         );
     }
 
-    /// `--otel-endpoint` must refuse startup rather than silently dropping
-    /// the export this binary cannot send: `init_audit` used to hardcode
-    /// `otel: None` no matter what the flag said.
+    /// `--otel-endpoint` must refuse startup, since this binary does not
+    /// support sending an OTel export.
     #[test]
     fn otel_endpoint_set_refuses_to_start() {
         let mut args = make_cli(None, None);

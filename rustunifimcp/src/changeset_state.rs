@@ -444,10 +444,8 @@ mod tests {
             .expect("no state file is a valid configuration");
     }
 
-    /// `--approval-digest-key-file` must not be silently ignored: a
-    /// coordinator built with a key via `build_coordinator` has to actually
-    /// produce the keyed v6 approval digest, not the unkeyed v5 one a caller
-    /// who thinks the flag protects them would otherwise get.
+    /// A coordinator built with a key via `build_coordinator` produces the
+    /// keyed v6 approval digest, not the unkeyed v5 one.
     #[tokio::test]
     async fn an_approval_digest_key_passed_to_build_coordinator_produces_a_v6_digest() {
         let dir = tempfile::tempdir().expect("tempdir");
