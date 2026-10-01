@@ -1458,7 +1458,11 @@ impl UnifiServer {
 
     #[tool(
         name = "unifi_stage_change",
-        description = "Stages one or more changes into an existing change set"
+        description = "Stages one or more changes into a draft change set. mecmcp v0.25.0 \
+                        fixes a change set's plan digest at creation, so this can only be \
+                        called once per change_set_id (on the draft from \
+                        unifi_create_change_set); a change set that already has a staged \
+                        plan must be cancelled and recreated with the combined mutations."
     )]
     async fn unifi_stage_change(
         &self,
@@ -1484,50 +1488,38 @@ impl UnifiServer {
             );
         }
 
-        // A draft on its first stage, or a change set already in the store.
-        let draft = self.draft(&args.change_set_id, &args.controller);
-        let existing = match draft {
-            Some(_) => None,
-            None => match self.record_for(&args.change_set_id, &args.controller).await {
-                Ok(record) => Some(record),
-                Err(result) => return *result,
-            },
+        // Only a draft can be staged into. mecmcp-changeset v0.25.0 (MEC-525)
+        // fixes a change set's owner, device and plan digest at creation:
+        // `update_change_set_from` now refuses any write that would change
+        // the digest, which a second stage always would. Refusing a second
+        // stage here, before touching the controller, gives a caller a clear
+        // instruction instead of a coordinator error about a digest they
+        // never named.
+        let Some(draft) = self.draft(&args.change_set_id, &args.controller) else {
+            return match self.record_for(&args.change_set_id, &args.controller).await {
+                Ok(record) if record.state == ChangeSetState::Planned => tool_error(
+                    "this change set already has a staged plan; a change set's plan digest \
+                     is fixed at creation (mecmcp v0.25.0), so it cannot be staged into a \
+                     second time. Cancel it and create a new change set with all the \
+                     mutations you want, or let it expire.",
+                ),
+                Ok(record) => tool_error(format!(
+                    "change set is {} and can no longer be staged into; create a new one",
+                    record.state.as_str()
+                )),
+                Err(result) => *result,
+            };
         };
 
-        // Staging rewrites the plan, and with it the digest an approval binds
-        // to. Allowing it after approval would let a reviewed plan be swapped
-        // for an unreviewed one while the approval stayed attached, which is
-        // the whole reason the digest exists.
-        if let Some(ref record) = existing
-            && record.state != ChangeSetState::Planned
-        {
-            return tool_error(format!(
-                "change set is {} and can no longer be staged into; create a new one",
-                record.state.as_str()
-            ));
-        }
-
-        let (description, owner) = match (&draft, &existing) {
-            (Some(draft), _) => (draft.description.clone(), draft.owner.clone()),
-            (None, Some(record)) => match Self::description_of(record) {
-                Ok(description) => (description, record.owner.clone()),
-                Err(result) => return *result,
-            },
-            (None, None) => unreachable!("one of the two is always present"),
-        };
+        let description = draft.description.clone();
+        let owner = draft.owner.clone();
 
         let client = match self.client_for(&args.controller) {
             Ok(client) => client,
             Err(result) => return *result,
         };
 
-        let mut mutations = match &existing {
-            Some(record) => match Self::plan_of(record) {
-                Ok(plan) => plan.0,
-                Err(result) => return *result,
-            },
-            None => Vec::new(),
-        };
+        let mut mutations = Vec::new();
 
         for spec in args.mutations {
             mutations.push(match spec {
@@ -1562,7 +1554,7 @@ impl UnifiServer {
         };
 
         let staged_count = mutations.len();
-        let base = existing.unwrap_or_else(|| ChangeSetRecord {
+        let base = ChangeSetRecord {
             id: args.change_set_id.clone(),
             owner,
             device: args.controller.clone(),
@@ -1580,7 +1572,7 @@ impl UnifiServer {
             preview: None,
             task_id: None,
             apply_without_handle: false,
-        });
+        };
 
         let staged = match Self::with_plan(base, &mutations, &preimage, &description) {
             Ok(record) => record,
@@ -1602,43 +1594,27 @@ impl UnifiServer {
         // neither ordering of the two is safe on its own.
         let _publishing = self.plan_lock.lock().await;
 
-        if draft.is_some() {
-            // The plan exists now, so the change set does too.
-            // `insert_change_set` is what enforces one pending set per
-            // principal per controller.
-            if let Err(error) = self.coordinator.insert_change_set(staged).await {
-                return tool_error(format!(
-                    "failed to store change set ({}): {}",
-                    error.field(),
-                    error.message()
-                ));
-            }
-            self.release_draft(&args.change_set_id);
-        } else if let Err(error) = self
-            // Conditional on the state still being `Planned`. An unconditional
-            // write would let a concurrent approval be overwritten by a staging
-            // call that read the record before it.
-            .coordinator
-            .update_change_set_from(ChangeSetState::Planned, staged)
-            .await
-        {
+        // The plan exists now, so the change set does too. `insert_change_set`
+        // is what enforces one pending set per principal per controller.
+        // `unifi_stage_change` never updates an existing record -- the guard
+        // above already refused that, since mecmcp v0.25.0 would reject the
+        // digest change anyway.
+        if let Err(error) = self.coordinator.insert_change_set(staged).await {
             return tool_error(format!(
-                "failed to update change set ({}): {}",
+                "failed to store change set ({}): {}",
                 error.field(),
                 error.message()
             ));
         }
+        self.release_draft(&args.change_set_id);
 
         // After the write, so a write that failed leaves no proposal for a
         // plan that never landed. Safe to be second only because the lock is
         // still held.
         //
-        // On every stage, not only the first: the coordinator emits this from
-        // `create_change_set`, which this server cannot use because that call
-        // wants the actions up front and a change set here exists before
-        // anything is staged into it. Without a fresh proposal the recorder
-        // keeps the first stage's digest, and the approval and apply records
-        // copy it -- attesting to a plan other than the one approved.
+        // The coordinator emits this from `create_change_set`, which this
+        // server cannot use because that call wants the actions up front and
+        // a change set here exists before anything is staged into it.
         if let Some(recorder) = self.evidence.as_ref() {
             recorder.proposal(
                 &args.change_set_id,
