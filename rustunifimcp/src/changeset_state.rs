@@ -495,7 +495,7 @@ mod tests {
         assert_eq!(
             approval.digest_version, 6,
             "a key passed through build_coordinator must produce a v6 (keyed) digest, not the \
-             unkeyed v5 one -- otherwise --approval-digest-key-file does nothing"
+             unkeyed v5 one"
         );
 
         drop(coordinator);

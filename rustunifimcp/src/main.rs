@@ -286,11 +286,9 @@ fn init_audit(
 
 /// Load `--approval-digest-key-file`, if set.
 ///
-/// `None` keeps the change-set coordinator on the unkeyed v5 approval digest
-/// (today's default). Propagating the error on a bad path rather than
-/// swallowing it matters here: a deployment that set this flag believes the
-/// digest is keyed, and starting up anyway with no key (silently falling back
-/// to unkeyed) would make that belief false.
+/// `None` keeps the change-set coordinator on the unkeyed v5 approval
+/// digest. A load error is a hard startup failure, not a fallback to
+/// unkeyed.
 fn load_approval_digest_key(
     path: Option<&std::path::Path>,
 ) -> Result<Option<mecmcp_changeset::ApprovalDigestKey>> {
@@ -1103,9 +1101,7 @@ mod tests {
     }
 
     /// A key file that fails `mecmcp-changeset`'s checks (here: too short)
-    /// must fail startup, not fall back to running unkeyed. Silently ignoring
-    /// an invalid key would leave the operator believing the digest is keyed
-    /// when it is not.
+    /// must fail startup rather than falling back to running unkeyed.
     #[test]
     fn a_too_short_approval_digest_key_file_fails_closed() {
         let dir = tempfile::tempdir().unwrap();
@@ -1125,8 +1121,7 @@ mod tests {
         );
     }
 
-    /// A missing key file must fail startup rather than silently starting
-    /// unkeyed -- the operator asked for a keyed digest and typo'd the path.
+    /// A missing key file must fail startup rather than starting unkeyed.
     #[test]
     fn a_missing_approval_digest_key_file_fails_closed() {
         let error = load_approval_digest_key(Some(std::path::Path::new(
