@@ -269,6 +269,87 @@ fn sighup_reopens_the_audit_file_for_lossless_rotation() {
     let _ = wait_with_timeout(child, Duration::from_secs(10));
 }
 
+/// Starting with `--audit-hmac-key-file` pointing at a path that does not
+/// exist yet must create it: 64 lowercase hex characters (a 32-byte key) at
+/// mode 0600, mirroring `packaging/lxc/install.sh`'s own key-generation step
+/// so the container image converges on the same keyed-audit posture instead
+/// of shipping unkeyed by omission.
+#[test]
+fn a_missing_hmac_key_file_is_generated() {
+    let controllers = controllers_file();
+    let key_dir = tempfile::tempdir().expect("key dir");
+    let key_path = key_dir.path().join("audit-hmac.key");
+
+    let output = run(&[
+        "--controllers-file",
+        controllers.path().to_str().expect("utf-8 path"),
+        "--lab-mode",
+        "--audit-redact",
+        "host=hmac",
+        "--audit-hmac-key-file",
+        key_path.to_str().expect("utf-8 path"),
+    ]);
+
+    assert!(
+        key_path.exists(),
+        "the HMAC key file must be generated when absent; stderr:\n{}",
+        stderr_of(&output)
+    );
+    let contents = std::fs::read_to_string(&key_path).expect("read key file");
+    assert_eq!(
+        contents.len(),
+        64,
+        "the generated key must be 32 bytes hex-encoded, got {} chars: {contents}",
+        contents.len()
+    );
+    assert!(
+        contents.chars().all(|c| c.is_ascii_hexdigit()),
+        "the generated key must be hex, got: {contents}"
+    );
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&key_path)
+            .expect("stat key file")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "the generated key file must be mode 0600, got {mode:o}"
+        );
+    }
+}
+
+/// An existing, non-empty key file must never be overwritten -- rotating it
+/// silently would break verification of every audit record signed under the
+/// old key.
+#[test]
+fn an_existing_hmac_key_file_is_left_untouched() {
+    let controllers = controllers_file();
+    let key_dir = tempfile::tempdir().expect("key dir");
+    let key_path = key_dir.path().join("audit-hmac.key");
+    std::fs::write(&key_path, "deadbeef").expect("write pre-existing key");
+    secure(&key_path);
+
+    let _ = run(&[
+        "--controllers-file",
+        controllers.path().to_str().expect("utf-8 path"),
+        "--lab-mode",
+        "--audit-redact",
+        "host=hmac",
+        "--audit-hmac-key-file",
+        key_path.to_str().expect("utf-8 path"),
+    ]);
+
+    let contents = std::fs::read_to_string(&key_path).expect("read key file");
+    assert_eq!(
+        contents, "deadbeef",
+        "a pre-existing non-empty key file must not be rotated, got: {contents}"
+    );
+}
+
 fn poll_until(timeout: Duration, mut condition: impl FnMut() -> bool) {
     let start = std::time::Instant::now();
     loop {
