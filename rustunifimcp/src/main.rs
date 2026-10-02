@@ -314,14 +314,20 @@ fn init_audit(
             .map_err(|error| anyhow::anyhow!("invalid --audit-redact: {error}"))?,
         )
     };
+    // This binary does not build mecmcp-audit's `otel` feature, so exporting
+    // is not possible; fail startup rather than hardcoding `otel: None` below
+    // and silently dropping the operator's requested export.
+    if args.otel_endpoint.is_some() {
+        anyhow::bail!(
+            "--otel-endpoint requires a build of rustunifimcp with mecmcp-audit's `otel` \
+             feature, which this binary does not enable"
+        );
+    }
     let audit_config = mecmcp_audit::AuditConfig {
         format: mecmcp_audit::AuditFormat::parse(&args.audit_format),
         audit_log_file: args.audit_log_file.clone(),
         redaction,
         journald: args.audit_journald,
-        // This server does not wire OTel through to mecmcp; keep it off
-        // rather than turn on telemetry as a side effect of the mecmcp
-        // v0.25.0 pin bump that added this field.
         otel: None,
     };
 
@@ -330,6 +336,21 @@ fn init_audit(
         Ok(None) => Ok(None),
         Err(e) => Err(anyhow::anyhow!("initializing audit tracing: {e}")),
     }
+}
+
+/// Load `--approval-digest-key-file`, if set.
+///
+/// `None` keeps the change-set coordinator on the unkeyed v5 approval
+/// digest. A load error is a hard startup failure, not a fallback to
+/// unkeyed.
+fn load_approval_digest_key(
+    path: Option<&std::path::Path>,
+) -> Result<Option<mecmcp_changeset::ApprovalDigestKey>> {
+    path.map(|path| {
+        mecmcp_changeset::ApprovalDigestKey::load_from_file(path)
+            .with_context(|| format!("loading --approval-digest-key-file {}", path.display()))
+    })
+    .transpose()
 }
 
 /// A token-mutation audit record, built before the mutation and emitted after.
@@ -683,11 +704,14 @@ async fn run_inner() -> Result<()> {
     let recorder_for_coordinator = recorder.clone();
 
     // Build the change-set coordinator.
+    let approval_digest_key =
+        load_approval_digest_key(cli.common.approval_digest_key_file.as_deref())?;
     let coordinator = rustunifimcp::changeset_state::build_coordinator(
         cli.state_file.as_deref(),
         std::time::Duration::from_secs(cli.approval_timeout_secs),
         cli.lab_mode(),
         recorder_for_coordinator,
+        approval_digest_key,
     )
     .map_err(|e| anyhow::anyhow!("failed to initialize the change-set coordinator: {e}"))?;
 
@@ -1099,6 +1123,90 @@ mod tests {
         assert!(result.is_err());
     }
 
+    /// No `--approval-digest-key-file` keeps the coordinator unkeyed, same as
+    /// today.
+    #[test]
+    fn no_approval_digest_key_file_is_fine() {
+        assert!(
+            load_approval_digest_key(None)
+                .expect("no path is not an error")
+                .is_none()
+        );
+    }
+
+    /// A valid key file is loaded and passed through to the coordinator,
+    /// producing the keyed v6 approval digest rather than the unkeyed v5
+    /// one.
+    #[test]
+    fn a_valid_approval_digest_key_file_is_loaded() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("key");
+        std::fs::write(&path, b"a-sufficiently-long-test-key-value").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+
+        let key = load_approval_digest_key(Some(&path))
+            .expect("a valid key file must load")
+            .expect("Some(path) must produce Some(key)");
+        assert_eq!(&*key, b"a-sufficiently-long-test-key-value");
+    }
+
+    /// A key file that fails `mecmcp-changeset`'s checks (here: too short)
+    /// must fail startup rather than falling back to running unkeyed.
+    #[test]
+    fn a_too_short_approval_digest_key_file_fails_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("key");
+        std::fs::write(&path, b"short").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+
+        let error = load_approval_digest_key(Some(&path))
+            .expect_err("a too-short key file must be refused, not silently skipped");
+        assert!(
+            error.to_string().contains("approval-digest-key-file"),
+            "{error}"
+        );
+    }
+
+    /// A missing key file must fail startup rather than starting unkeyed.
+    #[test]
+    fn a_missing_approval_digest_key_file_fails_closed() {
+        let error = load_approval_digest_key(Some(std::path::Path::new(
+            "/nonexistent/does-not-exist/key",
+        )))
+        .expect_err("a missing key file must be refused, not silently skipped");
+        assert!(
+            error.to_string().contains("approval-digest-key-file"),
+            "{error}"
+        );
+    }
+
+    /// `--otel-endpoint` must refuse startup, since this binary does not
+    /// support sending an OTel export.
+    #[test]
+    fn otel_endpoint_set_refuses_to_start() {
+        let mut args = make_cli(None, None);
+        args.otel_endpoint = Some("http://127.0.0.1:4318".to_owned());
+
+        let error = init_audit(&args).expect_err("--otel-endpoint must be refused by this binary");
+        assert!(error.to_string().contains("--otel-endpoint"), "{error}");
+    }
+
+    /// No `--otel-endpoint` keeps today's behaviour: audit initializes with
+    /// `otel: None`.
+    #[test]
+    fn no_otel_endpoint_starts_normally() {
+        let args = make_cli(None, None);
+        init_audit(&args).expect("no --otel-endpoint must not be refused");
+    }
+
     #[test]
     fn malformed_key_fails() {
         let cert_pem = generate_test_cert().0;
@@ -1448,6 +1556,7 @@ mod tests {
             std::time::Duration::from_secs(300),
             false,
             None,
+            None,
         )
         .unwrap();
 
@@ -1508,6 +1617,7 @@ mod tests {
             None,
             std::time::Duration::from_secs(300),
             false,
+            None,
             None,
         )
         .unwrap();
@@ -1619,6 +1729,7 @@ mod tests {
             None,
             std::time::Duration::from_secs(300),
             false,
+            None,
             None,
         )
         .unwrap();

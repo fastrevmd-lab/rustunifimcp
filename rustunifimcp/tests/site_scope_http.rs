@@ -101,6 +101,7 @@ async fn start_server(
         Duration::from_secs(300),
         false,
         None,
+        None,
     )
     .expect("coordinator");
     let handler = UnifiServer::new(

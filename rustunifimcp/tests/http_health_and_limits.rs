@@ -48,6 +48,7 @@ async fn start_server() -> (String, tokio_util::sync::CancellationToken) {
         std::time::Duration::from_secs(300),
         false,
         None,
+        None,
     )
     .expect("build coordinator");
     let handler = UnifiServer::new(

@@ -82,6 +82,7 @@ async fn start_server_with_lab_mode(
         Duration::from_secs(300),
         lab_mode,
         None,
+        None,
     )
     .expect("coordinator");
     let handler = UnifiServer::new(
